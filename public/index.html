@@ -255,7 +255,7 @@ const HOUSES = [
 ];
 
 const TOKEN_KEY = 'ezone_staff_token_v1';
-const {cost, houseCost: calcHouseCost, houseGross, avgPct} = window.EZONE_CALC;
+const {cost: calcCost, houseCost: calcHouseCost, houseGross: calcHouseGross, avgPct: calcAvgPct} = window.EZONE_CALC;
 
 let DATA = {ramot:[], asher:[], ofroni:[], rehab:[]};
 let HISTORY = [];
@@ -477,7 +477,7 @@ function houseView(id){
           <span style="font-size:13px;font-weight:600">${e.pct}%</span>
         </div>
       </td>
-      <td class="money">${fmt(cost(e))}</td>
+      <td class="money">${fmt(calcCost(e))}</td>
       <td class="note-cell">${e.notes?escapeHtml(e.notes):'<span style="color:#B6B0A0">—</span>'}${isCover?'<span class="cover-flag">כיסוי</span>':''}</td>
       <td>
         <div class="row-actions">
@@ -508,12 +508,12 @@ function houseView(id){
     </div>
     <div class="stat">
       <div class="lbl">סה״כ ברוטו במשרה מלאה</div>
-      <div class="val">${fmt(houseGross(list))}</div>
+      <div class="val">${fmt(calcHouseGross(list))}</div>
       <div class="sub">ללא שקלול חלקיות</div>
     </div>
     <div class="stat">
       <div class="lbl">חלקיות ממוצעת</div>
-      <div class="val">${avgPct(list)}%</div>
+      <div class="val">${calcAvgPct(list)}%</div>
     </div>
   </div>
 
