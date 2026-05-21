@@ -310,29 +310,85 @@ tbody tr:hover{
 }
 .hb-stats .bonus-line{font-size:11px;color:var(--accent-1);font-weight:600;margin-top:6px}
 
-/* History (ended events list) */
-.hist-item{
-  display:flex;
-  align-items:flex-start;
-  gap:14px;
+/* Coverage event row — used for active, ended, and incoming-coverage lists.
+   Primary line: [name] [badge] [source] [arrow] [target] ... [optional end button]
+   Secondary line: [reason pill] · [dates] · [במקום] · [תוספת]
+   Source goes first in DOM so RTL puts source on the RIGHT, target on LEFT
+   with the ← arrow pointing toward the target. */
+.event-list{padding:6px 22px}
+.event-row{
   padding:16px 0;
   border-bottom:1px solid var(--line);
 }
-.hist-item:last-child{border-bottom:none}
-.hist-dot{
-  width:10px;
-  height:10px;
-  border-radius:99px;
-  background:var(--accent-2);
-  margin-top:6px;
-  flex-shrink:0;
-  box-shadow:0 0 0 4px rgba(239,159,39,0.15);
+.event-row:last-child{border-bottom:none}
+.event-main{
+  display:flex;
+  align-items:center;
+  flex-wrap:wrap;
+  gap:10px 14px;
+  margin-bottom:8px;
 }
-.hist-body{flex:1}
-.hist-body b{font-weight:600;color:var(--ink);font-size:15px}
-.hist-meta{font-size:12px;color:var(--muted);margin-top:4px}
-.hist-arrow{color:var(--accent-1);font-weight:700;direction:rtl;display:inline-block;margin:0 4px}
-.hist-reason{font-size:12px;color:var(--ink-soft);font-weight:500;margin-top:4px}
+.event-main .name{
+  font-weight:600;
+  color:var(--ink);
+  font-size:15px;
+}
+.event-badge{
+  display:inline-block;
+  font-size:11px;
+  font-weight:700;
+  background:var(--grad);
+  color:var(--accent-deep);
+  padding:3px 12px;
+  border-radius:999px;
+  letter-spacing:0.02em;
+}
+.event-route{
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  color:var(--ink-soft);
+  font-size:14px;
+  font-weight:500;
+}
+.event-route .arrow{
+  color:var(--accent-1);
+  font-weight:700;
+  font-size:15px;
+}
+.event-action{margin-inline-start:auto}
+.event-meta{
+  display:flex;
+  flex-wrap:wrap;
+  gap:6px 14px;
+  font-size:12px;
+  color:var(--muted);
+  align-items:center;
+}
+.event-meta .reason-pill{
+  background:var(--bg-elevated);
+  color:var(--ink-soft);
+  padding:3px 10px;
+  border-radius:999px;
+  font-weight:600;
+  border:1px solid var(--line);
+  font-size:11px;
+}
+.event-meta .event-dates{
+  font-variant-numeric:tabular-nums;
+  white-space:nowrap;
+  color:var(--ink-soft);
+}
+.event-meta .event-bonus{color:var(--accent-1);font-weight:600}
+.event-detail{
+  font-size:12px;
+  color:var(--ink-soft);
+  margin-top:6px;
+  font-style:italic;
+}
+
+.section-note{font-size:12px;color:var(--muted);margin-top:10px;line-height:1.5}
+.cover-meta{font-size:11px;color:var(--ink-soft);margin-right:6px;font-weight:600}
 
 /* Overlay & modal */
 .overlay{
@@ -633,11 +689,11 @@ tbody tr:hover{
         <textarea id="cv_reasonDetail" placeholder="פירוט חופשי"></textarea>
       </div>
       <div class="field">
-        <label>מחליף/ה את</label>
+        <label>במקום</label>
         <select id="cv_coversEmployeeId">
           <option value="">— ללא —</option>
         </select>
-        <div class="hint">בחירה אופציונלית של עובד/ת מהבית המתארח שאותו/ה מחליפים</div>
+        <div class="hint">בחירה אופציונלית — האדם בבית המתארח שמוחלף בעקבות המעבר</div>
       </div>
       <div class="field">
         <label>תוספת תשלום למעבר (₪)</label>
@@ -774,7 +830,7 @@ async function submitPin(){
     hidePinGate();
     await boot();
   } catch(e){
-    errEl.textContent = 'תקלת רשת. נסי שוב.';
+    errEl.textContent = 'תקלת רשת. נא לנסות שוב.';
     btn.disabled = false;
   }
 }
@@ -782,7 +838,14 @@ async function submitPin(){
 /* ---------- helpers ---------- */
 
 const fmt = n => '₪'+Number(n||0).toLocaleString('he-IL');
-const fmtDate = s => s || '';
+// fmtDate: server stores ISO YYYY-MM-DD; UI displays DD/MM/YYYY. Plain string
+// reformat (no Date parsing) so timezone never shifts the day.
+function fmtDate(s){
+  const str = String(s||'').trim();
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(str);
+  if (!m) return str;
+  return `${m[3]}/${m[2]}/${m[1]}`;
+}
 const houseName = id => (HOUSES.find(h=>h.id===id)||{}).name||id;
 const houseMgr  = id => (HOUSES.find(h=>h.id===id)||{}).mgr||'';
 function houseCount(id){ return (DATA[id]||[]).length; }
@@ -820,12 +883,40 @@ function setBusy(btnId, busy, busyLabel){
   if (!b) return;
   if (busy){
     b.dataset.label = b.textContent;
-    b.textContent = busyLabel || 'שומר…';
+    b.textContent = busyLabel || 'שמירה…';
     b.disabled = true;
   } else {
     if (b.dataset.label) b.textContent = b.dataset.label;
     b.disabled = false;
   }
+}
+
+// One row used for every coverage-event display (active, ended, incoming).
+// DOM order: source FIRST, then arrow, then target — so RTL renders
+// `target ← source` visually, with the ← pointing toward the target.
+function renderEventRow(ev, withEndButton){
+  const coversName = ev.coversEmployeeId ? empName(ev.coversEmployeeId) : '';
+  const dates = `${escapeHtml(fmtDate(ev.startDate))} – ${escapeHtml(fmtDate(ev.endDate))}`;
+  return `
+  <div class="event-row">
+    <div class="event-main">
+      <span class="name">${escapeHtml(ev.employeeName)}</span>
+      <span class="event-badge">החלפה</span>
+      <span class="event-route">
+        <span>${escapeHtml(houseName(ev.homeHouse))}</span>
+        <span class="arrow">←</span>
+        <span>${escapeHtml(houseName(ev.hostHouse))}</span>
+      </span>
+      ${withEndButton ? `<button class="btn btn-sm event-action" onclick="endCover('${ev.id}','${escapeHtml(ev.employeeName)}')">סיום</button>` : ''}
+    </div>
+    <div class="event-meta">
+      <span class="reason-pill">${escapeHtml(ev.reasonType)}</span>
+      <span class="event-dates">${dates}</span>
+      ${coversName ? `<span>במקום: ${escapeHtml(coversName)}</span>` : ''}
+      ${ev.bonusAmount ? `<span class="event-bonus">תוספת: ${fmt(ev.bonusAmount)}</span>` : ''}
+    </div>
+    ${ev.reasonDetail ? `<div class="event-detail">${escapeHtml(ev.reasonDetail)}</div>` : ''}
+  </div>`;
 }
 
 /* ---------- rendering ---------- */
@@ -872,29 +963,12 @@ function centralView(){
     </div>`;
   }).join('');
 
-  const activeRows = active.length ? active.map(ev=>`
-    <tr>
-      <td class="emp-name">${escapeHtml(ev.employeeName)}</td>
-      <td>${escapeHtml(houseName(ev.homeHouse))}</td>
-      <td>${escapeHtml(houseName(ev.hostHouse))}</td>
-      <td>${ev.coversEmployeeId ? escapeHtml(empName(ev.coversEmployeeId)) : '<span style="color:#B6B0A0">—</span>'}</td>
-      <td>${escapeHtml(ev.reasonType)}${ev.reasonDetail?`<div class="hist-meta">${escapeHtml(ev.reasonDetail)}</div>`:''}</td>
-      <td>${escapeHtml(fmtDate(ev.startDate))}</td>
-      <td>${escapeHtml(fmtDate(ev.endDate))}</td>
-      <td class="money">${ev.bonusAmount?fmt(ev.bonusAmount):'<span style="color:#B6B0A0">—</span>'}</td>
-      <td><button class="btn btn-sm" onclick="endCover('${ev.id}','${escapeHtml(ev.employeeName)}')">סיים</button></td>
-    </tr>`).join('') : `<tr><td colspan="9"><div class="empty">אין כרגע אירועי כיסוי פעילים</div></td></tr>`;
-
-  const endedRows = ended.length ? ended.map(ev=>`
-    <div class="hist-item">
-      <div class="hist-dot"></div>
-      <div class="hist-body">
-        <b>${escapeHtml(ev.employeeName)}</b> כיסה/כיסתה
-        <span class="hist-arrow">מ${escapeHtml(houseName(ev.homeHouse))} ל${escapeHtml(houseName(ev.hostHouse))}</span>
-        <div class="hist-meta">${escapeHtml(fmtDate(ev.startDate))} – ${escapeHtml(fmtDate(ev.endDate))} · ${escapeHtml(ev.reasonType)}${ev.bonusAmount?` · בונוס ${fmt(ev.bonusAmount)}`:''}</div>
-        ${ev.reasonDetail?`<div class="hist-reason">${escapeHtml(ev.reasonDetail)}</div>`:''}
-      </div>
-    </div>`).join('') : `<div class="empty">עדיין לא נסגרו אירועי כיסוי</div>`;
+  const activeList = active.length
+    ? active.map(ev => renderEventRow(ev, true)).join('')
+    : `<div class="empty">אין כרגע אירועי כיסוי פעילים</div>`;
+  const endedList = ended.length
+    ? ended.map(ev => renderEventRow(ev, false)).join('')
+    : `<div class="empty">עדיין לא נסגרו אירועי כיסוי</div>`;
 
   return `
   <div class="head">
@@ -921,7 +995,7 @@ function centralView(){
     <div class="stat">
       <div class="lbl">אירועי כיסוי פעילים</div>
       <div class="val">${active.length}</div>
-      <div class="sub">היום ${escapeHtml(today)}</div>
+      <div class="sub">היום ${escapeHtml(fmtDate(today))}</div>
     </div>
   </div>
 
@@ -936,15 +1010,7 @@ function centralView(){
       <span class="count-pill">${active.length}</span>
     </div>
     <div class="tablecard accent-edge">
-      <div class="table-scroll">
-      <table>
-        <thead><tr>
-          <th>עובד/ת</th><th>מבית</th><th>לבית</th><th>מחליף/ה את</th>
-          <th>סיבה</th><th>מתאריך</th><th>עד תאריך</th><th>תוספת</th><th></th>
-        </tr></thead>
-        <tbody>${activeRows}</tbody>
-      </table>
-      </div>
+      <div class="event-list">${activeList}</div>
     </div>
   </div>
 
@@ -953,7 +1019,9 @@ function centralView(){
       <h2>אירועי כיסוי קודמים</h2>
       <span class="count-pill">${ended.length}</span>
     </div>
-    <div class="tablecard" style="padding:8px 22px">${endedRows}</div>
+    <div class="tablecard">
+      <div class="event-list">${endedList}</div>
+    </div>
   </div>`;
 }
 
@@ -967,7 +1035,7 @@ function houseView(id){
   const rows = list.length ? list.map(e=>{
     const outgoing = calcActiveOutgoingFor(EVENTS, e.id, today);
     const badge = outgoing
-      ? `<span class="cover-flag">כרגע עוזר/ת ב${escapeHtml(houseName(outgoing.hostHouse))} עד ${escapeHtml(fmtDate(outgoing.endDate))}</span>`
+      ? `<span class="cover-flag">החלפה</span><span class="cover-meta">ב${escapeHtml(houseName(outgoing.hostHouse))} · עד ${escapeHtml(fmtDate(outgoing.endDate))}</span>`
       : '';
     return `
     <tr>
@@ -985,41 +1053,23 @@ function houseView(id){
       <td>
         <div class="row-actions">
           <button class="btn btn-sm" onclick="openCover('${id}','${e.id}')">תיעוד מעבר</button>
-          <button class="btn btn-sm" onclick="openEmp('${id}','${e.id}')">ערוך</button>
-          <button class="btn btn-sm btn-ghost" onclick="delEmp('${id}','${e.id}')">מחק</button>
+          <button class="btn btn-sm" onclick="openEmp('${id}','${e.id}')">עריכה</button>
+          <button class="btn btn-sm btn-ghost" onclick="delEmp('${id}','${e.id}')">מחיקה</button>
         </div>
       </td>
     </tr>`;
-  }).join('') : `<tr><td colspan="7"><div class="empty">אין עובדים בבית זה. לחצי "הוסף עובד" כדי להתחיל.</div></td></tr>`;
+  }).join('') : `<tr><td colspan="7"><div class="empty">אין עובדים בבית זה. ניתן להוסיף עובד חדש בכפתור למעלה.</div></td></tr>`;
 
   const incomingSection = incoming.length ? `
   <div class="section">
     <div class="section-head">
-      <h2>עוזרים זמניים / כיסוי</h2>
+      <h2>כיסוי זמני</h2>
       <span class="count-pill">${incoming.length}</span>
     </div>
     <div class="tablecard accent-edge">
-      <div class="table-scroll">
-      <table>
-        <thead><tr>
-          <th>שם</th><th>מהבית</th><th>מחליף/ה את</th><th>סיבה</th>
-          <th>מתאריך</th><th>עד תאריך</th><th>תוספת</th><th></th>
-        </tr></thead>
-        <tbody>${incoming.map(ev=>`
-          <tr>
-            <td class="emp-name">${escapeHtml(ev.employeeName)}</td>
-            <td>${escapeHtml(houseName(ev.homeHouse))}</td>
-            <td>${ev.coversEmployeeId ? escapeHtml(empName(ev.coversEmployeeId)) : '<span style="color:#B6B0A0">—</span>'}</td>
-            <td>${escapeHtml(ev.reasonType)}${ev.reasonDetail?`<div class="hist-meta">${escapeHtml(ev.reasonDetail)}</div>`:''}</td>
-            <td>${escapeHtml(fmtDate(ev.startDate))}</td>
-            <td>${escapeHtml(fmtDate(ev.endDate))}</td>
-            <td class="money">${ev.bonusAmount?fmt(ev.bonusAmount):'<span style="color:#B6B0A0">—</span>'}</td>
-            <td><button class="btn btn-sm" onclick="endCover('${ev.id}','${escapeHtml(ev.employeeName)}')">סיים</button></td>
-          </tr>`).join('')}</tbody>
-      </table>
-      </div>
+      <div class="event-list">${incoming.map(ev => renderEventRow(ev, true)).join('')}</div>
     </div>
-    <div class="hist-meta" style="margin-top:10px">השכר הבסיסי של עובדים אלו נספר בעלות הבית שבו הם משויכים. רק התוספת מופיעה כאן.</div>
+    <div class="section-note">השכר הבסיסי של עובדים אלו נספר בעלות הבית שבו הם משויכים. רק התוספת מופיעה כאן.</div>
   </div>` : '';
 
   return `
@@ -1055,7 +1105,7 @@ function houseView(id){
   <div class="section">
     <div class="section-head">
       <h2>מצבת עובדים</h2>
-      <button class="btn btn-primary" onclick="openEmp('${id}')">+ הוסף עובד</button>
+      <button class="btn btn-primary" onclick="openEmp('${id}')">+ עובד חדש</button>
     </div>
     <div class="tablecard">
       <div class="table-scroll">
@@ -1100,7 +1150,7 @@ function onRoleChange(){
     inp.placeholder = 'לדוגמה: אמנות, קבוצות, CBT';
   } else if (role === 'אחר'){
     wrap.classList.remove('hidden');
-    lbl.textContent = 'פרט/י תפקיד';
+    lbl.textContent = 'פירוט תפקיד';
     inp.placeholder = 'תפקיד חופשי';
   } else {
     wrap.classList.add('hidden');
@@ -1142,10 +1192,10 @@ async function saveEmp(){
   try{
     if(empId){
       await doAction({action:'updateEmployee', house:houseId, id:empId, employee});
-      toast('העובד עודכן');
+      toast('העדכון נשמר');
     } else {
       await doAction({action:'addEmployee', house:houseId, employee});
-      toast('עובד נוסף');
+      toast('ההוספה הושלמה');
     }
     await loadData();
     closeEmp();
@@ -1163,7 +1213,7 @@ async function delEmp(houseId,empId){
     await doAction({action:'deleteEmployee', house:houseId, id:empId});
     await loadData();
     render();
-    toast('העובד נמחק');
+    toast('המחיקה הושלמה');
   } catch(err){
     toast(err.message || 'שגיאה במחיקה', true);
   }
