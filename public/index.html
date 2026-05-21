@@ -291,7 +291,7 @@ const {
   houseCost: calcHouseCost,
   houseGross: calcHouseGross,
   avgPct: calcAvgPct,
-  todayStr,
+  todayStr: calcToday,
   isActive: calcIsActive,
   activeEvents: calcActiveEvents,
   endedEvents: calcEndedEvents,
@@ -457,7 +457,7 @@ function render(){
 }
 
 function centralView(){
-  const today = todayStr();
+  const today = calcToday();
   const active = calcActiveEvents(EVENTS, today);
   const ended = calcEndedEvents(EVENTS, today).slice().reverse();
 
@@ -566,7 +566,7 @@ function centralView(){
 }
 
 function houseView(id){
-  const today = todayStr();
+  const today = calcToday();
   const list = DATA[id] || [];
   const incoming = calcEventsHostedBy(EVENTS, id, today);
   const incomingBonus = calcActiveBonus(EVENTS, id, today);
@@ -792,7 +792,7 @@ function openCover(houseId, empId){
   reasonSel.innerHTML = REASON_TYPES.map(r=>`<option value="${escapeHtml(r)}">${escapeHtml(r)}</option>`).join('');
   document.getElementById('cv_reasonDetail').value = '';
   document.getElementById('cv_bonusAmount').value = '';
-  const today = todayStr();
+  const today = calcToday();
   document.getElementById('cv_startDate').value = today;
   document.getElementById('cv_endDate').value = today;
   onCoverHostChange();
