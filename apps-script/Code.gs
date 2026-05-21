@@ -24,6 +24,16 @@
    Status is derived from dates on read (active iff start <= today
    <= end). Stored status is a hint that gets corrected lazily.
 
+   archive tab:
+     id | employee_id | name | role | role_detail | salary | pct | notes |
+     home_house | termination_date | reason_type | reason_detail | archived_at
+   When an employee is terminated, their snapshot moves here and the
+   row is removed from the home tab. termination_date is the effective
+   last day on payroll: cost continues to count until that date (so a
+   "schedule a termination at end of month" workflow works), then drops
+   to zero. Any active coverage event whose subject is this employee
+   is auto-truncated to terminationDate on save.
+
    history tab (legacy):
      kept untouched as a backup. After running migrateHistoryToEvents()
      once, its rows are also present in events with status='ended'.
@@ -32,6 +42,7 @@
 const HOUSE_IDS = ['ramot', 'asher', 'ofroni', 'rehab'];
 const HISTORY_TAB = 'history';
 const EVENTS_TAB = 'events';
+const ARCHIVE_TAB = 'archive';
 
 const HEADERS_HOUSE = ['id', 'name', 'role', 'salary', 'pct', 'notes', 'role_detail'];
 const HEADERS_HISTORY = ['timestamp', 'name', 'from_house', 'to_house', 'reason_type', 'reason', 'date'];
@@ -39,6 +50,10 @@ const HEADERS_EVENTS = [
   'id', 'employee_id', 'employee_name', 'home_house', 'host_house',
   'start_date', 'end_date', 'reason_type', 'reason_detail',
   'covers_employee_id', 'bonus_amount', 'status', 'created_at',
+];
+const HEADERS_ARCHIVE = [
+  'id', 'employee_id', 'name', 'role', 'role_detail', 'salary', 'pct', 'notes',
+  'home_house', 'termination_date', 'reason_type', 'reason_detail', 'archived_at',
 ];
 
 const ROLE_OPTIONS = [
@@ -48,6 +63,9 @@ const ROLE_OPTIONS = [
 const REASON_TYPES = [
   'חופשה', 'חל״ת', 'מחלה', 'חופשת לידה', 'ניתוח', 'צורך תפעולי', 'אחר',
 ];
+const TERMINATION_REASONS = [
+  'התפטרות', 'פיטורין', 'סיום חוזה', 'מעבר תפקיד', 'אחר',
+];
 const BONUS_MAX = 100000;
 
 // ---------- entry points ----------
@@ -56,7 +74,7 @@ function doGet(e) {
   return handle(e, () => {
     const houses = {};
     HOUSE_IDS.forEach(h => { houses[h] = readHouse(h); });
-    return { houses, events: readEvents() };
+    return { houses, events: readEvents(), archive: readArchive() };
   });
 }
 
@@ -64,11 +82,12 @@ function doPost(e) {
   return handle(e, () => {
     const body = parseBody(e);
     switch (body.action) {
-      case 'addEmployee':    return addEmployee(body);
-      case 'updateEmployee': return updateEmployee(body);
-      case 'deleteEmployee': return deleteEmployee(body);
-      case 'startCoverage':  return startCoverage(body);
-      case 'endCoverage':    return endCoverage(body);
+      case 'addEmployee':       return addEmployee(body);
+      case 'updateEmployee':    return updateEmployee(body);
+      case 'deleteEmployee':    return deleteEmployee(body);
+      case 'startCoverage':     return startCoverage(body);
+      case 'endCoverage':       return endCoverage(body);
+      case 'terminateEmployee': return terminateEmployee(body);
       default: throw httpError(400, 'unknown action');
     }
   });
@@ -316,6 +335,122 @@ function endCoverage(body) {
   }
 }
 
+// Reads the archive tab. Each row is a terminated-employee snapshot
+// including the salary/pct at termination time, so cost reconstruction
+// for pending-termination periods works without joining back to the
+// active roster.
+function readArchive() {
+  const sh = ss().getSheetByName(ARCHIVE_TAB);
+  if (!sh) return []; // tab might not exist yet on first deploy
+  const values = sh.getDataRange().getValues();
+  if (values.length < 2) return [];
+  return values.slice(1)
+    .filter(r => String(r[0] || '').trim() !== '')
+    .map(r => ({
+      id: String(r[0]),
+      employeeId: String(r[1] || ''),
+      name: String(r[2] || ''),
+      role: String(r[3] || ''),
+      roleDetail: String(r[4] || ''),
+      salary: Number(r[5]) || 0,
+      pct: clampPct(Number(r[6])),
+      notes: String(r[7] || ''),
+      homeHouse: String(r[8] || ''),
+      terminationDate: formatDateCell(r[9]),
+      reasonType: String(r[10] || ''),
+      reasonDetail: String(r[11] || ''),
+      archivedAt: r[12] instanceof Date ? r[12].toISOString() : String(r[12] || ''),
+    }));
+}
+
+function terminateEmployee(body) {
+  const house = body.house;
+  assertHouse(house);
+  const id = String(body.id || '');
+  if (!id) throw httpError(400, 'missing id');
+  const terminationDate = validateRequiredDate(body.terminationDate, 'terminationDate');
+  const reasonTypeRaw = String(body.reasonType || '').trim();
+  if (reasonTypeRaw && TERMINATION_REASONS.indexOf(reasonTypeRaw) < 0) {
+    throw httpError(400, 'bad reasonType');
+  }
+  const reasonDetail = String(body.reasonDetail || '').trim().slice(0, 500);
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    // Snapshot the employee row from the home tab.
+    const homeSh = sheetByName(house);
+    const row = findRow(homeSh, 0, id);
+    if (row < 0) throw httpError(404, 'employee not found');
+    const r = homeSh.getRange(row, 1, 1, HEADERS_HOUSE.length).getValues()[0];
+    const snapshot = {
+      id: String(r[0]),
+      name: String(r[1] || ''),
+      role: String(r[2] || ''),
+      salary: Number(r[3]) || 0,
+      pct: clampPct(Number(r[4])),
+      notes: String(r[5] || ''),
+      roleDetail: String(r[6] || ''),
+    };
+
+    // Auto-truncate any active coverage event where the subject is this
+    // employee and the current end_date is after terminationDate. If the
+    // current end_date is already on or before terminationDate, leave it.
+    const evSh = sheetByName(EVENTS_TAB);
+    const evValues = evSh.getDataRange().getValues();
+    const today = todayLocal();
+    let autoEnded = 0;
+    for (let i = 1; i < evValues.length; i++) {
+      const ev = evValues[i];
+      if (String(ev[0] || '').trim() === '') continue;
+      if (String(ev[1]) !== id) continue;
+      const stored = String(ev[11] || '').trim();
+      if (stored !== 'active') continue;
+      const evEnd = formatDateCell(ev[6]);
+      if (!(evEnd > terminationDate)) continue;
+      const newStatus = terminationDate >= today ? 'active' : 'ended';
+      evSh.getRange(i + 1, 7).setValue(terminationDate);
+      evSh.getRange(i + 1, 12).setValue(newStatus);
+      autoEnded++;
+    }
+
+    // Append the archive row.
+    const archId = newId('arch');
+    const archivedAt = new Date().toISOString();
+    const archSh = sheetByName(ARCHIVE_TAB);
+    archSh.appendRow([
+      archId, snapshot.id, snapshot.name, snapshot.role, snapshot.roleDetail,
+      snapshot.salary, snapshot.pct, snapshot.notes,
+      house, terminationDate, reasonTypeRaw, reasonDetail, archivedAt,
+    ]);
+
+    // Remove from the home tab.
+    homeSh.deleteRow(row);
+
+    return {
+      ok: true,
+      archive: {
+        id: archId,
+        employeeId: snapshot.id,
+        name: snapshot.name,
+        role: snapshot.role,
+        roleDetail: snapshot.roleDetail,
+        salary: snapshot.salary,
+        pct: snapshot.pct,
+        notes: snapshot.notes,
+        homeHouse: house,
+        terminationDate,
+        reasonType: reasonTypeRaw,
+        reasonDetail,
+        archivedAt,
+      },
+      autoEndedEvents: autoEnded,
+    };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 // ---------- validation ----------
 
 function assertHouse(id) {
@@ -400,6 +535,7 @@ function setupSheets() {
     .concat([
       { name: HISTORY_TAB, headers: HEADERS_HISTORY },
       { name: EVENTS_TAB, headers: HEADERS_EVENTS },
+      { name: ARCHIVE_TAB, headers: HEADERS_ARCHIVE },
     ]);
 
   wanted.forEach(w => {

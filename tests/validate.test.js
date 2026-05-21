@@ -11,6 +11,7 @@ const {
   HOUSE_IDS,
   ROLE_OPTIONS,
   REASON_TYPES,
+  TERMINATION_REASONS,
 } = require('../lib/validate');
 
 test('isHouse: known and unknown', () => {
@@ -257,4 +258,98 @@ test('ROLE_OPTIONS exposes the nine role choices', () => {
   assert.equal(ROLE_OPTIONS.length, 9);
   assert.ok(ROLE_OPTIONS.includes('מטפל/ת'));
   assert.ok(ROLE_OPTIONS.includes('אחר'));
+});
+
+test('TERMINATION_REASONS exposes the five reasons', () => {
+  assert.deepEqual(TERMINATION_REASONS, ['התפטרות', 'פיטורין', 'סיום חוזה', 'מעבר תפקיד', 'אחר']);
+});
+
+test('validateAction: terminateEmployee happy path', () => {
+  const p = validateAction({
+    action: 'terminateEmployee',
+    house: 'ramot',
+    id: 'e1',
+    terminationDate: '2026-05-31',
+    reasonType: 'התפטרות',
+    reasonDetail: 'מצא עבודה אחרת',
+  });
+  assert.equal(p.action, 'terminateEmployee');
+  assert.equal(p.house, 'ramot');
+  assert.equal(p.id, 'e1');
+  assert.equal(p.terminationDate, '2026-05-31');
+  assert.equal(p.reasonType, 'התפטרות');
+  assert.equal(p.reasonDetail, 'מצא עבודה אחרת');
+});
+
+test('validateAction: terminateEmployee accepts a future date (scheduled termination)', () => {
+  // Future-dated termination is an intentional feature — the cost continues
+  // counting until that date arrives. lib/calc.js pendingHomeCost relies
+  // on this.
+  const p = validateAction({
+    action: 'terminateEmployee',
+    house: 'asher',
+    id: 'e2',
+    terminationDate: '2099-12-31',
+  });
+  assert.equal(p.terminationDate, '2099-12-31');
+});
+
+test('validateAction: terminateEmployee accepts missing reason (optional)', () => {
+  const p = validateAction({
+    action: 'terminateEmployee',
+    house: 'ramot',
+    id: 'e1',
+    terminationDate: '2026-05-31',
+  });
+  assert.equal(p.reasonType, '');
+  assert.equal(p.reasonDetail, '');
+});
+
+test('validateAction: terminateEmployee rejects unknown reasonType', () => {
+  assert.throws(() => validateAction({
+    action: 'terminateEmployee',
+    house: 'ramot',
+    id: 'e1',
+    terminationDate: '2026-05-31',
+    reasonType: 'מומצא',
+  }), /reasonType/);
+});
+
+test('validateAction: terminateEmployee rejects missing required fields', () => {
+  assert.throws(() => validateAction({
+    action: 'terminateEmployee',
+    house: 'ramot',
+    terminationDate: '2026-05-31',
+  }), /missing id/);
+  assert.throws(() => validateAction({
+    action: 'terminateEmployee',
+    house: 'ramot',
+    id: 'e1',
+  }), /missing terminationDate/);
+  assert.throws(() => validateAction({
+    action: 'terminateEmployee',
+    house: 'bogus',
+    id: 'e1',
+    terminationDate: '2026-05-31',
+  }), /unknown house/);
+});
+
+test('validateAction: terminateEmployee rejects malformed date', () => {
+  assert.throws(() => validateAction({
+    action: 'terminateEmployee',
+    house: 'ramot',
+    id: 'e1',
+    terminationDate: '31/05/2026',
+  }), /bad terminationDate/);
+});
+
+test('validateAction: terminateEmployee caps long reasonDetail', () => {
+  const p = validateAction({
+    action: 'terminateEmployee',
+    house: 'ramot',
+    id: 'e1',
+    terminationDate: '2026-05-31',
+    reasonDetail: 'a'.repeat(800),
+  });
+  assert.equal(p.reasonDetail.length, 500);
 });

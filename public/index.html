@@ -183,6 +183,21 @@ body{
 .btn-ghost{background:transparent;border-color:transparent;color:var(--muted)}
 .btn-ghost:hover{background:var(--bg-elevated);color:var(--ink)}
 .btn-sm{padding:5px 12px;font-size:12px;border-radius:8px}
+/* Hover-tint modifiers for row-action buttons. Default state inherits .btn
+   (visible outline, --ink-soft text). The accent tint marks the "primary"
+   row action (עריכה); the danger tint marks negative actions (הפסקת עבודה,
+   מחיקה) — same soft red so the row scans cleanly, with the destructive
+   one always rightmost. */
+.btn-accent-hover:hover{
+  background:rgba(239,159,39,0.12);
+  color:var(--accent-1);
+  border-color:rgba(239,159,39,0.45);
+}
+.btn-danger-hover:hover{
+  background:rgba(226,75,74,0.12);
+  color:#FFB8B7;
+  border-color:rgba(226,75,74,0.45);
+}
 
 /* Table card */
 .tablecard{
@@ -389,6 +404,21 @@ tbody tr:hover{
 
 .section-note{font-size:12px;color:var(--muted);margin-top:10px;line-height:1.5}
 .cover-meta{font-size:11px;color:var(--ink-soft);margin-right:6px;font-weight:600}
+
+/* Collapsible archive section on the central dashboard */
+.section-head.collapsible{cursor:pointer;user-select:none}
+.section-head.collapsible .caret{
+  display:inline-block;
+  margin-inline-start:8px;
+  font-size:14px;
+  color:var(--muted);
+  transition:transform .2s;
+}
+.section-head.collapsible.open .caret{transform:rotate(180deg);color:var(--accent-1)}
+.archive-body{display:none}
+.archive-body.show{display:block}
+.archive-table tbody td{font-size:13px;color:var(--ink-soft)}
+.archive-table .col-date{font-variant-numeric:tabular-nums;white-space:nowrap}
 
 /* Overlay & modal */
 .overlay{
@@ -708,6 +738,37 @@ tbody tr:hover{
   </div>
 </div>
 
+<!-- Terminate modal -->
+<div class="overlay" id="termOverlay">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>הפסקת עבודה</h3>
+      <p id="termModalSub"></p>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>תאריך סיום עבודה</label>
+        <input id="tm_terminationDate" type="date"/>
+        <div class="hint">מותר גם תאריך עתידי — למשל הודעה מוקדמת לסוף החודש. השכר ימשיך להיספר בעלות הבית עד התאריך הזה.</div>
+      </div>
+      <div class="field">
+        <label>סיבת סיום</label>
+        <select id="tm_reasonType">
+          <option value="">— ללא ציון —</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>הערה</label>
+        <textarea id="tm_reasonDetail" placeholder="פירוט חופשי"></textarea>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-primary" id="termSaveBtn" onclick="saveTerminate()">אישור הפסקת עבודה</button>
+      <button class="btn btn-ghost" onclick="closeTerminate()">ביטול</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script src="/lib/calc.js"></script>
@@ -732,6 +793,9 @@ const ROLE_OPTIONS = [
 const REASON_TYPES = [
   'חופשה','חל״ת','מחלה','חופשת לידה','ניתוח','צורך תפעולי','אחר',
 ];
+const TERMINATION_REASONS = [
+  'התפטרות','פיטורין','סיום חוזה','מעבר תפקיד','אחר',
+];
 
 const TOKEN_KEY = 'ezone_staff_token_v1';
 const {
@@ -745,6 +809,8 @@ const {
   endedEvents: calcEndedEvents,
   eventsHostedBy: calcEventsHostedBy,
   activeBonus: calcActiveBonus,
+  pendingTerminations: calcPendingTerminations,
+  pendingHomeCost: calcPendingHomeCost,
   houseTotal: calcHouseTotal,
   networkTotal: calcNetworkTotal,
   activeOutgoingFor: calcActiveOutgoingFor,
@@ -752,9 +818,12 @@ const {
 
 let DATA = {ramot:[], asher:[], ofroni:[], rehab:[]};
 let EVENTS = [];
+let ARCHIVE = [];
 let view = 'central';
 let editEmp = null;    // {houseId, empId?}
 let coverFrom = null;  // {houseId, empId}
+let termFrom = null;   // {houseId, empId, empName}
+let archiveOpen = false;
 
 /* ---------- API layer ---------- */
 
@@ -784,6 +853,7 @@ async function loadData(){
   DATA = d.houses || {ramot:[], asher:[], ofroni:[], rehab:[]};
   HOUSES.forEach(h => { if (!DATA[h.id]) DATA[h.id] = []; });
   EVENTS = d.events || [];
+  ARCHIVE = d.archive || [];
 }
 
 async function doAction(payload){
@@ -850,7 +920,7 @@ const houseName = id => (HOUSES.find(h=>h.id===id)||{}).name||id;
 const houseMgr  = id => (HOUSES.find(h=>h.id===id)||{}).mgr||'';
 function houseCount(id){ return (DATA[id]||[]).length; }
 function totalCount(){ return HOUSES.reduce((s,h)=>s+houseCount(h.id),0); }
-function totalCost(today){ return calcNetworkTotal(DATA, EVENTS, today); }
+function totalCost(today){ return calcNetworkTotal(DATA, EVENTS, today, ARCHIVE); }
 function escapeHtml(s){
   return String(s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
@@ -942,10 +1012,10 @@ function render(){
 function centralView(){
   const today = calcToday();
   const active = calcActiveEvents(EVENTS, today);
-  const ended = calcEndedEvents(EVENTS, today).slice().reverse();
 
   const houseBoxes = HOUSES.map(h=>{
     const bonus = calcActiveBonus(EVENTS, h.id, today);
+    const pending = calcPendingHomeCost(ARCHIVE, h.id, today);
     return `
     <div class="house-box" onclick="go('${h.id}')">
       <div class="hb-top">
@@ -955,9 +1025,10 @@ function centralView(){
       <div class="hb-stats">
         <div><div class="n">${houseCount(h.id)}</div><div class="t">עובדי בית</div></div>
         <div>
-          <div class="n">${fmt(calcHouseTotal(DATA[h.id]||[], EVENTS, h.id, today))}</div>
+          <div class="n">${fmt(calcHouseTotal(DATA[h.id]||[], EVENTS, h.id, today, ARCHIVE))}</div>
           <div class="t">עלות חודשית</div>
           ${bonus ? `<div class="bonus-line">כולל בונוסי כיסוי ${fmt(bonus)}</div>` : ''}
+          ${pending ? `<div class="bonus-line">כולל עובדים בתקופת הודעה ${fmt(pending)}</div>` : ''}
         </div>
       </div>
     </div>`;
@@ -965,10 +1036,19 @@ function centralView(){
 
   const activeList = active.length
     ? active.map(ev => renderEventRow(ev, true)).join('')
-    : `<div class="empty">אין כרגע אירועי כיסוי פעילים</div>`;
-  const endedList = ended.length
-    ? ended.map(ev => renderEventRow(ev, false)).join('')
-    : `<div class="empty">עדיין לא נסגרו אירועי כיסוי</div>`;
+    : `<div class="empty">אין כרגע שיבוץ החלפות פעיל</div>`;
+
+  const archiveRows = ARCHIVE.length
+    ? ARCHIVE.slice().sort((a,b)=> String(b.terminationDate).localeCompare(String(a.terminationDate))).map(a => `
+      <tr>
+        <td class="emp-name">${escapeHtml(a.name)}</td>
+        <td>${escapeHtml(houseName(a.homeHouse))}</td>
+        <td><span class="role-tag">${escapeHtml(a.role||'—')}${a.roleDetail?` – ${escapeHtml(a.roleDetail)}`:''}</span></td>
+        <td class="col-date">${escapeHtml(fmtDate(a.terminationDate))}</td>
+        <td>${a.reasonType ? escapeHtml(a.reasonType) : '<span style="color:#8A8FA3">—</span>'}</td>
+        <td class="note-cell">${a.reasonDetail ? escapeHtml(a.reasonDetail) : '<span style="color:#8A8FA3">—</span>'}</td>
+      </tr>`).join('')
+    : `<tr><td colspan="6"><div class="empty">אין עדיין רשומות באורכיב</div></td></tr>`;
 
   return `
   <div class="head">
@@ -993,7 +1073,7 @@ function centralView(){
       <div class="sub">רמות · אשר · עפרוני · ריהאב</div>
     </div>
     <div class="stat">
-      <div class="lbl">אירועי כיסוי פעילים</div>
+      <div class="lbl">שיבוץ החלפות בין בתים</div>
       <div class="val">${active.length}</div>
       <div class="sub">היום ${escapeHtml(fmtDate(today))}</div>
     </div>
@@ -1006,7 +1086,7 @@ function centralView(){
 
   <div class="section">
     <div class="section-head">
-      <h2>אירועי כיסוי פעילים</h2>
+      <h2>שיבוץ החלפות בין בתים</h2>
       <span class="count-pill">${active.length}</span>
     </div>
     <div class="tablecard accent-edge">
@@ -1015,12 +1095,20 @@ function centralView(){
   </div>
 
   <div class="section">
-    <div class="section-head">
-      <h2>אירועי כיסוי קודמים</h2>
-      <span class="count-pill">${ended.length}</span>
+    <div class="section-head collapsible ${archiveOpen?'open':''}" onclick="toggleArchive()">
+      <h2>אורכיב עובדים <span class="caret">▾</span></h2>
+      <span class="count-pill">${ARCHIVE.length}</span>
     </div>
-    <div class="tablecard">
-      <div class="event-list">${endedList}</div>
+    <div class="tablecard archive-body ${archiveOpen?'show':''}" id="archiveBody">
+      <div class="table-scroll">
+      <table class="archive-table">
+        <thead><tr>
+          <th>שם</th><th>בית</th><th>תפקיד</th>
+          <th>תאריך סיום</th><th>סיבה</th><th>הערה</th>
+        </tr></thead>
+        <tbody>${archiveRows}</tbody>
+      </table>
+      </div>
     </div>
   </div>`;
 }
@@ -1030,7 +1118,8 @@ function houseView(id){
   const list = DATA[id] || [];
   const incoming = calcEventsHostedBy(EVENTS, id, today);
   const incomingBonus = calcActiveBonus(EVENTS, id, today);
-  const houseT = calcHouseTotal(list, EVENTS, id, today);
+  const pendingTerm = calcPendingHomeCost(ARCHIVE, id, today);
+  const houseT = calcHouseTotal(list, EVENTS, id, today, ARCHIVE);
 
   const rows = list.length ? list.map(e=>{
     const outgoing = calcActiveOutgoingFor(EVENTS, e.id, today);
@@ -1053,8 +1142,9 @@ function houseView(id){
       <td>
         <div class="row-actions">
           <button class="btn btn-sm" onclick="openCover('${id}','${e.id}')">תיעוד מעבר</button>
-          <button class="btn btn-sm" onclick="openEmp('${id}','${e.id}')">עריכה</button>
-          <button class="btn btn-sm btn-ghost" onclick="delEmp('${id}','${e.id}')">מחיקה</button>
+          <button class="btn btn-sm btn-accent-hover" onclick="openEmp('${id}','${e.id}')">עריכה</button>
+          <button class="btn btn-sm btn-danger-hover" onclick="openTerminate('${id}','${e.id}')">הפסקת עבודה</button>
+          <button class="btn btn-sm btn-danger-hover" onclick="delEmp('${id}','${e.id}')">מחיקה</button>
         </div>
       </td>
     </tr>`;
@@ -1087,7 +1177,12 @@ function houseView(id){
     <div class="stat">
       <div class="lbl">עלות חודשית כוללת</div>
       <div class="val">${fmt(houseT)}</div>
-      <div class="sub">${incomingBonus?`כולל בונוסי כיסוי ${fmt(incomingBonus)}`:'משוקלל לחלקיות'}</div>
+      <div class="sub">${incomingBonus||pendingTerm
+        ? [
+            incomingBonus?`+ בונוסי כיסוי ${fmt(incomingBonus)}`:'',
+            pendingTerm?`+ תקופת הודעה ${fmt(pendingTerm)}`:'',
+          ].filter(Boolean).join(' · ')
+        : 'משוקלל לחלקיות'}</div>
     </div>
     <div class="stat">
       <div class="lbl">סה״כ ברוטו במשרה מלאה</div>
@@ -1299,6 +1394,64 @@ async function endCover(eventId, name){
   } catch(err){
     toast(err.message || 'שגיאה בסגירה', true);
   }
+}
+
+/* ---------- termination ---------- */
+
+function openTerminate(houseId, empId){
+  const e = empById(houseId, empId);
+  if(!e) return;
+  termFrom = {houseId, empId, empName: e.name};
+  document.getElementById('termModalSub').textContent =
+    `${e.name} · ${houseName(houseId)}`;
+  document.getElementById('tm_terminationDate').value = calcToday();
+  document.getElementById('tm_reasonDetail').value = '';
+  const sel = document.getElementById('tm_reasonType');
+  let html = '<option value="">— ללא ציון —</option>';
+  TERMINATION_REASONS.forEach(r => {
+    html += `<option value="${escapeHtml(r)}">${escapeHtml(r)}</option>`;
+  });
+  sel.innerHTML = html;
+  document.getElementById('termOverlay').classList.add('show');
+}
+function closeTerminate(){ document.getElementById('termOverlay').classList.remove('show'); }
+
+async function saveTerminate(){
+  const {houseId, empId, empName} = termFrom;
+  const terminationDate = document.getElementById('tm_terminationDate').value;
+  const reasonType = document.getElementById('tm_reasonType').value;
+  const reasonDetail = document.getElementById('tm_reasonDetail').value.trim();
+  if (!terminationDate){
+    alert('יש להזין תאריך סיום עבודה');
+    return;
+  }
+  if (!confirm(`להפסיק את העבודה של ${empName} בתאריך ${fmtDate(terminationDate)}?`)) return;
+  setBusy('termSaveBtn', true, 'שמירה…');
+  try{
+    await doAction({
+      action: 'terminateEmployee',
+      house: houseId,
+      id: empId,
+      terminationDate,
+      reasonType,
+      reasonDetail,
+    });
+    await loadData();
+    closeTerminate();
+    render();
+    toast('הפסקת העבודה נשמרה');
+  } catch(err){
+    toast(err.message || 'שגיאה בשמירה', true);
+  } finally {
+    setBusy('termSaveBtn', false);
+  }
+}
+
+/* ---------- archive panel ---------- */
+
+function toggleArchive(){
+  archiveOpen = !archiveOpen;
+  render();
 }
 
 /* ---------- boot ---------- */

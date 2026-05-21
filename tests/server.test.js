@@ -13,11 +13,12 @@ process.env.SESSION_SECRET = 'x'.repeat(64);
 const { app, _loginAttempts } = require('../server');
 
 // ----- fake upstream Apps Script -----
-// Simulates the Sheet as in-memory house tabs + events tab.
+// Simulates the Sheet as in-memory house tabs + events tab + archive tab.
 function makeFakeUpstream() {
   const state = {
     houses: { ramot: [], asher: [], ofroni: [], rehab: [] },
     events: [],
+    archive: [],
   };
   let idCtr = 0;
   const newId = (p) => p + (++idCtr);
@@ -30,7 +31,12 @@ function makeFakeUpstream() {
       return { status: 200, json: { _status: 401, error: 'unauthorized' } };
     }
     if (method === 'GET') {
-      return { status: 200, json: { _status: 200, houses: state.houses, events: state.events } };
+      return { status: 200, json: {
+        _status: 200,
+        houses: state.houses,
+        events: state.events,
+        archive: state.archive,
+      } };
     }
     const b = JSON.parse(body);
     switch (b.action) {
@@ -91,6 +97,43 @@ function makeFakeUpstream() {
         if (!ev.endDate || ev.endDate > t) ev.endDate = t;
         ev.status = 'ended';
         return { status: 200, json: { _status: 200, ok: true, eventId: ev.id, endDate: ev.endDate, status: 'ended' } };
+      }
+      case 'terminateEmployee': {
+        const arr = state.houses[b.house];
+        if (!arr) return { status: 200, json: { _status: 400, error: 'unknown house' } };
+        const i = arr.findIndex(e => e.id === b.id);
+        if (i < 0) return { status: 200, json: { _status: 404, error: 'employee not found' } };
+        const emp = arr[i];
+        // Auto-truncate active events whose subject is this employee and
+        // whose end_date is after terminationDate.
+        let autoEnded = 0;
+        const t = today();
+        for (const ev of state.events) {
+          if (ev.employeeId !== b.id) continue;
+          if (ev.status !== 'active') continue;
+          if (!(ev.endDate > b.terminationDate)) continue;
+          ev.endDate = b.terminationDate;
+          ev.status = b.terminationDate >= t ? 'active' : 'ended';
+          autoEnded++;
+        }
+        const archiveRow = {
+          id: newId('arch'),
+          employeeId: emp.id,
+          name: emp.name,
+          role: emp.role || '',
+          roleDetail: emp.roleDetail || '',
+          salary: Number(emp.salary) || 0,
+          pct: Number(emp.pct) || 100,
+          notes: emp.notes || '',
+          homeHouse: b.house,
+          terminationDate: b.terminationDate,
+          reasonType: b.reasonType || '',
+          reasonDetail: b.reasonDetail || '',
+          archivedAt: new Date().toISOString(),
+        };
+        state.archive.push(archiveRow);
+        arr.splice(i, 1);
+        return { status: 200, json: { _status: 200, ok: true, archive: archiveRow, autoEndedEvents: autoEnded } };
       }
       default:
         return { status: 200, json: { _status: 400, error: 'unknown action' } };
@@ -199,7 +242,7 @@ test('GET /api/data without token → 401', async () => {
   } finally { await close(srv); }
 });
 
-test('GET /api/data with token returns empty houses + events', async () => {
+test('GET /api/data with token returns empty houses + events + archive', async () => {
   const { srv, base } = await listen();
   try {
     const token = await login(base);
@@ -209,6 +252,7 @@ test('GET /api/data with token returns empty houses + events', async () => {
     assert.equal(r.status, 200);
     assert.deepEqual(r.json.houses, { ramot: [], asher: [], ofroni: [], rehab: [] });
     assert.deepEqual(r.json.events, []);
+    assert.deepEqual(r.json.archive, []);
   } finally { await close(srv); }
 });
 
@@ -400,6 +444,116 @@ test('startCoverage: rejects same homeHouse and hostHouse', async () => {
         startDate: '2026-05-20', endDate: '2026-06-01',
         reasonType: 'חופשה',
       }),
+    });
+    assert.equal(r.status, 400);
+  } finally { await close(srv); }
+});
+
+test('terminateEmployee: moves employee from roster to archive + auto-ends their active event', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    const auth = { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
+
+    // Add employee + start an active coverage event.
+    let r = await req(base, '/api/action', {
+      method: 'POST', headers: auth,
+      body: JSON.stringify({
+        action: 'addEmployee', house: 'ramot',
+        employee: { name: 'יוסי', role: 'מטפל/ת', roleDetail: 'אמנות', salary: 12000, pct: 80 },
+      }),
+    });
+    const id = r.json.employee.id;
+    r = await req(base, '/api/action', {
+      method: 'POST', headers: auth,
+      body: JSON.stringify({
+        action: 'startCoverage',
+        employeeId: id, homeHouse: 'ramot', hostHouse: 'asher',
+        startDate: todayStr(), endDate: plusDays(30),
+        reasonType: 'חופשה',
+      }),
+    });
+    const eventId = r.json.event.id;
+
+    // Terminate today.
+    r = await req(base, '/api/action', {
+      method: 'POST', headers: auth,
+      body: JSON.stringify({
+        action: 'terminateEmployee',
+        house: 'ramot',
+        id,
+        terminationDate: todayStr(),
+        reasonType: 'התפטרות',
+        reasonDetail: 'smoke',
+      }),
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.ok, true);
+    assert.ok(r.json.archive, 'expected archive row in response');
+    assert.equal(r.json.archive.employeeId, id);
+    assert.equal(r.json.autoEndedEvents, 1, 'expected the active event to be auto-truncated');
+
+    // Verify final state.
+    r = await req(base, '/api/data', { headers: auth });
+    assert.equal(r.json.houses.ramot.find(e => e.id === id), undefined, 'gone from roster');
+    const archived = r.json.archive.find(a => a.employeeId === id);
+    assert.ok(archived, 'present in archive');
+    assert.equal(archived.terminationDate, todayStr());
+    const ev = r.json.events.find(e => e.id === eventId);
+    assert.equal(ev.endDate, todayStr(), 'event end_date pulled in to termination date');
+  } finally { await close(srv); }
+});
+
+test('terminateEmployee: future date — event end_date is updated but stays active until then', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    const auth = { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
+
+    let r = await req(base, '/api/action', {
+      method: 'POST', headers: auth,
+      body: JSON.stringify({
+        action: 'addEmployee', house: 'ramot',
+        employee: { name: 'דנה', role: 'אחות', salary: 18000, pct: 100 },
+      }),
+    });
+    const id = r.json.employee.id;
+    r = await req(base, '/api/action', {
+      method: 'POST', headers: auth,
+      body: JSON.stringify({
+        action: 'startCoverage',
+        employeeId: id, homeHouse: 'ramot', hostHouse: 'asher',
+        startDate: todayStr(), endDate: plusDays(60),
+        reasonType: 'חופשה',
+      }),
+    });
+    const eventId = r.json.event.id;
+
+    const future = plusDays(15);
+    r = await req(base, '/api/action', {
+      method: 'POST', headers: auth,
+      body: JSON.stringify({
+        action: 'terminateEmployee', house: 'ramot', id,
+        terminationDate: future,
+      }),
+    });
+    assert.equal(r.status, 200);
+
+    r = await req(base, '/api/data', { headers: auth });
+    const ev = r.json.events.find(e => e.id === eventId);
+    assert.equal(ev.endDate, future, 'end_date pulled in to future termination date');
+    assert.equal(ev.status, 'active', 'event stays active because the new end is in the future');
+  } finally { await close(srv); }
+});
+
+test('terminateEmployee: rejects missing terminationDate (validator)', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    const auth = { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
+    const r = await req(base, '/api/action', {
+      method: 'POST', headers: auth,
+      body: JSON.stringify({ action: 'terminateEmployee', house: 'ramot', id: 'e1' }),
     });
     assert.equal(r.status, 400);
   } finally { await close(srv); }

@@ -5,6 +5,7 @@ const {
   cost, houseCost, houseGross, avgPct,
   isActive, activeEvents, endedEvents,
   eventsHostedBy, activeBonus,
+  pendingTerminations, pendingHomeCost,
   houseTotal, networkTotal,
   activeOutgoingFor,
 } = require('../lib/calc');
@@ -216,4 +217,100 @@ test('activeOutgoingFor: finds the active event for an employee', () => {
   const out = activeOutgoingFor(events, 'e1', TODAY);
   assert.ok(out && out.id === 'b');
   assert.equal(activeOutgoingFor(events, 'never', TODAY), null);
+});
+
+// ---------- termination / archive cost ----------
+
+function arch(over) {
+  return Object.assign({
+    id: 'a1',
+    employeeId: 'e1',
+    name: 'Test',
+    homeHouse: 'ramot',
+    salary: 18000,
+    pct: 100,
+    terminationDate: '2026-05-20',
+    reasonType: '',
+    reasonDetail: '',
+  }, over);
+}
+
+test('pendingTerminations: terminationDate strictly after today is pending', () => {
+  const archive = [
+    arch({ id: 'past', terminationDate: '2026-04-01' }),
+    arch({ id: 'today', terminationDate: TODAY }),
+    arch({ id: 'future', terminationDate: '2026-06-15' }),
+  ];
+  const out = pendingTerminations(archive, TODAY).map(a => a.id).sort();
+  assert.deepEqual(out, ['future']);
+});
+
+test('pendingTerminations: missing / empty archive → empty', () => {
+  assert.deepEqual(pendingTerminations(null, TODAY), []);
+  assert.deepEqual(pendingTerminations([], TODAY), []);
+});
+
+test('pendingHomeCost: sums weighted salaries only for matching home & future term date', () => {
+  const archive = [
+    arch({ homeHouse: 'ramot', salary: 20000, pct: 100, terminationDate: '2026-06-15' }), // 20000
+    arch({ homeHouse: 'ramot', salary: 10000, pct: 80, terminationDate: '2026-04-01' }),  // past — 0
+    arch({ homeHouse: 'asher', salary: 15000, pct: 100, terminationDate: '2026-06-30' }), // wrong house
+  ];
+  assert.equal(pendingHomeCost(archive, 'ramot', TODAY), 20000);
+  assert.equal(pendingHomeCost(archive, 'asher', TODAY), 15000);
+  assert.equal(pendingHomeCost(archive, 'ofroni', TODAY), 0);
+});
+
+test('houseTotal: includes pending-termination salaries', () => {
+  const roster = [{ salary: 18000, pct: 100 }];                                  // 18000
+  const events = [ev({ hostHouse: 'ramot', bonusAmount: 1000 })];                 // +1000 (active bonus to ramot)
+  const archive = [arch({ homeHouse: 'ramot', salary: 12000, pct: 50, terminationDate: '2026-06-15' })]; // +6000 pending
+  assert.equal(houseTotal(roster, events, 'ramot', TODAY, archive), 25000);
+});
+
+test('houseTotal: backward-compatible when archive arg is omitted', () => {
+  const roster = [{ salary: 18000, pct: 100 }];
+  const events = [];
+  assert.equal(houseTotal(roster, events, 'ramot', TODAY), 18000);
+  assert.equal(houseTotal(roster, events, 'ramot', TODAY, undefined), 18000);
+  assert.equal(houseTotal(roster, events, 'ramot', TODAY, []), 18000);
+});
+
+test('houseTotal: terminated employee with past date contributes 0', () => {
+  // After termination_date passes, the archive row stops contributing.
+  const archive = [arch({ homeHouse: 'ramot', salary: 18000, pct: 100, terminationDate: '2026-04-01' })];
+  assert.equal(houseTotal([], [], 'ramot', TODAY, archive), 0);
+});
+
+test('houseTotal: terminated employee with future date still contributes', () => {
+  // Scheduled termination at end of month — still costs us until that date.
+  const archive = [arch({ homeHouse: 'ramot', salary: 18000, pct: 100, terminationDate: '2026-05-31' })];
+  assert.equal(houseTotal([], [], 'ramot', TODAY, archive), 18000);
+});
+
+test('networkTotal: includes pending terminations exactly once, no double-count', () => {
+  const houses = {
+    ramot:  [{ salary: 20000, pct: 100 }],   // 20000
+    asher:  [],
+    ofroni: [],
+    rehab:  [],
+  };
+  const events = [ev({ hostHouse: 'asher', bonusAmount: 1500 })]; // +1500
+  const archive = [
+    arch({ homeHouse: 'ramot', salary: 10000, pct: 100, terminationDate: '2026-06-15' }), // +10000
+    arch({ homeHouse: 'ofroni', salary: 5000, pct: 50, terminationDate: '2026-04-01' }),  // past — 0
+  ];
+  // 20000 + 1500 + 10000 = 31500
+  assert.equal(networkTotal(houses, events, TODAY, archive), 31500);
+  // Sum of house totals should match.
+  const sumHouseTotals = Object.keys(houses).reduce(
+    (s, h) => s + houseTotal(houses[h], events, h, TODAY, archive),
+    0,
+  );
+  assert.equal(sumHouseTotals, 31500);
+});
+
+test('networkTotal: backward-compatible without archive', () => {
+  const houses = { ramot: [{ salary: 20000, pct: 100 }], asher: [], ofroni: [], rehab: [] };
+  assert.equal(networkTotal(houses, [], TODAY), 20000);
 });

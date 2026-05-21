@@ -70,11 +70,13 @@ async function jpost(path, payload, token) {
     if (r.status !== 200) fail('GET /api/data baseline', r);
     baseline = r.body;
     if (!Array.isArray(baseline.events)) fail('baseline: events missing', baseline);
+    if (!Array.isArray(baseline.archive)) fail('baseline: archive missing (Apps Script not redeployed?)', baseline);
     const counts = Object.fromEntries(Object.entries(baseline.houses).map(([h, arr]) => [h, arr.length]));
     log('baseline', {
       houseCounts: counts,
       events: baseline.events.length,
       activeEvents: baseline.events.filter(e => e.status === 'active').length,
+      archive: baseline.archive.length,
     });
   }
 
@@ -174,57 +176,83 @@ async function jpost(path, payload, token) {
     log('cost attribution ok', { ramotHomeCostDelta: expectedBase });
   }
 
-  // 9. end the coverage event
+  // 9. terminate the employee today. This is also the cleanup — the
+  //    employee moves to archive and the active coverage event auto-ends.
   {
     const r = await jpost('/api/action', {
-      action: 'endCoverage',
-      eventId,
-    }, token);
-    if (r.status !== 200 || !r.body.ok) fail('endCoverage', r);
-    if (r.body.status !== 'ended') fail('endCoverage: expected ended status', r.body);
-    log('endCoverage ok', { eventId, endDate: r.body.endDate });
-  }
-
-  // 10. verify event moved to ended
-  {
-    const r = await jget('/api/data', token);
-    const ev = r.body.events.find(e => e.id === eventId);
-    if (!ev) fail('verify end: event missing', r.body.events);
-    if (ev.status !== 'ended') fail('verify end: status not ended', ev);
-    log('verify end ok', { status: ev.status, endDate: ev.endDate });
-  }
-
-  // 11. cleanup — delete employee
-  {
-    const r = await jpost('/api/action', {
-      action: 'deleteEmployee',
+      action: 'terminateEmployee',
       house: 'ramot',
       id: empId,
+      terminationDate: today(),
+      reasonType: 'התפטרות',
+      reasonDetail: 'smoke test termination',
     }, token);
-    if (r.status !== 200 || !r.body.ok) fail('deleteEmployee', r);
-    log('deleteEmployee ok');
+    if (r.status !== 200 || !r.body.ok) fail('terminateEmployee', r);
+    if (!r.body.archive || r.body.archive.employeeId !== empId) {
+      fail('terminateEmployee: archive snapshot missing or wrong id', r.body);
+    }
+    log('terminateEmployee ok', {
+      archiveId: r.body.archive.id,
+      autoEndedEvents: r.body.autoEndedEvents,
+    });
   }
 
-  // 12. final verification — houses back to baseline; events length grew by 1 (append-only).
+  // 10. verify: employee gone from roster, present in archive, event auto-ended
   {
     const r = await jget('/api/data', token);
-    if (r.status !== 200) fail('GET /api/data final', r);
+    if (r.status !== 200) fail('GET /api/data after terminate', r);
     const stillThere =
       r.body.houses.ramot.find(e => e.id === empId) ||
       r.body.houses.asher.find(e => e.id === empId) ||
       r.body.houses.ofroni.find(e => e.id === empId) ||
       r.body.houses.rehab.find(e => e.id === empId);
-    if (stillThere) fail('cleanup: employee still present', stillThere);
+    if (stillThere) fail('verify terminate: employee still in a roster', stillThere);
+    const archived = r.body.archive.find(a => a.employeeId === empId);
+    if (!archived) fail('verify terminate: not in archive', r.body.archive);
+    if (archived.terminationDate !== today()) fail('verify terminate: wrong terminationDate', archived);
+    const ev = r.body.events.find(e => e.id === eventId);
+    if (!ev) fail('verify terminate: event missing', r.body.events);
+    if (ev.endDate !== today()) fail('verify terminate: event endDate not pulled in to terminationDate', ev);
+    if (ev.status !== 'ended') fail('verify terminate: event status should be ended (terminationDate=today)', ev);
+    log('verify terminate ok', {
+      archived: { id: archived.id, terminationDate: archived.terminationDate },
+      event: { endDate: ev.endDate, status: ev.status },
+    });
+  }
+
+  // 11. cost attribution: terminated employee with date <= today contributes 0
+  //     to home cost. ramot home cost should be back to baseline.
+  {
+    const r = await jget('/api/data', token);
+    const ramotHomeCost = r.body.houses.ramot.reduce(
+      (s, e) => s + Math.round((Number(e.salary) || 0) * (Number(e.pct) || 0) / 100),
+      0,
+    );
+    const baselineRamotCost = baseline.houses.ramot.reduce(
+      (s, e) => s + Math.round((Number(e.salary) || 0) * (Number(e.pct) || 0) / 100),
+      0,
+    );
+    if (ramotHomeCost !== baselineRamotCost) {
+      fail('cost attribution: ramot home cost did not return to baseline after termination',
+        { baseline: baselineRamotCost, now: ramotHomeCost, expected: 0 });
+    }
+    log('cost attribution ok', { ramotHomeCostDelta: 0 });
+  }
+
+  // 12. final verification: houses back to baseline; events +1; archive +1.
+  {
+    const r = await jget('/api/data', token);
+    if (r.status !== 200) fail('GET /api/data final', r);
     const counts = Object.fromEntries(Object.entries(r.body.houses).map(([h, arr]) => [h, arr.length]));
     const baseCounts = Object.fromEntries(Object.entries(baseline.houses).map(([h, arr]) => [h, arr.length]));
     for (const h of ['ramot', 'asher', 'ofroni', 'rehab']) {
       if (counts[h] !== baseCounts[h]) fail(`cleanup: ${h} count drifted`, { before: baseCounts[h], after: counts[h] });
     }
     const eventsDelta = r.body.events.length - baseline.events.length;
-    log('final state ok', { houseCounts: counts, eventsDelta });
-    if (eventsDelta !== 1) {
-      console.warn('[warn] events delta is', eventsDelta, '— expected exactly 1');
-    }
+    const archiveDelta = r.body.archive.length - baseline.archive.length;
+    log('final state ok', { houseCounts: counts, eventsDelta, archiveDelta });
+    if (eventsDelta !== 1) console.warn('[warn] events delta is', eventsDelta, '— expected exactly 1');
+    if (archiveDelta !== 1) console.warn('[warn] archive delta is', archiveDelta, '— expected exactly 1');
   }
 
   console.log('\nSMOKE TEST PASSED');

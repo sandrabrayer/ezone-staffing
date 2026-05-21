@@ -2,6 +2,60 @@
 
 All notable changes to this project are documented here. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.1.0] — 2026-05-21 — Termination flow + archive + dashboard tweaks
+
+Adds an explicit "end of employment" workflow with an archive tab, removes the past-events list from the dashboard, and tightens the row actions.
+
+### Termination flow (new)
+- New row-action button **`הפסקת עבודה`** opens a dialog: required termination date (defaults to today, **future dates are allowed** — explicit support for the "schedule end of employment for end of month" workflow), optional reason from `התפטרות / פיטורין / סיום חוזה / מעבר תפקיד / אחר`, optional note.
+- New API action `terminateEmployee`. Under a script lock the Apps Script: snapshots the employee row from their home tab, auto-truncates any `active` coverage event whose subject is this employee (`end_date = min(current_end, terminationDate)`, status recomputed against today), appends to the new `archive` tab, then deletes the row from the home tab.
+- The action is the natural cleanup: the employee disappears from the active roster everywhere immediately, while their cost continues to count until `terminationDate` arrives (see contract below).
+
+### Cost attribution contract (extended)
+```
+pendingTerminations(archive, today) = archive rows where termination_date > today
+pendingHomeCost(house)              = Σ salary × pct/100 over pending terminations whose home_house = house
+homeCost(house)                     = Σ base × pct/100 over active roster + pendingHomeCost(house)
+hostBonus(house)                    = unchanged: Σ event.bonusAmount where host_house = house AND active(today)
+houseTotal(house)                   = homeCost(house) + hostBonus(house)
+networkTotal                        = Σ homeCost(all) + Σ active bonuses
+```
+Base salary still appears in **exactly one** house total. A terminated employee with `termination_date > today` continues to count in their home house (no double-count, just deferred). On the day `today >= termination_date`, the archive row stops contributing — and because the action also pulls any of their active events' `end_date` in to `termination_date`, any associated bonus stops on the same day. The auto-truncation means the existing `isActive`/`activeBonus` logic naturally handles terminated subjects without a separate guard.
+
+### Data model
+- New **`archive`** tab (13 columns):
+  ```
+  id | employee_id | name | role | role_detail | salary | pct | notes |
+  home_house | termination_date | reason_type | reason_detail | archived_at
+  ```
+  The snapshot lets cost reconstruction work without joining back to the active roster (the row is gone from the home tab by the time the dashboard renders).
+- `setupSheets()` adds it idempotently.
+- House tabs, events tab, and history tab are unchanged.
+
+### API changes
+- `terminateEmployee` action added.
+- `/api/data` response shape grows: `{ houses, events, archive }`. The client tolerates the field being missing (old Apps Script deploys still work; archive defaults to `[]`).
+- All other actions are unchanged.
+
+### UI changes
+- Dashboard section heading renamed: `אירועי כיסוי פעילים` → **`שיבוץ החלפות בין בתים`** (both the stat-card label and the section H2).
+- The `אירועי כיסוי קודמים` section is removed from the dashboard. The data still gets recorded in the `events` tab — the Sheet stays the audit-of-record. The dashboard simply doesn't render past events anymore.
+- New collapsed section **`אורכיב עובדים`** replaces it in the same screen position. Click to toggle. Read-only table with `שם · בית · תפקיד · תאריך סיום · סיבה · הערה`. Rows are sorted by termination date, newest first. Dates render `DD/MM/YYYY` via the existing helper.
+- Row action buttons restyled and reordered: `תיעוד מעבר · עריכה · הפסקת עבודה · מחיקה`. Default is the visible outline (no longer using the `--muted` ghost). Two new hover modifiers — `.btn-accent-hover` (gold tint, used on `עריכה`) and `.btn-danger-hover` (soft red, used on `הפסקת עבודה` and `מחיקה`).
+- House cards show a `כולל עובדים בתקופת הודעה {₪}` sub-line when there are pending terminations whose date is still in the future.
+
+### Tests
+- `tests/calc.test.js`: pending-termination assertions (past date contributes 0, future date still contributes, no double-counting in `networkTotal`, backward-compat when `archive` arg is omitted).
+- `tests/validate.test.js`: `terminateEmployee` happy-path, accepts future dates, accepts missing reason, rejects unknown reason, rejects missing fields, rejects malformed date, caps long reasonDetail.
+- `tests/server.test.js`: add → terminate round-trip (gone from roster + present in archive + active event auto-ended to terminationDate); future-date variant (event stays `active` until then).
+- `smoke.js`: rewritten — add employee → start coverage → cost-attribution sanity check → **terminate today** (this is also the cleanup) → assert employee gone from roster, in archive, event auto-ended to today with `status=ended`, ramot home cost back to baseline, events +1 + archive +1. The previous `endCoverage` + `deleteEmployee` smoke steps are subsumed by the termination flow.
+
+### Migration / rollout
+1. Pull main; the Express server can deploy as soon as Railway picks up the push.
+2. Redeploy `apps-script/Code.gs` to the bound Apps Script project (paste in the editor, Manage Deployments → edit existing → New version → Deploy).
+3. Run `setupSheets()` once in the Apps Script editor — idempotent, adds the `archive` tab if missing.
+4. No data migration needed; `archive` starts empty.
+
 ## [2.0.0] — 2026-05-21 — Coverage event model
 
 Major redesign of how staff transfers are recorded. The old "move employee from house A to house B" model is replaced by a temporary-coverage model.
