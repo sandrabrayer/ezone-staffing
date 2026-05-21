@@ -13,12 +13,15 @@ process.env.SESSION_SECRET = 'x'.repeat(64);
 const { app, _loginAttempts } = require('../server');
 
 // ----- fake upstream Apps Script -----
-// Simulates the Sheet as in-memory tabs and answers GET/POST.
+// Simulates the Sheet as in-memory house tabs + events tab.
 function makeFakeUpstream() {
   const state = {
     houses: { ramot: [], asher: [], ofroni: [], rehab: [] },
-    history: [],
+    events: [],
   };
+  let idCtr = 0;
+  const newId = (p) => p + (++idCtr);
+  const today = () => new Date().toISOString().slice(0, 10);
 
   function handle(method, url, body) {
     const u = new URL(url);
@@ -27,12 +30,12 @@ function makeFakeUpstream() {
       return { status: 200, json: { _status: 401, error: 'unauthorized' } };
     }
     if (method === 'GET') {
-      return { status: 200, json: { _status: 200, houses: state.houses, history: state.history } };
+      return { status: 200, json: { _status: 200, houses: state.houses, events: state.events } };
     }
     const b = JSON.parse(body);
     switch (b.action) {
       case 'addEmployee': {
-        const emp = { id: 'e' + (++idCtr), ...b.employee };
+        const emp = { id: newId('e'), ...b.employee };
         state.houses[b.house].push(emp);
         return { status: 200, json: { _status: 200, ok: true, employee: emp } };
       }
@@ -40,7 +43,7 @@ function makeFakeUpstream() {
         const arr = state.houses[b.house];
         const i = arr.findIndex(e => e.id === b.id);
         if (i < 0) return { status: 200, json: { _status: 404, error: 'not found' } };
-        arr[i] = { ...arr[i], ...b.employee };
+        arr[i] = { ...arr[i], ...b.employee, id: arr[i].id };
         return { status: 200, json: { _status: 200, ok: true, employee: arr[i] } };
       }
       case 'deleteEmployee': {
@@ -50,30 +53,49 @@ function makeFakeUpstream() {
         arr.splice(i, 1);
         return { status: 200, json: { _status: 200, ok: true } };
       }
-      case 'moveEmployee': {
-        const src = state.houses[b.fromHouse];
-        const i = src.findIndex(e => e.id === b.id);
-        if (i < 0) return { status: 200, json: { _status: 404, error: 'not in source' } };
-        const emp = src[i];
-        src.splice(i, 1);
-        state.houses[b.toHouse].push(emp);
-        const hist = {
-          timestamp: new Date().toISOString(),
-          name: emp.name,
-          from: b.fromHouse,
-          to: b.toHouse,
+      case 'startCoverage': {
+        const home = state.houses[b.homeHouse];
+        const emp = home.find(e => e.id === b.employeeId);
+        if (!emp) return { status: 200, json: { _status: 404, error: 'employee not found in homeHouse' } };
+        // overlap check
+        const conflict = state.events.find(ev =>
+          ev.employeeId === b.employeeId &&
+          ev.status === 'active' &&
+          ev.startDate <= b.endDate && b.startDate <= ev.endDate
+        );
+        if (conflict) return { status: 200, json: { _status: 409, error: 'overlap' } };
+        const t = today();
+        const status = b.startDate <= t && t <= b.endDate ? 'active' : 'ended';
+        const event = {
+          id: newId('ev'),
+          employeeId: b.employeeId,
+          employeeName: emp.name,
+          homeHouse: b.homeHouse,
+          hostHouse: b.hostHouse,
+          startDate: b.startDate,
+          endDate: b.endDate,
           reasonType: b.reasonType,
-          reason: b.reason,
-          date: b.date,
+          reasonDetail: b.reasonDetail || '',
+          coversEmployeeId: b.coversEmployeeId || '',
+          bonusAmount: Number(b.bonusAmount) || 0,
+          status,
+          createdAt: new Date().toISOString(),
         };
-        state.history.push(hist);
-        return { status: 200, json: { _status: 200, ok: true, moved: emp, history: hist } };
+        state.events.push(event);
+        return { status: 200, json: { _status: 200, ok: true, event } };
+      }
+      case 'endCoverage': {
+        const ev = state.events.find(e => e.id === b.eventId);
+        if (!ev) return { status: 200, json: { _status: 404, error: 'event not found' } };
+        const t = today();
+        if (!ev.endDate || ev.endDate > t) ev.endDate = t;
+        ev.status = 'ended';
+        return { status: 200, json: { _status: 200, ok: true, eventId: ev.id, endDate: ev.endDate, status: 'ended' } };
       }
       default:
         return { status: 200, json: { _status: 400, error: 'unknown action' } };
     }
   }
-  let idCtr = 0;
   return { state, handle };
 }
 
@@ -130,6 +152,13 @@ async function login(base) {
   return r.json.token;
 }
 
+function todayStr() { return new Date().toISOString().slice(0, 10); }
+function plusDays(n) {
+  const d = new Date();
+  d.setDate(d.getDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
 // ----- tests -----
 
 test('health endpoint', async () => {
@@ -170,7 +199,7 @@ test('GET /api/data without token → 401', async () => {
   } finally { await close(srv); }
 });
 
-test('GET /api/data with token returns empty data', async () => {
+test('GET /api/data with token returns empty houses + events', async () => {
   const { srv, base } = await listen();
   try {
     const token = await login(base);
@@ -179,34 +208,32 @@ test('GET /api/data with token returns empty data', async () => {
     });
     assert.equal(r.status, 200);
     assert.deepEqual(r.json.houses, { ramot: [], asher: [], ofroni: [], rehab: [] });
-    assert.deepEqual(r.json.history, []);
+    assert.deepEqual(r.json.events, []);
   } finally { await close(srv); }
 });
 
-test('add → update → delete employee round-trips', async () => {
+test('add → update → delete employee round-trips with roleDetail', async () => {
   const { srv, base } = await listen();
   try {
     const token = await login(base);
     const auth = { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
 
-    // add
     let r = await req(base, '/api/action', {
       method: 'POST', headers: auth,
       body: JSON.stringify({
         action: 'addEmployee', house: 'ramot',
-        employee: { name: 'דנה', role: 'אחות', salary: 18000, pct: 100 },
+        employee: { name: 'דנה', role: 'מטפל/ת', roleDetail: 'אמנות', salary: 18000, pct: 100 },
       }),
     });
     assert.equal(r.status, 200);
     const id = r.json.employee.id;
     assert.ok(id);
+    assert.equal(r.json.employee.roleDetail, 'אמנות');
 
-    // verify in /api/data
     r = await req(base, '/api/data', { headers: auth });
     assert.equal(r.json.houses.ramot.length, 1);
-    assert.equal(r.json.houses.ramot[0].name, 'דנה');
+    assert.equal(r.json.houses.ramot[0].roleDetail, 'אמנות');
 
-    // update
     r = await req(base, '/api/action', {
       method: 'POST', headers: auth,
       body: JSON.stringify({
@@ -218,9 +245,9 @@ test('add → update → delete employee round-trips', async () => {
 
     r = await req(base, '/api/data', { headers: auth });
     assert.equal(r.json.houses.ramot[0].name, 'דנה כהן');
+    assert.equal(r.json.houses.ramot[0].role, 'אחות');
     assert.equal(r.json.houses.ramot[0].pct, 90);
 
-    // delete
     r = await req(base, '/api/action', {
       method: 'POST', headers: auth,
       body: JSON.stringify({ action: 'deleteEmployee', house: 'ramot', id }),
@@ -232,48 +259,134 @@ test('add → update → delete employee round-trips', async () => {
   } finally { await close(srv); }
 });
 
-test('moveEmployee: moves between houses and appends history', async () => {
+test('addEmployee: rejects role not in dropdown', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    const auth = { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
+    const r = await req(base, '/api/action', {
+      method: 'POST', headers: auth,
+      body: JSON.stringify({
+        action: 'addEmployee', house: 'ramot',
+        employee: { name: 'X', role: 'מנהל בית', salary: 10000, pct: 100 },
+      }),
+    });
+    assert.equal(r.status, 400);
+  } finally { await close(srv); }
+});
+
+test('addEmployee: role=אחר requires roleDetail', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    const auth = { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
+    const r = await req(base, '/api/action', {
+      method: 'POST', headers: auth,
+      body: JSON.stringify({
+        action: 'addEmployee', house: 'ramot',
+        employee: { name: 'X', role: 'אחר', salary: 10000, pct: 100 },
+      }),
+    });
+    assert.equal(r.status, 400);
+  } finally { await close(srv); }
+});
+
+test('startCoverage → endCoverage round-trip; base salary stays in home', async () => {
   const { srv, base } = await listen();
   try {
     const token = await login(base);
     const auth = { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
 
-    // add an employee to ramot
     let r = await req(base, '/api/action', {
       method: 'POST', headers: auth,
       body: JSON.stringify({
         action: 'addEmployee', house: 'ramot',
-        employee: { name: 'יוסי', role: 'מטפל', salary: 12000, pct: 80 },
+        employee: { name: 'יוסי', role: 'מטפל/ת', roleDetail: 'אמנות', salary: 12000, pct: 80 },
       }),
     });
     const id = r.json.employee.id;
 
-    // move to asher
     r = await req(base, '/api/action', {
       method: 'POST', headers: auth,
       body: JSON.stringify({
-        action: 'moveEmployee',
-        fromHouse: 'ramot', toHouse: 'asher', id,
-        reasonType: 'כיסוי חוסר', reason: 'מחליף את דנה', date: '2026-05-20',
+        action: 'startCoverage',
+        employeeId: id,
+        homeHouse: 'ramot',
+        hostHouse: 'asher',
+        startDate: todayStr(),
+        endDate: plusDays(7),
+        reasonType: 'חופשה',
+        reasonDetail: 'מחליף את דנה',
+        bonusAmount: 2000,
       }),
     });
     assert.equal(r.status, 200);
     assert.equal(r.json.ok, true);
+    const eventId = r.json.event.id;
 
-    // verify state
+    // Verify: employee still in ramot, event is active
     r = await req(base, '/api/data', { headers: auth });
-    assert.equal(r.json.houses.ramot.length, 0, 'ramot should be empty');
-    assert.equal(r.json.houses.asher.length, 1, 'asher should have the moved emp');
-    assert.equal(r.json.houses.asher[0].name, 'יוסי');
-    assert.equal(r.json.history.length, 1);
-    assert.equal(r.json.history[0].from, 'ramot');
-    assert.equal(r.json.history[0].to, 'asher');
-    assert.equal(r.json.history[0].reasonType, 'כיסוי חוסר');
-    assert.equal(r.json.history[0].date, '2026-05-20');
+    assert.equal(r.json.houses.ramot.length, 1, 'employee stays in home house');
+    assert.equal(r.json.houses.asher.length, 0, 'employee NOT moved to host');
+    assert.equal(r.json.events.length, 1);
+    assert.equal(r.json.events[0].status, 'active');
+    assert.equal(r.json.events[0].hostHouse, 'asher');
+    assert.equal(r.json.events[0].bonusAmount, 2000);
+
+    // End the coverage
+    r = await req(base, '/api/action', {
+      method: 'POST', headers: auth,
+      body: JSON.stringify({ action: 'endCoverage', eventId }),
+    });
+    assert.equal(r.status, 200);
+
+    r = await req(base, '/api/data', { headers: auth });
+    assert.equal(r.json.events[0].status, 'ended');
+    assert.equal(r.json.houses.ramot.length, 1, 'employee still in home');
   } finally { await close(srv); }
 });
 
-test('moveEmployee: rejects move to same house', async () => {
+test('startCoverage: blocks overlapping active events for same employee', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    const auth = { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
+
+    let r = await req(base, '/api/action', {
+      method: 'POST', headers: auth,
+      body: JSON.stringify({
+        action: 'addEmployee', house: 'ramot',
+        employee: { name: 'יוסי', role: 'אחות', salary: 12000, pct: 100 },
+      }),
+    });
+    const id = r.json.employee.id;
+
+    r = await req(base, '/api/action', {
+      method: 'POST', headers: auth,
+      body: JSON.stringify({
+        action: 'startCoverage',
+        employeeId: id, homeHouse: 'ramot', hostHouse: 'asher',
+        startDate: todayStr(), endDate: plusDays(10),
+        reasonType: 'חופשה',
+      }),
+    });
+    assert.equal(r.status, 200);
+
+    // overlapping range → should fail
+    r = await req(base, '/api/action', {
+      method: 'POST', headers: auth,
+      body: JSON.stringify({
+        action: 'startCoverage',
+        employeeId: id, homeHouse: 'ramot', hostHouse: 'ofroni',
+        startDate: plusDays(5), endDate: plusDays(15),
+        reasonType: 'חופשה',
+      }),
+    });
+    assert.equal(r.status, 409);
+  } finally { await close(srv); }
+});
+
+test('startCoverage: rejects same homeHouse and hostHouse', async () => {
   const { srv, base } = await listen();
   try {
     const token = await login(base);
@@ -282,9 +395,27 @@ test('moveEmployee: rejects move to same house', async () => {
     const r = await req(base, '/api/action', {
       method: 'POST', headers: auth,
       body: JSON.stringify({
+        action: 'startCoverage',
+        employeeId: 'e1', homeHouse: 'ramot', hostHouse: 'ramot',
+        startDate: '2026-05-20', endDate: '2026-06-01',
+        reasonType: 'חופשה',
+      }),
+    });
+    assert.equal(r.status, 400);
+  } finally { await close(srv); }
+});
+
+test('moveEmployee action is gone (returns 400)', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    const auth = { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
+    const r = await req(base, '/api/action', {
+      method: 'POST', headers: auth,
+      body: JSON.stringify({
         action: 'moveEmployee',
-        fromHouse: 'ramot', toHouse: 'ramot', id: 'e1',
-        reasonType: 'כיסוי חוסר',
+        fromHouse: 'ramot', toHouse: 'asher', id: 'e1',
+        reasonType: 'חופשה',
       }),
     });
     assert.equal(r.status, 400);
@@ -301,7 +432,7 @@ test('addEmployee: rejects empty name (server-side validation)', async () => {
       method: 'POST', headers: auth,
       body: JSON.stringify({
         action: 'addEmployee', house: 'ramot',
-        employee: { name: '   ', salary: 1000, pct: 100 },
+        employee: { name: '   ', role: 'אחות', salary: 1000, pct: 100 },
       }),
     });
     assert.equal(r.status, 400);
@@ -318,7 +449,7 @@ test('action with unknown house → 400', async () => {
       method: 'POST', headers: auth,
       body: JSON.stringify({
         action: 'addEmployee', house: 'nope',
-        employee: { name: 'x' },
+        employee: { name: 'x', role: 'אחות' },
       }),
     });
     assert.equal(r.status, 400);

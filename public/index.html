@@ -11,7 +11,7 @@
 :root{
   --bg:#F4F2EC; --card:#FFFFFF; --ink:#1C1B17; --muted:#6E6A5F;
   --line:#D9D5C8; --line-strong:#B6B0A0;
-  --accent:#1F5C4D; --accent-soft:#E4EFEA;
+  --accent:#A4561F; --accent-dark:#8B481A; --accent-soft:#F3E0CB; --accent-tint:#FBEFDE;
   --gold:#A47B2E; --gold-soft:#F3EAD7;
   --danger:#9A2B2B; --danger-soft:#F7E7E7;
   --shadow:0 1px 2px rgba(28,27,23,.04),0 8px 24px rgba(28,27,23,.06);
@@ -43,22 +43,24 @@ body{font-family:'Heebo',sans-serif;direction:rtl;background:var(--bg);color:var
 .stat .val{font-family:'Frank Ruhl Libre',serif;font-size:28px;font-weight:900;line-height:1}
 .stat .sub{font-size:12px;color:var(--muted);margin-top:6px}
 .stat.accent{background:var(--accent);border-color:var(--accent)}
-.stat.accent .lbl{color:#BFD8CF}
+.stat.accent .lbl{color:#F1D9BA}
 .stat.accent .val,.stat.accent .sub{color:#fff}
 
 .section{margin:30px 0}
 .section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;gap:12px;flex-wrap:wrap}
 .section-head h2{font-family:'Frank Ruhl Libre',serif;font-size:21px;font-weight:700}
+.section-head .count-pill{font-size:12px;font-weight:700;background:var(--accent-soft);color:var(--accent);padding:3px 11px;border-radius:999px}
 .btn{font-family:inherit;font-size:13px;font-weight:600;cursor:pointer;padding:9px 18px;border-radius:9px;border:1px solid var(--line-strong);background:var(--card);color:var(--ink);transition:.15s}
 .btn:hover{background:#EEEBE2}
 .btn:disabled{opacity:.55;cursor:not-allowed}
 .btn-primary{background:var(--accent);color:#fff;border-color:var(--accent)}
-.btn-primary:hover{background:#17483C}
+.btn-primary:hover{background:var(--accent-dark)}
 .btn-ghost{background:transparent;border-color:transparent;color:var(--muted)}
 .btn-ghost:hover{background:#EEEBE2;color:var(--ink)}
 .btn-sm{padding:5px 12px;font-size:12px;border-radius:7px}
 
 .tablecard{background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden;box-shadow:var(--shadow)}
+.tablecard.accent-edge{border-right:4px solid var(--accent)}
 .table-scroll{overflow-x:auto}
 table{width:100%;border-collapse:collapse;font-size:14px;min-width:760px}
 thead th{text-align:right;background:#EFEDE5;color:var(--muted);font-weight:700;font-size:12px;padding:13px 18px;border-bottom:1px solid var(--line);white-space:nowrap}
@@ -74,7 +76,8 @@ tbody tr:hover{background:#FAF8F2}
 .note-cell{font-size:13px;color:var(--muted);max-width:220px}
 .row-actions{display:flex;gap:6px;justify-content:flex-start}
 .empty{padding:48px 20px;text-align:center;color:var(--muted);font-size:14px}
-.cover-flag{display:inline-block;font-size:11px;font-weight:700;background:var(--gold-soft);color:var(--gold);padding:2px 9px;border-radius:999px;margin-left:6px}
+.cover-flag{display:inline-block;font-size:11px;font-weight:700;background:var(--accent-soft);color:var(--accent);padding:2px 9px;border-radius:999px;margin-right:6px}
+.cover-flag-note{display:block;font-size:11px;color:var(--accent);font-weight:600;margin-top:4px}
 
 .house-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
 .house-box{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px 20px;box-shadow:var(--shadow);cursor:pointer;transition:.15s}
@@ -82,9 +85,10 @@ tbody tr:hover{background:#FAF8F2}
 .house-box .hb-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
 .house-box .hb-top b{font-family:'Frank Ruhl Libre',serif;font-size:18px}
 .house-box .hb-mgr{font-size:12px;color:var(--muted);font-weight:600}
-.hb-stats{display:flex;gap:26px}
+.hb-stats{display:flex;gap:26px;flex-wrap:wrap}
 .hb-stats div .n{font-family:'Frank Ruhl Libre',serif;font-size:22px;font-weight:900}
 .hb-stats div .t{font-size:12px;color:var(--muted)}
+.hb-stats .bonus-line{font-size:12px;color:var(--accent);font-weight:600;margin-top:4px}
 
 .hist-item{display:flex;align-items:flex-start;gap:14px;padding:14px 0;border-bottom:1px solid #EEEBE2}
 .hist-item:last-child{border-bottom:none}
@@ -97,7 +101,7 @@ tbody tr:hover{background:#FAF8F2}
 
 .overlay{position:fixed;inset:0;background:rgba(20,19,16,.55);display:none;align-items:center;justify-content:center;z-index:100;padding:20px}
 .overlay.show{display:flex}
-.modal{background:var(--card);border-radius:16px;width:100%;max-width:480px;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.3)}
+.modal{background:var(--card);border-radius:16px;width:100%;max-width:520px;max-height:90vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,.3)}
 .modal-head{padding:22px 24px 0}
 .modal-head h3{font-family:'Frank Ruhl Libre',serif;font-size:20px;font-weight:700}
 .modal-head p{font-size:13px;color:var(--muted);margin-top:4px}
@@ -109,6 +113,8 @@ tbody tr:hover{background:#FAF8F2}
 .field textarea{resize:vertical;min-height:64px}
 .field-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .modal-foot{padding:14px 24px 22px;display:flex;gap:10px;justify-content:flex-start}
+.field.hidden{display:none}
+.field .hint{font-size:11px;color:var(--muted);font-weight:500;margin-top:4px}
 
 /* PIN gate */
 .pin-overlay{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:200;padding:20px}
@@ -176,7 +182,11 @@ tbody tr:hover{background:#FAF8F2}
       </div>
       <div class="field">
         <label>תפקיד</label>
-        <input id="f_role" type="text" placeholder="מטפל / אחות / מנהל בית / אב בית / מטבח"/>
+        <select id="f_role" onchange="onRoleChange()"></select>
+      </div>
+      <div class="field hidden" id="f_roleDetail_wrap">
+        <label id="f_roleDetail_label">פירוט תפקיד</label>
+        <input id="f_roleDetail" type="text" placeholder=""/>
       </div>
       <div class="field-row">
         <div class="field">
@@ -190,7 +200,7 @@ tbody tr:hover{background:#FAF8F2}
       </div>
       <div class="field">
         <label>הערות</label>
-        <textarea id="f_notes" placeholder="לדוגמה מחליפה את רוני שבחל״ת זמני עד סוף מאי"></textarea>
+        <textarea id="f_notes" placeholder="הערות פנימיות"></textarea>
       </div>
     </div>
     <div class="modal-foot">
@@ -200,39 +210,52 @@ tbody tr:hover{background:#FAF8F2}
   </div>
 </div>
 
-<!-- Move modal -->
-<div class="overlay" id="moveOverlay">
+<!-- Coverage modal -->
+<div class="overlay" id="coverOverlay">
   <div class="modal">
     <div class="modal-head">
-      <h3>העברת עובד בין בתים</h3>
-      <p id="moveModalSub"></p>
+      <h3>תיעוד מעבר זמני</h3>
+      <p id="coverModalSub"></p>
     </div>
     <div class="modal-body">
       <div class="field">
-        <label>מעבר לבית</label>
-        <select id="m_house"></select>
+        <label>בית מתארח</label>
+        <select id="cv_hostHouse" onchange="onCoverHostChange()"></select>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label>מתאריך</label>
+          <input id="cv_startDate" type="date"/>
+        </div>
+        <div class="field">
+          <label>עד תאריך</label>
+          <input id="cv_endDate" type="date"/>
+        </div>
       </div>
       <div class="field">
         <label>סיבת המעבר</label>
-        <select id="m_reasonType">
-          <option value="כיסוי חוסר">כיסוי חוסר — מישהו בחופש או חל״ת או מחלה</option>
-          <option value="העברה קבועה">העברה קבועה</option>
-          <option value="צורך תפעולי">צורך תפעולי זמני</option>
-          <option value="אחר">אחר</option>
+        <select id="cv_reasonType"></select>
+      </div>
+      <div class="field">
+        <label>פירוט</label>
+        <textarea id="cv_reasonDetail" placeholder="פירוט חופשי"></textarea>
+      </div>
+      <div class="field">
+        <label>מחליף/ה את</label>
+        <select id="cv_coversEmployeeId">
+          <option value="">— ללא —</option>
         </select>
+        <div class="hint">בחירה אופציונלית של עובד/ת מהבית המתארח שאותו/ה מחליפים</div>
       </div>
       <div class="field">
-        <label>פירוט הסיבה</label>
-        <textarea id="m_reason" placeholder="לדוגמה מחליף את דנה שיצאה לחופשת לידה ברעננה אשר"></textarea>
-      </div>
-      <div class="field">
-        <label>תאריך מעבר</label>
-        <input id="m_date" type="date"/>
+        <label>תוספת תשלום למעבר (₪)</label>
+        <input id="cv_bonusAmount" type="number" min="0" step="100" placeholder="0"/>
+        <div class="hint">נספרת בעלות הבית המתארח כל עוד האירוע פעיל</div>
       </div>
     </div>
     <div class="modal-foot">
-      <button class="btn btn-primary" id="moveSaveBtn" onclick="saveMove()">בצע העברה</button>
-      <button class="btn btn-ghost" onclick="closeMove()">ביטול</button>
+      <button class="btn btn-primary" id="coverSaveBtn" onclick="saveCover()">תיעוד</button>
+      <button class="btn btn-ghost" onclick="closeCover()">ביטול</button>
     </div>
   </div>
 </div>
@@ -254,15 +277,36 @@ const HOUSES = [
   {id:'rehab',   name:'קיסריה ריהאב',  mgr:'רנטה'},
 ];
 
+const ROLE_OPTIONS = [
+  'מנהל/ת','רכז/ת','מדריך/ה','מטפל/ת','אחות',
+  'פסיכיאטר/ית','טבח/ית','איש/אשת אחזקה','אחר',
+];
+const REASON_TYPES = [
+  'חופשה','חל״ת','מחלה','חופשת לידה','ניתוח','צורך תפעולי','אחר',
+];
+
 const TOKEN_KEY = 'ezone_staff_token_v1';
-const {cost: calcCost, houseCost: calcHouseCost, houseGross: calcHouseGross, avgPct: calcAvgPct} = window.EZONE_CALC;
+const {
+  cost: calcCost,
+  houseCost: calcHouseCost,
+  houseGross: calcHouseGross,
+  avgPct: calcAvgPct,
+  todayStr,
+  isActive: calcIsActive,
+  activeEvents: calcActiveEvents,
+  endedEvents: calcEndedEvents,
+  eventsHostedBy: calcEventsHostedBy,
+  activeBonus: calcActiveBonus,
+  houseTotal: calcHouseTotal,
+  networkTotal: calcNetworkTotal,
+  activeOutgoingFor: calcActiveOutgoingFor,
+} = window.EZONE_CALC;
 
 let DATA = {ramot:[], asher:[], ofroni:[], rehab:[]};
-let HISTORY = [];
+let EVENTS = [];
 let view = 'central';
-let editId = null;
-let moveId = null;
-let moveFrom = null;
+let editEmp = null;    // {houseId, empId?}
+let coverFrom = null;  // {houseId, empId}
 
 /* ---------- API layer ---------- */
 
@@ -291,7 +335,7 @@ async function loadData(){
   const d = await apiFetch('/api/data');
   DATA = d.houses || {ramot:[], asher:[], ofroni:[], rehab:[]};
   HOUSES.forEach(h => { if (!DATA[h.id]) DATA[h.id] = []; });
-  HISTORY = d.history || [];
+  EVENTS = d.events || [];
 }
 
 async function doAction(payload){
@@ -346,11 +390,30 @@ async function submitPin(){
 /* ---------- helpers ---------- */
 
 const fmt = n => '₪'+Number(n||0).toLocaleString('he-IL');
+const fmtDate = s => s || '';
 const houseName = id => (HOUSES.find(h=>h.id===id)||{}).name||id;
 const houseMgr  = id => (HOUSES.find(h=>h.id===id)||{}).mgr||'';
 function houseCount(id){ return (DATA[id]||[]).length; }
-function totalCost(){ return HOUSES.reduce((s,h)=>s+calcHouseCost(DATA[h.id]||[]),0); }
 function totalCount(){ return HOUSES.reduce((s,h)=>s+houseCount(h.id),0); }
+function totalCost(today){ return calcNetworkTotal(DATA, EVENTS, today); }
+function escapeHtml(s){
+  return String(s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function roleLabel(emp){
+  const r = escapeHtml(emp.role||'—');
+  const d = (emp.roleDetail||'').trim();
+  return d ? `${r} – ${escapeHtml(d)}` : r;
+}
+function empById(houseId, empId){
+  return (DATA[houseId]||[]).find(e=>e.id===empId);
+}
+function empName(employeeId){
+  for (const h of HOUSES) {
+    const e = (DATA[h.id]||[]).find(x => x.id === employeeId);
+    if (e) return e.name;
+  }
+  return employeeId || '';
+}
 
 function toast(msg, isErr){
   const t = document.getElementById('toast');
@@ -393,34 +456,53 @@ function render(){
   app.innerHTML = view==='central' ? centralView() : houseView(view);
 }
 
-function escapeHtml(s){
-  return String(s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
-
 function centralView(){
-  const recentMoves = HISTORY.slice().reverse();
-  let houseBoxes = HOUSES.map(h=>`
+  const today = todayStr();
+  const active = calcActiveEvents(EVENTS, today);
+  const ended = calcEndedEvents(EVENTS, today).slice().reverse();
+
+  const houseBoxes = HOUSES.map(h=>{
+    const bonus = calcActiveBonus(EVENTS, h.id, today);
+    return `
     <div class="house-box" onclick="go('${h.id}')">
       <div class="hb-top">
         <b>${escapeHtml(h.name)}</b>
         <span class="hb-mgr">מנהל: ${escapeHtml(h.mgr)}</span>
       </div>
       <div class="hb-stats">
-        <div><div class="n">${houseCount(h.id)}</div><div class="t">עובדים</div></div>
-        <div><div class="n">${fmt(calcHouseCost(DATA[h.id]||[]))}</div><div class="t">עלות חודשית</div></div>
+        <div><div class="n">${houseCount(h.id)}</div><div class="t">עובדי בית</div></div>
+        <div>
+          <div class="n">${fmt(calcHouseTotal(DATA[h.id]||[], EVENTS, h.id, today))}</div>
+          <div class="t">עלות חודשית</div>
+          ${bonus ? `<div class="bonus-line">כולל בונוסי כיסוי ${fmt(bonus)}</div>` : ''}
+        </div>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 
-  let histHtml = recentMoves.length ? recentMoves.map(m=>`
+  const activeRows = active.length ? active.map(ev=>`
+    <tr>
+      <td class="emp-name">${escapeHtml(ev.employeeName)}</td>
+      <td>${escapeHtml(houseName(ev.homeHouse))}</td>
+      <td>${escapeHtml(houseName(ev.hostHouse))}</td>
+      <td>${ev.coversEmployeeId ? escapeHtml(empName(ev.coversEmployeeId)) : '<span style="color:#B6B0A0">—</span>'}</td>
+      <td>${escapeHtml(ev.reasonType)}${ev.reasonDetail?`<div class="hist-meta">${escapeHtml(ev.reasonDetail)}</div>`:''}</td>
+      <td>${escapeHtml(fmtDate(ev.startDate))}</td>
+      <td>${escapeHtml(fmtDate(ev.endDate))}</td>
+      <td class="money">${ev.bonusAmount?fmt(ev.bonusAmount):'<span style="color:#B6B0A0">—</span>'}</td>
+      <td><button class="btn btn-sm" onclick="endCover('${ev.id}','${escapeHtml(ev.employeeName)}')">סיים</button></td>
+    </tr>`).join('') : `<tr><td colspan="9"><div class="empty">אין כרגע אירועי כיסוי פעילים</div></td></tr>`;
+
+  const endedRows = ended.length ? ended.map(ev=>`
     <div class="hist-item">
       <div class="hist-dot"></div>
       <div class="hist-body">
-        <b>${escapeHtml(m.name)}</b> הועבר/ה
-        <span class="hist-arrow">מ${escapeHtml(houseName(m.from))} ל${escapeHtml(houseName(m.to))}</span>
-        <div class="hist-meta">${escapeHtml(m.date)} · ${escapeHtml(m.reasonType)}</div>
-        ${m.reason?`<div class="hist-reason">${escapeHtml(m.reason)}</div>`:''}
+        <b>${escapeHtml(ev.employeeName)}</b> כיסה/כיסתה
+        <span class="hist-arrow">מ${escapeHtml(houseName(ev.homeHouse))} ל${escapeHtml(houseName(ev.hostHouse))}</span>
+        <div class="hist-meta">${escapeHtml(fmtDate(ev.startDate))} – ${escapeHtml(fmtDate(ev.endDate))} · ${escapeHtml(ev.reasonType)}${ev.bonusAmount?` · בונוס ${fmt(ev.bonusAmount)}`:''}</div>
+        ${ev.reasonDetail?`<div class="hist-reason">${escapeHtml(ev.reasonDetail)}</div>`:''}
       </div>
-    </div>`).join('') : `<div class="empty">עדיין לא בוצעו העברות</div>`;
+    </div>`).join('') : `<div class="empty">עדיין לא נסגרו אירועי כיסוי</div>`;
 
   return `
   <div class="head">
@@ -436,8 +518,8 @@ function centralView(){
     </div>
     <div class="stat">
       <div class="lbl">עלות שכר חודשית</div>
-      <div class="val">${fmt(totalCost())}</div>
-      <div class="sub">ברוטו · משוקלל לחלקיות</div>
+      <div class="val">${fmt(totalCost(today))}</div>
+      <div class="sub">משכורות בית + בונוסי כיסוי פעילים</div>
     </div>
     <div class="stat">
       <div class="lbl">בתים פעילים</div>
@@ -445,9 +527,9 @@ function centralView(){
       <div class="sub">רמות · אשר · עפרוני · ריהאב</div>
     </div>
     <div class="stat">
-      <div class="lbl">העברות שבוצעו</div>
-      <div class="val">${HISTORY.length}</div>
-      <div class="sub">לאורך כל ההיסטוריה</div>
+      <div class="lbl">אירועי כיסוי פעילים</div>
+      <div class="val">${active.length}</div>
+      <div class="sub">היום ${escapeHtml(today)}</div>
     </div>
   </div>
 
@@ -457,19 +539,48 @@ function centralView(){
   </div>
 
   <div class="section">
-    <div class="section-head"><h2>היסטוריית העברות</h2></div>
-    <div class="tablecard" style="padding:8px 22px">${histHtml}</div>
+    <div class="section-head">
+      <h2>אירועי כיסוי פעילים</h2>
+      <span class="count-pill">${active.length}</span>
+    </div>
+    <div class="tablecard accent-edge">
+      <div class="table-scroll">
+      <table>
+        <thead><tr>
+          <th>עובד/ת</th><th>מבית</th><th>לבית</th><th>מחליף/ה את</th>
+          <th>סיבה</th><th>מתאריך</th><th>עד תאריך</th><th>תוספת</th><th></th>
+        </tr></thead>
+        <tbody>${activeRows}</tbody>
+      </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <h2>אירועי כיסוי קודמים</h2>
+      <span class="count-pill">${ended.length}</span>
+    </div>
+    <div class="tablecard" style="padding:8px 22px">${endedRows}</div>
   </div>`;
 }
 
 function houseView(id){
-  const list=DATA[id]||[];
+  const today = todayStr();
+  const list = DATA[id] || [];
+  const incoming = calcEventsHostedBy(EVENTS, id, today);
+  const incomingBonus = calcActiveBonus(EVENTS, id, today);
+  const houseT = calcHouseTotal(list, EVENTS, id, today);
+
   const rows = list.length ? list.map(e=>{
-    const isCover = (e.notes||'').includes('כיסוי') || (e.notes||'').includes('מחליף') || (e.notes||'').includes('מחליפה');
+    const outgoing = calcActiveOutgoingFor(EVENTS, e.id, today);
+    const badge = outgoing
+      ? `<span class="cover-flag">כרגע עוזר/ת ב${escapeHtml(houseName(outgoing.hostHouse))} עד ${escapeHtml(fmtDate(outgoing.endDate))}</span>`
+      : '';
     return `
     <tr>
-      <td class="emp-name">${escapeHtml(e.name)}</td>
-      <td><span class="role-tag">${escapeHtml(e.role||'—')}</span></td>
+      <td class="emp-name">${escapeHtml(e.name)}${badge}</td>
+      <td><span class="role-tag">${roleLabel(e)}</span></td>
       <td class="money">${fmt(e.salary)}</td>
       <td>
         <div class="pct-bar">
@@ -478,16 +589,46 @@ function houseView(id){
         </div>
       </td>
       <td class="money">${fmt(calcCost(e))}</td>
-      <td class="note-cell">${e.notes?escapeHtml(e.notes):'<span style="color:#B6B0A0">—</span>'}${isCover?'<span class="cover-flag">כיסוי</span>':''}</td>
+      <td class="note-cell">${e.notes?escapeHtml(e.notes):'<span style="color:#B6B0A0">—</span>'}</td>
       <td>
         <div class="row-actions">
-          <button class="btn btn-sm" onclick="openMove('${id}','${e.id}')">העבר</button>
+          <button class="btn btn-sm" onclick="openCover('${id}','${e.id}')">תיעוד מעבר</button>
           <button class="btn btn-sm" onclick="openEmp('${id}','${e.id}')">ערוך</button>
           <button class="btn btn-sm btn-ghost" onclick="delEmp('${id}','${e.id}')">מחק</button>
         </div>
       </td>
     </tr>`;
   }).join('') : `<tr><td colspan="7"><div class="empty">אין עובדים בבית זה. לחצי "הוסף עובד" כדי להתחיל.</div></td></tr>`;
+
+  const incomingSection = incoming.length ? `
+  <div class="section">
+    <div class="section-head">
+      <h2>עוזרים זמניים / כיסוי</h2>
+      <span class="count-pill">${incoming.length}</span>
+    </div>
+    <div class="tablecard accent-edge">
+      <div class="table-scroll">
+      <table>
+        <thead><tr>
+          <th>שם</th><th>מהבית</th><th>מחליף/ה את</th><th>סיבה</th>
+          <th>מתאריך</th><th>עד תאריך</th><th>תוספת</th><th></th>
+        </tr></thead>
+        <tbody>${incoming.map(ev=>`
+          <tr>
+            <td class="emp-name">${escapeHtml(ev.employeeName)}</td>
+            <td>${escapeHtml(houseName(ev.homeHouse))}</td>
+            <td>${ev.coversEmployeeId ? escapeHtml(empName(ev.coversEmployeeId)) : '<span style="color:#B6B0A0">—</span>'}</td>
+            <td>${escapeHtml(ev.reasonType)}${ev.reasonDetail?`<div class="hist-meta">${escapeHtml(ev.reasonDetail)}</div>`:''}</td>
+            <td>${escapeHtml(fmtDate(ev.startDate))}</td>
+            <td>${escapeHtml(fmtDate(ev.endDate))}</td>
+            <td class="money">${ev.bonusAmount?fmt(ev.bonusAmount):'<span style="color:#B6B0A0">—</span>'}</td>
+            <td><button class="btn btn-sm" onclick="endCover('${ev.id}','${escapeHtml(ev.employeeName)}')">סיים</button></td>
+          </tr>`).join('')}</tbody>
+      </table>
+      </div>
+    </div>
+    <div class="hist-meta" style="margin-top:10px">השכר הבסיסי של עובדים אלו נספר בעלות הבית שבו הם משויכים. רק התוספת מופיעה כאן.</div>
+  </div>` : '';
 
   return `
   <div class="head">
@@ -499,12 +640,12 @@ function houseView(id){
   <div class="stats">
     <div class="stat accent">
       <div class="lbl">עובדים בבית</div>
-      <div class="val">${houseCount(id)}</div>
+      <div class="val">${list.length}</div>
     </div>
     <div class="stat">
-      <div class="lbl">עלות שכר חודשית</div>
-      <div class="val">${fmt(calcHouseCost(list))}</div>
-      <div class="sub">משוקלל לחלקיות משרה</div>
+      <div class="lbl">עלות חודשית כוללת</div>
+      <div class="val">${fmt(houseT)}</div>
+      <div class="sub">${incomingBonus?`כולל בונוסי כיסוי ${fmt(incomingBonus)}`:'משוקלל לחלקיות'}</div>
     </div>
     <div class="stat">
       <div class="lbl">סה״כ ברוטו במשרה מלאה</div>
@@ -516,6 +657,8 @@ function houseView(id){
       <div class="val">${calcAvgPct(list)}%</div>
     </div>
   </div>
+
+  ${incomingSection}
 
   <div class="section">
     <div class="section-head">
@@ -536,32 +679,73 @@ function houseView(id){
   </div>`;
 }
 
-/* ---------- mutations (server-backed) ---------- */
+/* ---------- employee CRUD ---------- */
+
+function renderRoleSelect(currentRole, currentDetail){
+  const sel = document.getElementById('f_role');
+  let html = '';
+  const known = ROLE_OPTIONS.includes(currentRole);
+  const effectiveRole = known ? currentRole : (currentRole ? 'אחר' : ROLE_OPTIONS[0]);
+  ROLE_OPTIONS.forEach(r=>{
+    html += `<option value="${escapeHtml(r)}" ${r===effectiveRole?'selected':''}>${escapeHtml(r)}</option>`;
+  });
+  sel.innerHTML = html;
+  // If the stored role isn't in the dropdown, surface it via roleDetail so
+  // round-trip preserves the original wording.
+  const detail = known ? (currentDetail||'') : (currentRole || currentDetail || '');
+  document.getElementById('f_roleDetail').value = detail;
+  onRoleChange();
+}
+
+function onRoleChange(){
+  const role = document.getElementById('f_role').value;
+  const wrap = document.getElementById('f_roleDetail_wrap');
+  const lbl = document.getElementById('f_roleDetail_label');
+  const inp = document.getElementById('f_roleDetail');
+  if (role === 'מטפל/ת'){
+    wrap.classList.remove('hidden');
+    lbl.textContent = 'התמחות / סוג טיפול';
+    inp.placeholder = 'לדוגמה: אמנות, קבוצות, CBT';
+  } else if (role === 'אחר'){
+    wrap.classList.remove('hidden');
+    lbl.textContent = 'פרט/י תפקיד';
+    inp.placeholder = 'תפקיד חופשי';
+  } else {
+    wrap.classList.add('hidden');
+    inp.value = '';
+  }
+}
 
 function openEmp(houseId, empId){
-  editId = empId ? {houseId,empId} : {houseId};
+  editEmp = empId ? {houseId,empId} : {houseId};
   const isEdit = !!empId;
   document.getElementById('empModalTitle').textContent = isEdit?'עריכת עובד':'עובד חדש';
   document.getElementById('empModalSub').textContent = houseName(houseId);
-  let e = {name:'',role:'',salary:'',pct:100,notes:''};
-  if(isEdit){ e = (DATA[houseId]||[]).find(x=>x.id===empId)||e; }
-  f_name.value=e.name; f_role.value=e.role;
-  f_salary.value=e.salary; f_pct.value=e.pct; f_notes.value=e.notes||'';
+  let e = {name:'',role:'',roleDetail:'',salary:'',pct:100,notes:''};
+  if(isEdit){ e = empById(houseId, empId) || e; }
+  f_name.value = e.name;
+  renderRoleSelect(e.role||'', e.roleDetail||'');
+  f_salary.value = e.salary;
+  f_pct.value = e.pct;
+  f_notes.value = e.notes||'';
   document.getElementById('empOverlay').classList.add('show');
   setTimeout(()=>f_name.focus(), 50);
 }
 function closeEmp(){ document.getElementById('empOverlay').classList.remove('show'); }
 
 async function saveEmp(){
-  const {houseId,empId}=editId;
+  const {houseId,empId}=editEmp;
+  const role = document.getElementById('f_role').value;
   const employee={
-    name:f_name.value.trim(),
-    role:f_role.value.trim(),
-    salary:Number(f_salary.value)||0,
-    pct:Math.min(100,Math.max(1,Number(f_pct.value)||100)),
-    notes:f_notes.value.trim()
+    name: f_name.value.trim(),
+    role,
+    roleDetail: document.getElementById('f_roleDetail').value.trim(),
+    salary: Number(f_salary.value)||0,
+    pct: Math.min(100,Math.max(1,Number(f_pct.value)||100)),
+    notes: f_notes.value.trim()
   };
   if(!employee.name){ alert('יש להזין שם'); return; }
+  if(role === 'אחר' && !employee.roleDetail){ alert('כשהתפקיד "אחר" יש לפרט'); return; }
   setBusy('empSaveBtn', true);
   try{
     if(empId){
@@ -593,46 +777,85 @@ async function delEmp(houseId,empId){
   }
 }
 
-function openMove(houseId, empId){
-  moveId=empId; moveFrom=houseId;
-  const e=(DATA[houseId]||[]).find(x=>x.id===empId);
-  if(!e) return;
-  document.getElementById('moveModalSub').textContent =
-    `${e.name} · כרגע ב${houseName(houseId)}`;
-  const sel=document.getElementById('m_house');
-  sel.innerHTML=HOUSES.filter(h=>h.id!==houseId)
-    .map(h=>`<option value="${h.id}">${h.name} · מנהל ${h.mgr}</option>`).join('');
-  document.getElementById('m_reasonType').value='כיסוי חוסר';
-  document.getElementById('m_reason').value='';
-  document.getElementById('m_date').value=new Date().toISOString().slice(0,10);
-  document.getElementById('moveOverlay').classList.add('show');
-}
-function closeMove(){ document.getElementById('moveOverlay').classList.remove('show'); }
+/* ---------- coverage events ---------- */
 
-async function saveMove(){
-  const toHouse=document.getElementById('m_house').value;
-  const reasonType=document.getElementById('m_reasonType').value;
-  const reason=document.getElementById('m_reason').value.trim();
-  const date=document.getElementById('m_date').value||new Date().toISOString().slice(0,10);
-  setBusy('moveSaveBtn', true, 'מבצע…');
+function openCover(houseId, empId){
+  const e = empById(houseId, empId);
+  if(!e) return;
+  coverFrom = {houseId, empId};
+  document.getElementById('coverModalSub').textContent =
+    `${e.name} · בית אם: ${houseName(houseId)}`;
+  const sel = document.getElementById('cv_hostHouse');
+  sel.innerHTML = HOUSES.filter(h=>h.id!==houseId)
+    .map(h=>`<option value="${h.id}">${escapeHtml(h.name)} · מנהל ${escapeHtml(h.mgr)}</option>`).join('');
+  const reasonSel = document.getElementById('cv_reasonType');
+  reasonSel.innerHTML = REASON_TYPES.map(r=>`<option value="${escapeHtml(r)}">${escapeHtml(r)}</option>`).join('');
+  document.getElementById('cv_reasonDetail').value = '';
+  document.getElementById('cv_bonusAmount').value = '';
+  const today = todayStr();
+  document.getElementById('cv_startDate').value = today;
+  document.getElementById('cv_endDate').value = today;
+  onCoverHostChange();
+  document.getElementById('coverOverlay').classList.add('show');
+}
+function closeCover(){ document.getElementById('coverOverlay').classList.remove('show'); }
+
+function onCoverHostChange(){
+  const host = document.getElementById('cv_hostHouse').value;
+  const sel = document.getElementById('cv_coversEmployeeId');
+  const roster = DATA[host] || [];
+  let html = '<option value="">— ללא —</option>';
+  roster.forEach(e=>{
+    html += `<option value="${escapeHtml(e.id)}">${escapeHtml(e.name)}</option>`;
+  });
+  sel.innerHTML = html;
+}
+
+async function saveCover(){
+  const {houseId, empId} = coverFrom;
+  const payload = {
+    action: 'startCoverage',
+    employeeId: empId,
+    homeHouse: houseId,
+    hostHouse: document.getElementById('cv_hostHouse').value,
+    startDate: document.getElementById('cv_startDate').value,
+    endDate: document.getElementById('cv_endDate').value,
+    reasonType: document.getElementById('cv_reasonType').value,
+    reasonDetail: document.getElementById('cv_reasonDetail').value.trim(),
+    coversEmployeeId: document.getElementById('cv_coversEmployeeId').value,
+    bonusAmount: Number(document.getElementById('cv_bonusAmount').value)||0,
+  };
+  if (!payload.startDate || !payload.endDate){
+    alert('יש להזין תאריך התחלה ותאריך סיום');
+    return;
+  }
+  if (payload.endDate < payload.startDate){
+    alert('תאריך סיום מוקדם מתאריך התחלה');
+    return;
+  }
+  setBusy('coverSaveBtn', true, 'שומר…');
   try{
-    await doAction({
-      action:'moveEmployee',
-      fromHouse: moveFrom,
-      toHouse,
-      id: moveId,
-      reasonType, reason, date
-    });
+    await doAction(payload);
     await loadData();
-    closeMove();
-    view = toHouse;
+    closeCover();
     render();
-    window.scrollTo(0,0);
-    toast('ההעברה בוצעה');
+    toast('אירוע הכיסוי נשמר');
   } catch(err){
-    toast(err.message || 'שגיאה בהעברה', true);
+    toast(err.message || 'שגיאה בשמירה', true);
   } finally {
-    setBusy('moveSaveBtn', false);
+    setBusy('coverSaveBtn', false);
+  }
+}
+
+async function endCover(eventId, name){
+  if(!confirm(`לסיים את אירוע הכיסוי של ${name}?`)) return;
+  try{
+    await doAction({action:'endCoverage', eventId});
+    await loadData();
+    render();
+    toast('אירוע הכיסוי נסגר');
+  } catch(err){
+    toast(err.message || 'שגיאה בסגירה', true);
   }
 }
 
@@ -648,7 +871,6 @@ async function boot(){
   } catch(err){
     document.getElementById('boot').style.display='none';
     if (err.message && err.message.indexOf('פג תוקף') === 0){
-      // showPinGate already called from apiFetch
       return;
     }
     toast(err.message || 'שגיאה בטעינה', true);
