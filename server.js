@@ -153,8 +153,12 @@ app.use('/api', (req, res) => res.status(404).json({ error: 'not found' }));
 
 // ---- start ----
 if (require.main === module) {
-  app.listen(PORT, () => {
-    console.log(`E-ZONE staffing server listening on :${PORT}`);
+  // Bind explicitly to 0.0.0.0 so Railway's edge router can reach us.
+  // Without an explicit host, Node's default in some environments is
+  // ::1/127.0.0.1, which passes the internal healthcheck (same container)
+  // but is unreachable from outside.
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`E-ZONE staffing server listening on 0.0.0.0:${PORT} (PORT=${PORT}, process.env.PORT=${process.env.PORT || '<unset>'})`);
   });
 }
 
