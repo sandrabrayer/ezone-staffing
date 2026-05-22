@@ -72,7 +72,8 @@ body{
   color:var(--accent-deep);
   border-color:transparent;
 }
-.logout{
+.logout,
+.topbar-link{
   background:transparent;
   border:none;
   color:var(--muted);
@@ -83,8 +84,11 @@ body{
   font-family:inherit;
   cursor:pointer;
   margin-inline-start:6px;
+  transition:.15s;
 }
-.logout:hover{color:var(--ink);background:var(--bg-elevated)}
+.logout:hover,
+.topbar-link:hover{color:var(--ink);background:var(--bg-elevated)}
+.topbar-link.on{color:var(--accent-1);background:var(--accent-soft)}
 
 /* Page head */
 .head{padding:32px 0 12px}
@@ -405,18 +409,7 @@ tbody tr:hover{
 .section-note{font-size:12px;color:var(--muted);margin-top:10px;line-height:1.5}
 .cover-meta{font-size:11px;color:var(--ink-soft);margin-right:6px;font-weight:600}
 
-/* Collapsible archive section on the central dashboard */
-.section-head.collapsible{cursor:pointer;user-select:none}
-.section-head.collapsible .caret{
-  display:inline-block;
-  margin-inline-start:8px;
-  font-size:14px;
-  color:var(--muted);
-  transition:transform .2s;
-}
-.section-head.collapsible.open .caret{transform:rotate(180deg);color:var(--accent-1)}
-.archive-body{display:none}
-.archive-body.show{display:block}
+/* Archive view (dedicated page, reached via the topbar link) */
 .archive-table tbody td{font-size:13px;color:var(--ink-soft)}
 .archive-table .col-date{font-variant-numeric:tabular-nums;white-space:nowrap}
 
@@ -823,7 +816,6 @@ let view = 'central';
 let editEmp = null;    // {houseId, empId?}
 let coverFrom = null;  // {houseId, empId}
 let termFrom = null;   // {houseId, empId, empName}
-let archiveOpen = false;
 
 /* ---------- API layer ---------- */
 
@@ -997,6 +989,7 @@ function renderSwitch(){
   HOUSES.forEach(h=>{
     html+=`<button class="${view===h.id?'on':''}" onclick="go('${h.id}')">${h.name}</button>`;
   });
+  html += `<button class="topbar-link ${view==='archive'?'on':''}" onclick="go('archive')">ארכיב עובדים</button>`;
   html += `<button class="logout" onclick="logout()">יציאה</button>`;
   el.innerHTML=html;
 }
@@ -1006,7 +999,9 @@ function logout(){ clearToken(); showPinGate(); }
 function render(){
   renderSwitch();
   const app=document.getElementById('app');
-  app.innerHTML = view==='central' ? centralView() : houseView(view);
+  if (view === 'central')      app.innerHTML = centralView();
+  else if (view === 'archive') app.innerHTML = archiveView();
+  else                         app.innerHTML = houseView(view);
 }
 
 function centralView(){
@@ -1037,18 +1032,6 @@ function centralView(){
   const activeList = active.length
     ? active.map(ev => renderEventRow(ev, true)).join('')
     : `<div class="empty">אין כרגע שיבוץ החלפות פעיל</div>`;
-
-  const archiveRows = ARCHIVE.length
-    ? ARCHIVE.slice().sort((a,b)=> String(b.terminationDate).localeCompare(String(a.terminationDate))).map(a => `
-      <tr>
-        <td class="emp-name">${escapeHtml(a.name)}</td>
-        <td>${escapeHtml(houseName(a.homeHouse))}</td>
-        <td><span class="role-tag">${escapeHtml(a.role||'—')}${a.roleDetail?` – ${escapeHtml(a.roleDetail)}`:''}</span></td>
-        <td class="col-date">${escapeHtml(fmtDate(a.terminationDate))}</td>
-        <td>${a.reasonType ? escapeHtml(a.reasonType) : '<span style="color:#8A8FA3">—</span>'}</td>
-        <td class="note-cell">${a.reasonDetail ? escapeHtml(a.reasonDetail) : '<span style="color:#8A8FA3">—</span>'}</td>
-      </tr>`).join('')
-    : `<tr><td colspan="6"><div class="empty">אין עדיין רשומות באורכיב</div></td></tr>`;
 
   return `
   <div class="head">
@@ -1092,21 +1075,44 @@ function centralView(){
     <div class="tablecard accent-edge">
       <div class="event-list">${activeList}</div>
     </div>
+  </div>`;
+}
+
+function archiveView(){
+  const rows = ARCHIVE.length
+    ? ARCHIVE.slice().sort((a,b)=> String(b.terminationDate).localeCompare(String(a.terminationDate))).map(a => `
+      <tr>
+        <td class="emp-name">${escapeHtml(a.name)}</td>
+        <td>${escapeHtml(houseName(a.homeHouse))}</td>
+        <td><span class="role-tag">${escapeHtml(a.role||'—')}${a.roleDetail?` – ${escapeHtml(a.roleDetail)}`:''}</span></td>
+        <td class="col-date">${escapeHtml(fmtDate(a.terminationDate))}</td>
+        <td>${a.reasonType ? escapeHtml(a.reasonType) : '<span style="color:var(--muted)">—</span>'}</td>
+        <td class="note-cell">${a.reasonDetail ? escapeHtml(a.reasonDetail) : '<span style="color:var(--muted)">—</span>'}</td>
+      </tr>`).join('')
+    : `<tr><td colspan="6"><div class="empty">אין עדיין רשומות בארכיב</div></td></tr>`;
+
+  return `
+  <div class="head">
+    <h1>ארכיב עובדים</h1>
+    <p>רשומות של עובדים שעבודתם הופסקה. ממוין לפי תאריך הסיום — חדש ביותר ראשון.</p>
+  </div>
+
+  <div class="stats">
+    <div class="stat accent">
+      <div class="lbl">סה״כ רשומות בארכיב</div>
+      <div class="val">${ARCHIVE.length}</div>
+    </div>
   </div>
 
   <div class="section">
-    <div class="section-head collapsible ${archiveOpen?'open':''}" onclick="toggleArchive()">
-      <h2>אורכיב עובדים <span class="caret">▾</span></h2>
-      <span class="count-pill">${ARCHIVE.length}</span>
-    </div>
-    <div class="tablecard archive-body ${archiveOpen?'show':''}" id="archiveBody">
+    <div class="tablecard">
       <div class="table-scroll">
       <table class="archive-table">
         <thead><tr>
           <th>שם</th><th>בית</th><th>תפקיד</th>
           <th>תאריך סיום</th><th>סיבה</th><th>הערה</th>
         </tr></thead>
-        <tbody>${archiveRows}</tbody>
+        <tbody>${rows}</tbody>
       </table>
       </div>
     </div>
@@ -1445,13 +1451,6 @@ async function saveTerminate(){
   } finally {
     setBusy('termSaveBtn', false);
   }
-}
-
-/* ---------- archive panel ---------- */
-
-function toggleArchive(){
-  archiveOpen = !archiveOpen;
-  render();
 }
 
 /* ---------- boot ---------- */

@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented here. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [2.1.2] — 2026-05-22 — Archive on a dedicated page + Hebrew typo fix
+
+- **Spelling**: section header was `אורכיב עובדים` — the correct Hebrew is `ארכיב` (without the ו). Fixed every occurrence in `public/index.html` and `CHANGELOG.md`. New `tests/spelling.test.js` walks the whole repo on every test run and asserts `אורכיב` never appears again, plus asserts the dashboard nav uses the correctly-spelled `ארכיב עובדים`.
+- **Archive moved off the dashboard**: the collapsed `ארכיב עובדים` section is gone from `centralView`. The archive now lives on its own SPA view, reached via a small `ארכיב עובדים` link in the topbar (right of the house tabs, before `יציאה`). Same dark-navy + gold theme; the view has its own page title, a single accent stat card showing the total, and the full table sorted newest-first.
+- **Auth gating unchanged but pinned**: the archive view is part of the same SPA, gated by the existing PIN flow — `boot()` only renders any view (including archive) after `loadData()` succeeds against the auth-required `/api/data` endpoint. A new page-load test asserts this explicitly: with no token, the PIN overlay shows, the app container stays hidden, and no `.archive-table` ever reaches the DOM.
+- **No Apps Script changes** — the data contract (`{ houses, events, archive }`) is unchanged. Railway picks this up on push; no manual redeploy needed.
+
+### Tests added
+- `tests/spelling.test.js`: repo-wide grep for `אורכיב`, plus the dashboard's `ארכיב עובדים` correctness check.
+- `tests/page-load.test.js`: dashboard view does NOT contain `.archive-table`; archive view renders archive rows sorted newest-first; PIN gate shows when there's no token (and no archive content leaks into the hidden app container). A new `authAndBoot()` helper seeds a session token via `localStorage`, stubs `fetch`, and awaits `boot()` so tests can drive the post-auth state deterministically.
+
 ## [2.1.0] — 2026-05-21 — Termination flow + archive + dashboard tweaks
 
 Adds an explicit "end of employment" workflow with an archive tab, removes the past-events list from the dashboard, and tightens the row actions.
@@ -40,7 +51,7 @@ Base salary still appears in **exactly one** house total. A terminated employee 
 ### UI changes
 - Dashboard section heading renamed: `אירועי כיסוי פעילים` → **`שיבוץ החלפות בין בתים`** (both the stat-card label and the section H2).
 - The `אירועי כיסוי קודמים` section is removed from the dashboard. The data still gets recorded in the `events` tab — the Sheet stays the audit-of-record. The dashboard simply doesn't render past events anymore.
-- New collapsed section **`אורכיב עובדים`** replaces it in the same screen position. Click to toggle. Read-only table with `שם · בית · תפקיד · תאריך סיום · סיבה · הערה`. Rows are sorted by termination date, newest first. Dates render `DD/MM/YYYY` via the existing helper.
+- New section **`ארכיב עובדים`** replaces it in the same screen position. Read-only table with `שם · בית · תפקיד · תאריך סיום · סיבה · הערה`. Rows are sorted by termination date, newest first. Dates render `DD/MM/YYYY` via the existing helper. (Moved to a dedicated SPA view in [2.1.2].)
 - Row action buttons restyled and reordered: `תיעוד מעבר · עריכה · הפסקת עבודה · מחיקה`. Default is the visible outline (no longer using the `--muted` ghost). Two new hover modifiers — `.btn-accent-hover` (gold tint, used on `עריכה`) and `.btn-danger-hover` (soft red, used on `הפסקת עבודה` and `מחיקה`).
 - House cards show a `כולל עובדים בתקופת הודעה {₪}` sub-line when there are pending terminations whose date is still in the future.
 

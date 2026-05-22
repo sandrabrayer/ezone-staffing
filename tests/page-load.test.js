@@ -45,6 +45,11 @@ function loadPage() {
   // jsdomError fires for any uncaught script error during page evaluation —
   // this is where "Identifier X has already been declared" surfaces.
   vc.on('jsdomError', e => {
+    // jsdom emits "Not implemented" jsdomError events for things it
+    // intentionally doesn't ship (window.scrollTo, etc). These aren't
+    // page bugs — filter them out to keep this suite focused on real
+    // script errors like duplicate identifiers / runtime exceptions.
+    if (/^Not implemented:/.test(e.message || '')) return;
     errors.push({
       kind: 'jsdomError',
       message: e.message,
@@ -60,13 +65,36 @@ function loadPage() {
     virtualConsole: vc,
   });
 
-  // Stub fetch so boot() doesn't try to call the real API.
+  // Default fetch stub — empty data. Individual tests that need to drive
+  // the auth+data path call authAndBoot() below to seed a token and stub
+  // fetch with their fixture data before manually invoking boot().
   dom.window.fetch = async () => ({
     ok: true, status: 200,
-    text: async () => JSON.stringify({ houses: { ramot: [], asher: [], ofroni: [], rehab: [] }, events: [] }),
-    json: async () => ({ houses: { ramot: [], asher: [], ofroni: [], rehab: [] }, events: [] }),
+    text: async () => JSON.stringify({ houses: { ramot: [], asher: [], ofroni: [], rehab: [] }, events: [], archive: [] }),
+    json: async () => ({ houses: { ramot: [], asher: [], ofroni: [], rehab: [] }, events: [], archive: [] }),
   });
   return { dom, errors };
+}
+
+// Drives the app through auth: seeds a token in localStorage, replaces
+// fetch with a stub that serves the given data, then awaits boot() —
+// the same function the inline script calls at startup. After this
+// returns, the app is on the central view with DATA/EVENTS/ARCHIVE
+// populated and the topbar visible. Callers can then navigate via
+// dom.window.go('archive') and inspect the DOM.
+async function authAndBoot(dom, { archive = [], events = [], houses = null } = {}) {
+  const data = {
+    houses: houses || { ramot: [], asher: [], ofroni: [], rehab: [] },
+    events,
+    archive,
+  };
+  dom.window.fetch = async () => ({
+    ok: true, status: 200,
+    text: async () => JSON.stringify(data),
+    json: async () => data,
+  });
+  dom.window.localStorage.setItem('ezone_staff_token_v1', 'fake.token');
+  await dom.window.boot();
 }
 
 test('public/index.html loads with no script errors (catches dup-identifier bugs)', async () => {
@@ -92,6 +120,85 @@ test('public/index.html exposes EZONE_CALC and the inline script destructures cl
   assert.equal(typeof dom.window.EZONE_CALC.todayStr, 'function');
   dom.window.close();
   assert.equal(errors.length, 0, 'no script errors');
+});
+
+// ---------- archive view tests ----------
+// The archive lives on a dedicated view reached via the topbar link.
+// These tests pin: (1) the dashboard never re-introduces an archive section,
+// (2) the archive view renders archive rows sorted newest-first,
+// (3) every view is auth-gated by the PIN — no token means the PIN overlay,
+//     not the app, regardless of which view someone might try to reach.
+
+function arch(over) {
+  return Object.assign({
+    id: 'a1', employeeId: 'e1', name: 'Test', role: 'אחות',
+    roleDetail: '', salary: 18000, pct: 100, notes: '',
+    homeHouse: 'ramot', terminationDate: '2026-05-01',
+    reasonType: 'התפטרות', reasonDetail: '', archivedAt: '',
+  }, over);
+}
+
+test('dashboard view does NOT render an archive section anymore', async () => {
+  const { dom, errors } = loadPage();
+  await authAndBoot(dom, { archive: [arch()] });
+  // After boot completes, default view is 'central'. The archive section
+  // used to live here as a collapsible — now it's a separate page.
+  const archiveTable = dom.window.document.querySelector('.archive-table');
+  assert.equal(archiveTable, null,
+    'centralView() should not render .archive-table — the archive moved to its own view');
+  // Sanity: we ARE on central.
+  const h1 = dom.window.document.querySelector('.head h1');
+  assert.ok(h1 && /מבט כללי/.test(h1.textContent),
+    'expected to be on the central dashboard view by default');
+  // The topbar should expose the navigation link.
+  const navLink = [...dom.window.document.querySelectorAll('.topbar-link')]
+    .find(el => /ארכיב עובדים/.test(el.textContent));
+  assert.ok(navLink, 'topbar should expose a navigation link to the archive view');
+  dom.window.close();
+  assert.equal(errors.length, 0, errors.length ? JSON.stringify(errors) : '');
+});
+
+test('archive view renders archive rows from /api/data, sorted newest-first', async () => {
+  const { dom, errors } = loadPage();
+  await authAndBoot(dom, {
+    archive: [
+      arch({ id: 'a1', name: 'דנה כהן', terminationDate: '2026-05-01', reasonType: 'התפטרות' }),
+      arch({ id: 'a2', name: 'יוסי לוי', terminationDate: '2026-05-15', reasonType: 'פיטורין', homeHouse: 'asher' }),
+    ],
+  });
+  dom.window.go('archive');
+  // Re-render is synchronous; DOM is up-to-date after go() returns.
+  const table = dom.window.document.querySelector('.archive-table');
+  assert.ok(table, 'archive-table should be in DOM after navigating to the archive view');
+  const rows = table.querySelectorAll('tbody tr');
+  assert.equal(rows.length, 2, 'two archive entries should render as two rows');
+  // Sort order: newest termination date first → יוסי (2026-05-15) before דנה (2026-05-01).
+  assert.equal(rows[0].querySelector('td').textContent.trim(), 'יוסי לוי',
+    'rows should be sorted by termination date descending');
+  // Sanity: the page header says ארכיב עובדים.
+  const h1 = dom.window.document.querySelector('.head h1');
+  assert.ok(h1 && /ארכיב עובדים/.test(h1.textContent),
+    'archive view header should read "ארכיב עובדים"');
+  dom.window.close();
+  assert.equal(errors.length, 0, errors.length ? JSON.stringify(errors) : '');
+});
+
+test('every view (incl. archive) is gated by the PIN — no token shows the PIN overlay', async () => {
+  const { dom, errors } = loadPage(); // boot() runs the no-token branch
+  await new Promise(r => setTimeout(r, 80));
+  const pinOverlay = dom.window.document.getElementById('pinOverlay');
+  const app = dom.window.document.getElementById('app');
+  const topbar = dom.window.document.getElementById('topbar');
+  assert.equal(pinOverlay.style.display, 'flex',
+    'PIN overlay should be visible when there is no session token');
+  assert.equal(app.style.display, 'none',
+    'app container should stay hidden until auth');
+  assert.equal(topbar.style.display, 'none',
+    'topbar (and its archive link) should stay hidden until auth');
+  // Belt-and-suspenders: no archive content rendered into the (hidden) app.
+  assert.equal(dom.window.document.querySelector('.archive-table'), null);
+  dom.window.close();
+  assert.equal(errors.length, 0, errors.length ? JSON.stringify(errors) : '');
 });
 
 test('static audit: no calc.js global is destructured without an alias in the inline script', () => {
