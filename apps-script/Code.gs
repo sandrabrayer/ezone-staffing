@@ -408,7 +408,10 @@ function terminateEmployee(body) {
       if (stored !== 'active') continue;
       const evEnd = formatDateCell(ev[6]);
       if (!(evEnd > terminationDate)) continue;
-      const newStatus = terminationDate >= today ? 'active' : 'ended';
+      // terminationDate is the first day NOT counted (cost rule). Event
+      // stays active only while terminationDate is strictly in the future
+      // — equal-to-today means we stop counting from today.
+      const newStatus = terminationDate > today ? 'active' : 'ended';
       evSh.getRange(i + 1, 7).setValue(terminationDate);
       evSh.getRange(i + 1, 12).setValue(newStatus);
       autoEnded++;

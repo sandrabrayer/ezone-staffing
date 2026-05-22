@@ -105,6 +105,14 @@ test('isActive: missing event returns false', () => {
   assert.equal(isActive(null, TODAY), false);
 });
 
+test('isActive: status="ended" overrides the date window', () => {
+  // terminateEmployee writes status='ended' on the same day it truncates
+  // end_date — without this override, isActive would still report true
+  // because today is in the [start..end] window.
+  const e = ev({ startDate: '2026-05-01', endDate: TODAY, status: 'ended' });
+  assert.equal(isActive(e, TODAY), false);
+});
+
 test('activeEvents and endedEvents split correctly', () => {
   const events = [
     ev({ id: 'a', endDate: '2026-04-15' }),   // ended

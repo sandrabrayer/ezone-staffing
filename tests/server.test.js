@@ -113,7 +113,7 @@ function makeFakeUpstream() {
           if (ev.status !== 'active') continue;
           if (!(ev.endDate > b.terminationDate)) continue;
           ev.endDate = b.terminationDate;
-          ev.status = b.terminationDate >= t ? 'active' : 'ended';
+          ev.status = b.terminationDate > t ? 'active' : 'ended';
           autoEnded++;
         }
         const archiveRow = {
