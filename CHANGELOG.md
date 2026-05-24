@@ -10,13 +10,13 @@ All notable changes to this project are documented here. Format inspired by [Kee
 
 ## [2.1.2] — 2026-05-22 — Archive on a dedicated page + Hebrew typo fix
 
-- **Spelling**: section header was `אורכיב עובדים` — the correct Hebrew is `ארכיב` (without the ו). Fixed every occurrence in `public/index.html` and `CHANGELOG.md`. New `tests/spelling.test.js` walks the whole repo on every test run and asserts `אורכיב` never appears again, plus asserts the dashboard nav uses the correctly-spelled `ארכיב עובדים`.
+- **Spelling**: section header had the wrong Hebrew — an extra ו between the leading א and the ר (the typo can't be written literally here because `tests/spelling.test.js` would catch it). The correct Hebrew is `ארכיב` (no ו after the א). Fixed every occurrence in `public/index.html` and `CHANGELOG.md`. New `tests/spelling.test.js` walks the whole repo on every test run and asserts the typo never appears again, plus asserts the dashboard nav uses the correctly-spelled `ארכיב עובדים`.
 - **Archive moved off the dashboard**: the collapsed `ארכיב עובדים` section is gone from `centralView`. The archive now lives on its own SPA view, reached via a small `ארכיב עובדים` link in the topbar (right of the house tabs, before `יציאה`). Same dark-navy + gold theme; the view has its own page title, a single accent stat card showing the total, and the full table sorted newest-first.
 - **Auth gating unchanged but pinned**: the archive view is part of the same SPA, gated by the existing PIN flow — `boot()` only renders any view (including archive) after `loadData()` succeeds against the auth-required `/api/data` endpoint. A new page-load test asserts this explicitly: with no token, the PIN overlay shows, the app container stays hidden, and no `.archive-table` ever reaches the DOM.
 - **No Apps Script changes** — the data contract (`{ houses, events, archive }`) is unchanged. Railway picks this up on push; no manual redeploy needed.
 
 ### Tests added
-- `tests/spelling.test.js`: repo-wide grep for `אורכיב`, plus the dashboard's `ארכיב עובדים` correctness check.
+- `tests/spelling.test.js`: repo-wide grep for the wrong spelling (extra ו), plus the dashboard's `ארכיב עובדים` correctness check.
 - `tests/page-load.test.js`: dashboard view does NOT contain `.archive-table`; archive view renders archive rows sorted newest-first; PIN gate shows when there's no token (and no archive content leaks into the hidden app container). A new `authAndBoot()` helper seeds a session token via `localStorage`, stubs `fetch`, and awaits `boot()` so tests can drive the post-auth state deterministically.
 
 ## [2.1.0] — 2026-05-21 — Termination flow + archive + dashboard tweaks
