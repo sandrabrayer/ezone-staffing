@@ -2,354 +2,454 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  validateEmployee,
+  HOUSE_IDS, ROLE_OPTIONS, ABSENCE_REASON_TYPES, TERMINATION_REASONS,
+  EMPLOYMENT_TYPES,
+  SALARY_MAX, HOURLY_RATE_MAX, SESSION_RATE_MAX, RETAINER_MAX,
+  EST_HOURS_MAX, EST_SESSIONS_MAX, EXTRA_PAYMENT_MAX,
+  isHouse, isRole, isEmploymentType,
+  clampPct, clampMoney, clampInt,
+  validateWorker, validateAssignment, validateAbsence, validateCoverage,
   validateAction,
-  clampPct,
-  clampBonus,
-  isHouse,
-  isRole,
-  HOUSE_IDS,
-  ROLE_OPTIONS,
-  REASON_TYPES,
-  TERMINATION_REASONS,
 } = require('../lib/validate');
 
-test('isHouse: known and unknown', () => {
-  HOUSE_IDS.forEach(id => assert.equal(isHouse(id), true));
-  assert.equal(isHouse('bogus'), false);
-  assert.equal(isHouse(''), false);
-  assert.equal(isHouse(undefined), false);
+// ---------- constants ----------
+
+test('HOUSE_IDS: four houses', () => {
+  assert.deepEqual(HOUSE_IDS, ['ramot', 'asher', 'ofroni', 'rehab']);
 });
 
-test('isRole: known and unknown', () => {
-  assert.equal(isRole('אחות'), true);
-  assert.equal(isRole('מטפל/ת'), true);
-  assert.equal(isRole('אחר'), true);
-  assert.equal(isRole('מנהל בית'), false); // legacy free-text not in dropdown
-  assert.equal(isRole(''), false);
-});
-
-test('clampPct: clamps to [1,100]', () => {
-  assert.equal(clampPct(0), 1);
-  assert.equal(clampPct(-50), 1);
-  assert.equal(clampPct(101), 100);
-  assert.equal(clampPct(75.4), 75);
-  assert.equal(clampPct('80'), 80);
-  assert.equal(clampPct('abc'), 100);
-  assert.equal(clampPct(NaN), 100);
-});
-
-test('clampBonus: clamps to [0,100000]', () => {
-  assert.equal(clampBonus(0), 0);
-  assert.equal(clampBonus(-100), 0);
-  assert.equal(clampBonus(2000), 2000);
-  assert.equal(clampBonus(2000.6), 2001);
-  assert.equal(clampBonus(999999), 100000);
-  assert.equal(clampBonus('1500'), 1500);
-  assert.equal(clampBonus('abc'), 0);
-  assert.equal(clampBonus(NaN), 0);
-});
-
-test('validateEmployee: trims and clamps with role from dropdown', () => {
-  const e = validateEmployee({
-    name: '  שחר לוי  ',
-    role: 'מנהל/ת',
-    roleDetail: '  ',
-    salary: '24000.6',
-    pct: 150,
-    notes: '  הערה  ',
-  });
-  assert.equal(e.name, 'שחר לוי');
-  assert.equal(e.role, 'מנהל/ת');
-  assert.equal(e.roleDetail, '');
-  assert.equal(e.salary, 24001);
-  assert.equal(e.pct, 100);
-  assert.equal(e.notes, 'הערה');
-});
-
-test('validateEmployee: requires name', () => {
-  assert.throws(() => validateEmployee({ name: '   ', role: 'אחות' }), /name required/);
-  assert.throws(() => validateEmployee({ role: 'אחות' }), /name required/);
-});
-
-test('validateEmployee: rejects unknown role', () => {
-  assert.throws(() => validateEmployee({ name: 'X', role: 'מנהל בית' }), /bad role/);
-  assert.throws(() => validateEmployee({ name: 'X', role: '' }), /bad role/);
-});
-
-test('validateEmployee: role=אחר requires roleDetail', () => {
-  assert.throws(() => validateEmployee({ name: 'X', role: 'אחר' }), /roleDetail required/);
-  const e = validateEmployee({ name: 'X', role: 'אחר', roleDetail: 'מאבטח' });
-  assert.equal(e.role, 'אחר');
-  assert.equal(e.roleDetail, 'מאבטח');
-});
-
-test('validateEmployee: role=מטפל/ת keeps roleDetail when present, allows empty', () => {
-  const a = validateEmployee({ name: 'X', role: 'מטפל/ת', roleDetail: 'אמנות' });
-  assert.equal(a.roleDetail, 'אמנות');
-  const b = validateEmployee({ name: 'X', role: 'מטפל/ת' });
-  assert.equal(b.roleDetail, '');
-});
-
-test('validateEmployee: caps long strings', () => {
-  const e = validateEmployee({
-    name: 'a'.repeat(200),
-    role: 'אחות',
-    roleDetail: 'b'.repeat(200),
-    notes: 'c'.repeat(800),
-    salary: 1000,
-    pct: 100,
-  });
-  assert.equal(e.name.length, 80);
-  assert.equal(e.roleDetail.length, 80);
-  assert.equal(e.notes.length, 500);
-});
-
-test('validateAction: addEmployee happy path', () => {
-  const p = validateAction({
-    action: 'addEmployee',
-    house: 'ramot',
-    employee: { name: 'דנה', role: 'אחות', salary: 18000, pct: 100 },
-  });
-  assert.equal(p.action, 'addEmployee');
-  assert.equal(p.house, 'ramot');
-  assert.equal(p.employee.name, 'דנה');
-  assert.equal(p.employee.role, 'אחות');
-});
-
-test('validateAction: rejects unknown house', () => {
-  assert.throws(() => validateAction({
-    action: 'addEmployee',
-    house: 'nope',
-    employee: { name: 'x', role: 'אחות' },
-  }), /unknown house/);
-});
-
-test('validateAction: updateEmployee requires id', () => {
-  assert.throws(() => validateAction({
-    action: 'updateEmployee',
-    house: 'ramot',
-    employee: { name: 'x', role: 'אחות' },
-  }), /missing id/);
-});
-
-test('validateAction: startCoverage happy path', () => {
-  const p = validateAction({
-    action: 'startCoverage',
-    employeeId: 'e1',
-    homeHouse: 'ramot',
-    hostHouse: 'asher',
-    startDate: '2026-05-20',
-    endDate: '2026-06-10',
-    reasonType: 'חופשה',
-    reasonDetail: 'חופשה שנתית',
-    coversEmployeeId: 'e7',
-    bonusAmount: 2000,
-  });
-  assert.equal(p.action, 'startCoverage');
-  assert.equal(p.employeeId, 'e1');
-  assert.equal(p.homeHouse, 'ramot');
-  assert.equal(p.hostHouse, 'asher');
-  assert.equal(p.startDate, '2026-05-20');
-  assert.equal(p.endDate, '2026-06-10');
-  assert.equal(p.reasonType, 'חופשה');
-  assert.equal(p.coversEmployeeId, 'e7');
-  assert.equal(p.bonusAmount, 2000);
-});
-
-test('validateAction: startCoverage rejects same home and host', () => {
-  assert.throws(() => validateAction({
-    action: 'startCoverage',
-    employeeId: 'e1',
-    homeHouse: 'ramot', hostHouse: 'ramot',
-    startDate: '2026-05-20', endDate: '2026-06-10',
-    reasonType: 'חופשה',
-  }), /differ/);
-});
-
-test('validateAction: startCoverage rejects bad reasonType', () => {
-  assert.throws(() => validateAction({
-    action: 'startCoverage',
-    employeeId: 'e1',
-    homeHouse: 'ramot', hostHouse: 'asher',
-    startDate: '2026-05-20', endDate: '2026-06-10',
-    reasonType: 'מומצא',
-  }), /reasonType/);
-});
-
-test('validateAction: startCoverage requires dates', () => {
-  assert.throws(() => validateAction({
-    action: 'startCoverage',
-    employeeId: 'e1',
-    homeHouse: 'ramot', hostHouse: 'asher',
-    reasonType: 'חופשה',
-    endDate: '2026-06-10',
-  }), /missing startDate/);
-  assert.throws(() => validateAction({
-    action: 'startCoverage',
-    employeeId: 'e1',
-    homeHouse: 'ramot', hostHouse: 'asher',
-    reasonType: 'חופשה',
-    startDate: '2026-05-20',
-  }), /missing endDate/);
-});
-
-test('validateAction: startCoverage rejects endDate before startDate', () => {
-  assert.throws(() => validateAction({
-    action: 'startCoverage',
-    employeeId: 'e1',
-    homeHouse: 'ramot', hostHouse: 'asher',
-    startDate: '2026-06-10', endDate: '2026-05-20',
-    reasonType: 'חופשה',
-  }), /endDate before startDate/);
-});
-
-test('validateAction: startCoverage rejects malformed date', () => {
-  assert.throws(() => validateAction({
-    action: 'startCoverage',
-    employeeId: 'e1',
-    homeHouse: 'ramot', hostHouse: 'asher',
-    startDate: '20/5/26', endDate: '2026-06-10',
-    reasonType: 'חופשה',
-  }), /bad startDate/);
-});
-
-test('validateAction: startCoverage clamps bonus and defaults missing fields', () => {
-  const p = validateAction({
-    action: 'startCoverage',
-    employeeId: 'e1',
-    homeHouse: 'ramot', hostHouse: 'asher',
-    startDate: '2026-05-20', endDate: '2026-05-20',
-    reasonType: 'חופשה',
-    bonusAmount: 999999,
-  });
-  assert.equal(p.bonusAmount, 100000);
-  assert.equal(p.reasonDetail, '');
-  assert.equal(p.coversEmployeeId, '');
-});
-
-test('validateAction: endCoverage happy path', () => {
-  const p = validateAction({ action: 'endCoverage', eventId: 'ev123' });
-  assert.equal(p.action, 'endCoverage');
-  assert.equal(p.eventId, 'ev123');
-});
-
-test('validateAction: endCoverage requires eventId', () => {
-  assert.throws(() => validateAction({ action: 'endCoverage' }), /missing eventId/);
-});
-
-test('validateAction: moveEmployee is no longer recognized', () => {
-  assert.throws(() => validateAction({
-    action: 'moveEmployee',
-    fromHouse: 'ramot', toHouse: 'asher',
-    id: 'e1', reasonType: 'חופשה',
-  }), /unknown action/);
-});
-
-test('validateAction: rejects unknown action', () => {
-  assert.throws(() => validateAction({ action: 'nope' }), /unknown action/);
-});
-
-test('REASON_TYPES exposes the seven new reasons', () => {
-  assert.deepEqual(REASON_TYPES, ['חופשה','חל״ת','מחלה','חופשת לידה','ניתוח','צורך תפעולי','אחר']);
-});
-
-test('ROLE_OPTIONS exposes the nine role choices', () => {
+test('ROLE_OPTIONS: nine roles', () => {
   assert.equal(ROLE_OPTIONS.length, 9);
   assert.ok(ROLE_OPTIONS.includes('מטפל/ת'));
   assert.ok(ROLE_OPTIONS.includes('אחר'));
 });
 
-test('TERMINATION_REASONS exposes the five reasons', () => {
-  assert.deepEqual(TERMINATION_REASONS, ['התפטרות', 'פיטורין', 'סיום חוזה', 'מעבר תפקיד', 'אחר']);
+test('ABSENCE_REASON_TYPES: eight reasons including אישי', () => {
+  assert.deepEqual(ABSENCE_REASON_TYPES, [
+    'חופשה', 'חל״ת', 'מחלה', 'חופשת לידה', 'ניתוח', 'צורך תפעולי', 'אישי', 'אחר',
+  ]);
 });
 
-test('validateAction: terminateEmployee happy path', () => {
-  const p = validateAction({
-    action: 'terminateEmployee',
-    house: 'ramot',
-    id: 'e1',
-    terminationDate: '2026-05-31',
-    reasonType: 'התפטרות',
-    reasonDetail: 'מצא עבודה אחרת',
+test('TERMINATION_REASONS: five reasons', () => {
+  assert.deepEqual(TERMINATION_REASONS, [
+    'התפטרות', 'פיטורין', 'סיום חוזה', 'מעבר תפקיד', 'אחר',
+  ]);
+});
+
+test('EMPLOYMENT_TYPES: five types', () => {
+  assert.deepEqual(EMPLOYMENT_TYPES, [
+    'full_time', 'part_time', 'hourly', 'per_session', 'fixed_retainer',
+  ]);
+});
+
+// ---------- predicates ----------
+
+test('isHouse / isRole / isEmploymentType', () => {
+  HOUSE_IDS.forEach(id => assert.equal(isHouse(id), true));
+  assert.equal(isHouse('bogus'), false);
+  assert.equal(isRole('אחות'), true);
+  assert.equal(isRole(''), false);
+  assert.equal(isEmploymentType('full_time'), true);
+  assert.equal(isEmploymentType('weekly'), false);
+});
+
+// ---------- clampers ----------
+
+test('clampPct: [1,100]', () => {
+  assert.equal(clampPct(0), 1);
+  assert.equal(clampPct(101), 100);
+  assert.equal(clampPct(75.4), 75);
+  assert.equal(clampPct('abc'), 100);
+});
+
+test('clampMoney: [0, max]', () => {
+  assert.equal(clampMoney(-100, 1000), 0);
+  assert.equal(clampMoney(500.6, 1000), 501);
+  assert.equal(clampMoney(99999, 1000), 1000);
+  assert.equal(clampMoney('abc', 1000), 0);
+});
+
+test('clampInt: [0, max]', () => {
+  assert.equal(clampInt(-5, 100), 0);
+  assert.equal(clampInt(50.7, 100), 51);
+  assert.equal(clampInt(1000, 100), 100);
+});
+
+// ---------- validateWorker ----------
+
+test('validateWorker: trims and caps', () => {
+  const w = validateWorker({ name: '  שחר לוי  ', notes: '  שלום  ' });
+  assert.equal(w.name, 'שחר לוי');
+  assert.equal(w.notes, 'שלום');
+});
+
+test('validateWorker: requires name', () => {
+  assert.throws(() => validateWorker({ name: '   ' }), /name required/);
+  assert.throws(() => validateWorker({}), /name required/);
+  assert.throws(() => validateWorker(null), /worker required/);
+});
+
+test('validateWorker: caps long strings', () => {
+  const w = validateWorker({ name: 'a'.repeat(200), notes: 'b'.repeat(800) });
+  assert.equal(w.name.length, 80);
+  assert.equal(w.notes.length, 500);
+});
+
+// ---------- validateAssignment ----------
+
+test('validateAssignment: full_time happy path', () => {
+  const a = validateAssignment({
+    workerId: 'w1', house: 'ramot', role: 'אחות',
+    employmentType: 'full_time', salary: 18000.6,
+    notes: '  הערה  ',
   });
-  assert.equal(p.action, 'terminateEmployee');
-  assert.equal(p.house, 'ramot');
-  assert.equal(p.id, 'e1');
-  assert.equal(p.terminationDate, '2026-05-31');
-  assert.equal(p.reasonType, 'התפטרות');
-  assert.equal(p.reasonDetail, 'מצא עבודה אחרת');
+  assert.equal(a.workerId, 'w1');
+  assert.equal(a.house, 'ramot');
+  assert.equal(a.role, 'אחות');
+  assert.equal(a.employmentType, 'full_time');
+  assert.equal(a.salary, 18001);
+  assert.equal(a.pct, 0);
+  assert.equal(a.notes, 'הערה');
 });
 
-test('validateAction: terminateEmployee accepts a future date (scheduled termination)', () => {
-  // Future-dated termination is an intentional feature — the cost continues
-  // counting until that date arrives. lib/calc.js pendingHomeCost relies
-  // on this.
+test('validateAssignment: part_time keeps salary AND pct', () => {
+  const a = validateAssignment({
+    workerId: 'w1', house: 'ramot', role: 'אחות',
+    employmentType: 'part_time', salary: 12000, pct: 80,
+  });
+  assert.equal(a.salary, 12000);
+  assert.equal(a.pct, 80);
+});
+
+test('validateAssignment: part_time clamps unreasonable pct', () => {
+  const a = validateAssignment({
+    workerId: 'w1', house: 'ramot', role: 'אחות',
+    employmentType: 'part_time', salary: 12000, pct: 500,
+  });
+  assert.equal(a.pct, 100);
+});
+
+test('validateAssignment: hourly requires rate and hours', () => {
+  const a = validateAssignment({
+    workerId: 'w1', house: 'ramot', role: 'מטפל/ת',
+    employmentType: 'hourly', hourlyRate: 80, estHours: 120,
+  });
+  assert.equal(a.hourlyRate, 80);
+  assert.equal(a.estHours, 120);
+
+  assert.throws(() => validateAssignment({
+    workerId: 'w1', house: 'ramot', role: 'מטפל/ת',
+    employmentType: 'hourly', hourlyRate: 0, estHours: 120,
+  }), /hourlyRate required/);
+
+  assert.throws(() => validateAssignment({
+    workerId: 'w1', house: 'ramot', role: 'מטפל/ת',
+    employmentType: 'hourly', hourlyRate: 80, estHours: 0,
+  }), /estHours required/);
+});
+
+test('validateAssignment: per_session requires rate and sessions', () => {
+  const a = validateAssignment({
+    workerId: 'w1', house: 'ramot', role: 'פסיכיאטר/ית',
+    employmentType: 'per_session', sessionRate: 400, estSessions: 12,
+  });
+  assert.equal(a.sessionRate, 400);
+  assert.equal(a.estSessions, 12);
+
+  assert.throws(() => validateAssignment({
+    workerId: 'w1', house: 'ramot', role: 'פסיכיאטר/ית',
+    employmentType: 'per_session', sessionRate: 0, estSessions: 12,
+  }), /sessionRate required/);
+});
+
+test('validateAssignment: fixed_retainer requires amount', () => {
+  const a = validateAssignment({
+    workerId: 'w1', house: 'ramot', role: 'אחר', roleDetail: 'יועץ',
+    employmentType: 'fixed_retainer', retainerAmount: 4500,
+  });
+  assert.equal(a.retainerAmount, 4500);
+
+  assert.throws(() => validateAssignment({
+    workerId: 'w1', house: 'ramot', role: 'אחר', roleDetail: 'יועץ',
+    employmentType: 'fixed_retainer',
+  }), /retainerAmount required/);
+});
+
+test('validateAssignment: zeros out fields irrelevant to the chosen type', () => {
+  // UI may submit stale values from other type pickers. validateAssignment
+  // strips them — the stored row only carries the fields that matter.
+  const a = validateAssignment({
+    workerId: 'w1', house: 'ramot', role: 'אחות',
+    employmentType: 'full_time', salary: 18000,
+    pct: 80, hourlyRate: 999, estHours: 100,
+    sessionRate: 500, estSessions: 10, retainerAmount: 9999,
+  });
+  assert.equal(a.pct, 0);
+  assert.equal(a.hourlyRate, 0);
+  assert.equal(a.estHours, 0);
+  assert.equal(a.sessionRate, 0);
+  assert.equal(a.estSessions, 0);
+  assert.equal(a.retainerAmount, 0);
+});
+
+test('validateAssignment: bad employmentType / role / house', () => {
+  const base = { workerId: 'w1', house: 'ramot', role: 'אחות', employmentType: 'full_time', salary: 1 };
+  assert.throws(() => validateAssignment({ ...base, employmentType: 'weekly' }), /bad employmentType/);
+  assert.throws(() => validateAssignment({ ...base, role: 'מנהל בית' }), /bad role/);
+  assert.throws(() => validateAssignment({ ...base, house: 'bogus' }), /unknown house/);
+  assert.throws(() => validateAssignment({ ...base, workerId: '' }), /workerId required/);
+});
+
+test('validateAssignment: role=אחר requires roleDetail', () => {
+  assert.throws(() => validateAssignment({
+    workerId: 'w1', house: 'ramot', role: 'אחר',
+    employmentType: 'full_time', salary: 1000,
+  }), /roleDetail required/);
+});
+
+test('validateAssignment: caps long notes / roleDetail / clamps cap on money', () => {
+  const a = validateAssignment({
+    workerId: 'w1', house: 'ramot', role: 'אחר',
+    roleDetail: 'b'.repeat(200),
+    employmentType: 'full_time', salary: SALARY_MAX * 10,
+    notes: 'c'.repeat(800),
+  });
+  assert.equal(a.roleDetail.length, 80);
+  assert.equal(a.notes.length, 500);
+  assert.equal(a.salary, SALARY_MAX);
+});
+
+test('validateAssignment: caps hourly/session/retainer values', () => {
+  const a = validateAssignment({
+    workerId: 'w1', house: 'ramot', role: 'מטפל/ת',
+    employmentType: 'hourly', hourlyRate: HOURLY_RATE_MAX * 5, estHours: EST_HOURS_MAX * 5,
+  });
+  assert.equal(a.hourlyRate, HOURLY_RATE_MAX);
+  assert.equal(a.estHours, EST_HOURS_MAX);
+
+  const b = validateAssignment({
+    workerId: 'w1', house: 'ramot', role: 'פסיכיאטר/ית',
+    employmentType: 'per_session', sessionRate: SESSION_RATE_MAX * 5, estSessions: EST_SESSIONS_MAX * 5,
+  });
+  assert.equal(b.sessionRate, SESSION_RATE_MAX);
+  assert.equal(b.estSessions, EST_SESSIONS_MAX);
+
+  const c = validateAssignment({
+    workerId: 'w1', house: 'ramot', role: 'אחר', roleDetail: 'יועץ',
+    employmentType: 'fixed_retainer', retainerAmount: RETAINER_MAX * 5,
+  });
+  assert.equal(c.retainerAmount, RETAINER_MAX);
+});
+
+// ---------- validateAbsence ----------
+
+test('validateAbsence: happy path', () => {
+  const a = validateAbsence({
+    workerId: 'w1', house: 'ramot',
+    startDate: '2026-05-20', endDate: '2026-05-30',
+    reasonType: 'מחלה', reasonDetail: 'שפעת', notes: 'נחה בבית',
+  });
+  assert.equal(a.workerId, 'w1');
+  assert.equal(a.house, 'ramot');
+  assert.equal(a.startDate, '2026-05-20');
+  assert.equal(a.endDate, '2026-05-30');
+  assert.equal(a.reasonType, 'מחלה');
+  assert.equal(a.reasonDetail, 'שפעת');
+  assert.equal(a.notes, 'נחה בבית');
+});
+
+test('validateAbsence: accepts new אישי reason', () => {
+  const a = validateAbsence({
+    workerId: 'w1', house: 'ramot',
+    startDate: '2026-05-20', endDate: '2026-05-20',
+    reasonType: 'אישי',
+  });
+  assert.equal(a.reasonType, 'אישי');
+});
+
+test('validateAbsence: rejects bad fields', () => {
+  const base = {
+    workerId: 'w1', house: 'ramot',
+    startDate: '2026-05-20', endDate: '2026-05-30',
+    reasonType: 'מחלה',
+  };
+  assert.throws(() => validateAbsence({ ...base, workerId: '' }), /workerId required/);
+  assert.throws(() => validateAbsence({ ...base, house: 'bogus' }), /unknown house/);
+  assert.throws(() => validateAbsence({ ...base, reasonType: 'אקראי' }), /bad reasonType/);
+  assert.throws(() => validateAbsence({ ...base, startDate: '20/5/26' }), /bad startDate/);
+  assert.throws(() => validateAbsence({ ...base, endDate: '' }), /missing endDate/);
+  assert.throws(() => validateAbsence({ ...base, endDate: '2026-05-10' }), /endDate before startDate/);
+});
+
+test('validateAbsence: caps long free text', () => {
+  const a = validateAbsence({
+    workerId: 'w1', house: 'ramot',
+    startDate: '2026-05-20', endDate: '2026-05-20',
+    reasonType: 'מחלה', reasonDetail: 'a'.repeat(800), notes: 'b'.repeat(800),
+  });
+  assert.equal(a.reasonDetail.length, 500);
+  assert.equal(a.notes.length, 500);
+});
+
+// ---------- validateCoverage ----------
+
+test('validateCoverage: happy path', () => {
+  const c = validateCoverage({
+    absenceId: 'ab1', coveringWorkerId: 'w2',
+    providingHouse: 'asher', extraPayment: 1500, notes: 'עזר במשמרת',
+  });
+  assert.equal(c.absenceId, 'ab1');
+  assert.equal(c.coveringWorkerId, 'w2');
+  assert.equal(c.providingHouse, 'asher');
+  assert.equal(c.extraPayment, 1500);
+  assert.equal(c.notes, 'עזר במשמרת');
+});
+
+test('validateCoverage: rejects bad fields', () => {
+  const base = { absenceId: 'ab1', coveringWorkerId: 'w2', providingHouse: 'asher' };
+  assert.throws(() => validateCoverage({ ...base, absenceId: '' }), /absenceId required/);
+  assert.throws(() => validateCoverage({ ...base, coveringWorkerId: '' }), /coveringWorkerId required/);
+  assert.throws(() => validateCoverage({ ...base, providingHouse: 'bogus' }), /unknown providingHouse/);
+});
+
+test('validateCoverage: clamps extraPayment', () => {
+  const c = validateCoverage({
+    absenceId: 'ab1', coveringWorkerId: 'w2',
+    providingHouse: 'asher', extraPayment: EXTRA_PAYMENT_MAX * 5,
+  });
+  assert.equal(c.extraPayment, EXTRA_PAYMENT_MAX);
+
+  const c2 = validateCoverage({
+    absenceId: 'ab1', coveringWorkerId: 'w2',
+    providingHouse: 'asher', extraPayment: -500,
+  });
+  assert.equal(c2.extraPayment, 0);
+});
+
+test('validateCoverage: caps long notes', () => {
+  const c = validateCoverage({
+    absenceId: 'ab1', coveringWorkerId: 'w2',
+    providingHouse: 'asher', notes: 'x'.repeat(800),
+  });
+  assert.equal(c.notes.length, 500);
+});
+
+// ---------- validateAction ----------
+
+test('validateAction: createWorker', () => {
+  const p = validateAction({ action: 'createWorker', worker: { name: 'דנה' } });
+  assert.equal(p.action, 'createWorker');
+  assert.equal(p.worker.name, 'דנה');
+});
+
+test('validateAction: updateWorker requires id', () => {
+  assert.throws(() => validateAction({
+    action: 'updateWorker',
+    worker: { name: 'X' },
+  }), /missing id/);
+});
+
+test('validateAction: deleteWorker / deleteAssignment / deleteAbsence / deleteCoverage require id', () => {
+  ['deleteWorker', 'deleteAssignment', 'deleteAbsence', 'deleteCoverage'].forEach(action => {
+    assert.throws(() => validateAction({ action }), /missing id/);
+    const p = validateAction({ action, id: 'x1' });
+    assert.equal(p.id, 'x1');
+  });
+});
+
+test('validateAction: addAssignment / updateAssignment', () => {
+  const assignment = {
+    workerId: 'w1', house: 'ramot', role: 'אחות',
+    employmentType: 'full_time', salary: 18000,
+  };
+  const add = validateAction({ action: 'addAssignment', assignment });
+  assert.equal(add.action, 'addAssignment');
+  assert.equal(add.assignment.workerId, 'w1');
+
+  const upd = validateAction({ action: 'updateAssignment', id: 'a1', assignment });
+  assert.equal(upd.id, 'a1');
+});
+
+test('validateAction: terminateAssignment happy path + future date', () => {
   const p = validateAction({
-    action: 'terminateEmployee',
-    house: 'asher',
-    id: 'e2',
+    action: 'terminateAssignment',
+    id: 'a1',
     terminationDate: '2099-12-31',
+    reasonType: 'התפטרות',
+    reasonDetail: 'מעבר למקום אחר',
   });
   assert.equal(p.terminationDate, '2099-12-31');
+  assert.equal(p.reasonType, 'התפטרות');
+  assert.equal(p.reasonDetail, 'מעבר למקום אחר');
 });
 
-test('validateAction: terminateEmployee accepts missing reason (optional)', () => {
+test('validateAction: terminateAssignment accepts missing reason', () => {
   const p = validateAction({
-    action: 'terminateEmployee',
-    house: 'ramot',
-    id: 'e1',
+    action: 'terminateAssignment',
+    id: 'a1',
     terminationDate: '2026-05-31',
   });
   assert.equal(p.reasonType, '');
   assert.equal(p.reasonDetail, '');
 });
 
-test('validateAction: terminateEmployee rejects unknown reasonType', () => {
+test('validateAction: terminateAssignment rejects bad inputs', () => {
   assert.throws(() => validateAction({
-    action: 'terminateEmployee',
-    house: 'ramot',
-    id: 'e1',
+    action: 'terminateAssignment',
+    id: 'a1',
     terminationDate: '2026-05-31',
     reasonType: 'מומצא',
-  }), /reasonType/);
-});
+  }), /bad reasonType/);
 
-test('validateAction: terminateEmployee rejects missing required fields', () => {
   assert.throws(() => validateAction({
-    action: 'terminateEmployee',
-    house: 'ramot',
-    terminationDate: '2026-05-31',
-  }), /missing id/);
-  assert.throws(() => validateAction({
-    action: 'terminateEmployee',
-    house: 'ramot',
-    id: 'e1',
-  }), /missing terminationDate/);
-  assert.throws(() => validateAction({
-    action: 'terminateEmployee',
-    house: 'bogus',
-    id: 'e1',
-    terminationDate: '2026-05-31',
-  }), /unknown house/);
-});
-
-test('validateAction: terminateEmployee rejects malformed date', () => {
-  assert.throws(() => validateAction({
-    action: 'terminateEmployee',
-    house: 'ramot',
-    id: 'e1',
+    action: 'terminateAssignment',
+    id: 'a1',
     terminationDate: '31/05/2026',
   }), /bad terminationDate/);
+
+  assert.throws(() => validateAction({
+    action: 'terminateAssignment',
+    terminationDate: '2026-05-31',
+  }), /missing id/);
 });
 
-test('validateAction: terminateEmployee caps long reasonDetail', () => {
-  const p = validateAction({
-    action: 'terminateEmployee',
-    house: 'ramot',
-    id: 'e1',
-    terminationDate: '2026-05-31',
-    reasonDetail: 'a'.repeat(800),
+test('validateAction: logAbsence + endAbsence', () => {
+  const log = validateAction({
+    action: 'logAbsence',
+    absence: {
+      workerId: 'w1', house: 'ramot',
+      startDate: '2026-05-20', endDate: '2026-05-25',
+      reasonType: 'מחלה',
+    },
   });
-  assert.equal(p.reasonDetail.length, 500);
+  assert.equal(log.action, 'logAbsence');
+  assert.equal(log.absence.workerId, 'w1');
+
+  const end = validateAction({ action: 'endAbsence', id: 'ab1' });
+  assert.equal(end.id, 'ab1');
+});
+
+test('validateAction: addCoverage', () => {
+  const p = validateAction({
+    action: 'addCoverage',
+    coverage: {
+      absenceId: 'ab1', coveringWorkerId: 'w2',
+      providingHouse: 'asher', extraPayment: 1200,
+    },
+  });
+  assert.equal(p.action, 'addCoverage');
+  assert.equal(p.coverage.absenceId, 'ab1');
+});
+
+test('validateAction: legacy v2 actions are no longer recognized', () => {
+  ['addEmployee', 'updateEmployee', 'deleteEmployee',
+   'startCoverage', 'endCoverage', 'terminateEmployee',
+   'moveEmployee'].forEach(action => {
+    assert.throws(() => validateAction({ action }), /unknown action/);
+  });
+});
+
+test('validateAction: rejects empty / missing body', () => {
+  assert.throws(() => validateAction(null), /body required/);
+  assert.throws(() => validateAction({}), /unknown action/);
 });
