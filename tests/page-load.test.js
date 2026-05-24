@@ -65,13 +65,22 @@ function loadPage() {
     virtualConsole: vc,
   });
 
-  // Default fetch stub — empty data. Individual tests that need to drive
-  // the auth+data path call authAndBoot() below to seed a token and stub
-  // fetch with their fixture data before manually invoking boot().
+  // Default fetch stub — empty v3 payload. Individual tests that need
+  // to drive the auth+data path call authAndBoot() below to seed a token
+  // and stub fetch with their fixture data before manually invoking
+  // boot(). The v3 doGet response shape is workers/assignments/absences/
+  // coverages/archiveV3 plus a legacy passthrough (houses/events/archive)
+  // — included here so the stub is byte-compatible with the real server
+  // response during the v2→v3 transition window.
+  const emptyV3 = () => ({
+    workers: [], assignments: [], absences: [], coverages: [], archiveV3: [],
+    houses: { ramot: [], asher: [], ofroni: [], rehab: [], pardes: [], sde_eliezer: [], hq: [] },
+    events: [], archive: [],
+  });
   dom.window.fetch = async () => ({
     ok: true, status: 200,
-    text: async () => JSON.stringify({ houses: { ramot: [], asher: [], ofroni: [], rehab: [] }, events: [], archive: [] }),
-    json: async () => ({ houses: { ramot: [], asher: [], ofroni: [], rehab: [] }, events: [], archive: [] }),
+    text: async () => JSON.stringify(emptyV3()),
+    json: async () => emptyV3(),
   });
   return { dom, errors };
 }
@@ -79,14 +88,18 @@ function loadPage() {
 // Drives the app through auth: seeds a token in localStorage, replaces
 // fetch with a stub that serves the given data, then awaits boot() —
 // the same function the inline script calls at startup. After this
-// returns, the app is on the central view with DATA/EVENTS/ARCHIVE
-// populated and the topbar visible. Callers can then navigate via
-// dom.window.go('archive') and inspect the DOM.
-async function authAndBoot(dom, { archive = [], events = [], houses = null } = {}) {
+// returns, the app is on the central view with WORKERS/ASSIGNMENTS/
+// ABSENCES/COVERAGES/ARCHIVE_V3 populated and the topbar visible.
+// Callers can then navigate via dom.window.go('archive') and inspect
+// the DOM.
+async function authAndBoot(dom, {
+  workers = [], assignments = [], absences = [], coverages = [], archiveV3 = [],
+} = {}) {
   const data = {
-    houses: houses || { ramot: [], asher: [], ofroni: [], rehab: [] },
-    events,
-    archive,
+    workers, assignments, absences, coverages, archiveV3,
+    // legacy passthrough — empty in v3-only state
+    houses: { ramot: [], asher: [], ofroni: [], rehab: [], pardes: [], sde_eliezer: [], hq: [] },
+    events: [], archive: [],
   };
   dom.window.fetch = async () => ({
     ok: true, status: 200,
@@ -114,10 +127,13 @@ test('public/index.html exposes EZONE_CALC and the inline script destructures cl
   const { dom, errors } = loadPage();
   await new Promise(r => setTimeout(r, 150));
   // Sanity check: calc.js really did run (EZONE_CALC populated) and the
-  // inline script reached its bottom without throwing.
+  // inline script reached its bottom without throwing. v3 renames the
+  // legacy `cost` helper to `assignmentCost` — assert the new surface.
   assert.ok(dom.window.EZONE_CALC, 'window.EZONE_CALC should be set by lib/calc.js');
-  assert.equal(typeof dom.window.EZONE_CALC.cost, 'function');
+  assert.equal(typeof dom.window.EZONE_CALC.assignmentCost, 'function');
   assert.equal(typeof dom.window.EZONE_CALC.todayStr, 'function');
+  assert.equal(typeof dom.window.EZONE_CALC.houseTotal, 'function');
+  assert.equal(typeof dom.window.EZONE_CALC.splitByCategory, 'function');
   dom.window.close();
   assert.equal(errors.length, 0, 'no script errors');
 });
@@ -129,18 +145,27 @@ test('public/index.html exposes EZONE_CALC and the inline script destructures cl
 // (3) every view is auth-gated by the PIN — no token means the PIN overlay,
 //     not the app, regardless of which view someone might try to reach.
 
+// archive_v3 row factory. Distinct from the legacy `archive` shape:
+//   - `house` (not `homeHouse`) — v3 collapses to a single house field
+//   - `assignmentId` + `workerId` (not `employeeId`)
+//   - `employmentType` carries the type code; legacy data uses
+//     full_time/part_time via the migration mapper
 function arch(over) {
   return Object.assign({
-    id: 'a1', employeeId: 'e1', name: 'Test', role: 'אחות',
-    roleDetail: '', salary: 18000, pct: 100, notes: '',
-    homeHouse: 'ramot', terminationDate: '2026-05-01',
+    id: 'a1', assignmentId: '', workerId: 'w1', name: 'Test',
+    house: 'ramot', role: 'אחות', roleDetail: '',
+    employmentType: 'full_time',
+    salary: 18000, pct: 0,
+    hourlyRate: 0, estHours: 0, sessionRate: 0, estSessions: 0, retainerAmount: 0,
+    notes: '',
+    terminationDate: '2026-05-01',
     reasonType: 'התפטרות', reasonDetail: '', archivedAt: '',
   }, over);
 }
 
 test('dashboard view does NOT render an archive section anymore', async () => {
   const { dom, errors } = loadPage();
-  await authAndBoot(dom, { archive: [arch()] });
+  await authAndBoot(dom, { archiveV3: [arch()] });
   // After boot completes, default view is 'central'. The archive section
   // used to live here as a collapsible — now it's a separate page.
   const archiveTable = dom.window.document.querySelector('.archive-table');
@@ -161,9 +186,9 @@ test('dashboard view does NOT render an archive section anymore', async () => {
 test('archive view renders archive rows from /api/data, sorted newest-first', async () => {
   const { dom, errors } = loadPage();
   await authAndBoot(dom, {
-    archive: [
+    archiveV3: [
       arch({ id: 'a1', name: 'דנה כהן', terminationDate: '2026-05-01', reasonType: 'התפטרות' }),
-      arch({ id: 'a2', name: 'יוסי לוי', terminationDate: '2026-05-15', reasonType: 'פיטורין', homeHouse: 'asher' }),
+      arch({ id: 'a2', name: 'יוסי לוי', terminationDate: '2026-05-15', reasonType: 'פיטורין', house: 'asher' }),
     ],
   });
   dom.window.go('archive');

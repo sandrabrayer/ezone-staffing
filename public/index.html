@@ -162,6 +162,32 @@ body{
   border:1px solid var(--line-strong);
 }
 
+/* Roster sub-groups (שכירים / פרילנסרים inside צוות הבית). Mirrors
+   .section-head spacing but at a smaller scale — these are nested
+   inside a single roster section so they should read as siblings,
+   not as top-level sections. */
+.subgroup{margin-top:18px}
+.subgroup:first-child{margin-top:0}
+.subgroup-head{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  margin-bottom:10px;
+  font-family:'Frank Ruhl Libre',serif;
+  font-size:16px;
+  font-weight:700;
+  color:var(--ink);
+}
+.subgroup-head .count-pill{
+  font-size:11px;
+  font-weight:700;
+  background:var(--bg-elevated);
+  color:var(--ink-soft);
+  padding:3px 10px;
+  border-radius:999px;
+  border:1px solid var(--line);
+}
+
 /* Buttons */
 .btn{
   font-family:inherit;
@@ -258,6 +284,18 @@ tbody tr:hover{
   border-radius:999px;
   border:1px solid var(--line);
 }
+.type-tag{
+  display:inline-block;
+  font-size:11px;
+  font-weight:700;
+  background:var(--bg-elevated);
+  color:var(--accent-1);
+  padding:3px 10px;
+  border-radius:999px;
+  border:1px solid var(--line);
+  letter-spacing:0.02em;
+  margin-inline-start:6px;
+}
 .pct-bar{display:flex;align-items:center;gap:10px}
 .pct-track{width:72px;height:6px;background:var(--line-strong);border-radius:99px;overflow:hidden}
 .pct-fill{height:100%;background:var(--grad);border-radius:99px}
@@ -265,6 +303,18 @@ tbody tr:hover{
 .note-cell{font-size:13px;color:var(--ink-soft);max-width:220px}
 .row-actions{display:flex;gap:6px;justify-content:flex-start}
 .empty{padding:56px 20px;text-align:center;color:var(--muted);font-size:14px}
+/* Smaller, less heavy empty state for the salaried/freelancer sub-groups
+   inside a single roster section. The full .empty padding looks oversized
+   when nested. */
+.empty-soft{
+  padding:18px 20px;
+  text-align:center;
+  color:var(--muted);
+  font-size:13px;
+  background:var(--bg-surface);
+  border:1px dashed var(--line);
+  border-radius:12px;
+}
 .cover-flag{
   display:inline-block;
   font-size:11px;
@@ -288,7 +338,7 @@ tbody tr:hover{
   transition:.15s;
 }
 .house-box:hover{border-color:var(--line-strong);background:var(--bg-elevated)}
-.house-box .hb-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
+.house-box .hb-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;gap:10px}
 .house-box .hb-top b{
   font-family:'Frank Ruhl Libre',serif;
   font-size:20px;
@@ -304,6 +354,7 @@ tbody tr:hover{
   border-radius:999px;
   text-transform:uppercase;
   letter-spacing:0.04em;
+  white-space:nowrap;
 }
 .hb-stats{display:flex;gap:32px;flex-wrap:wrap;align-items:flex-start}
 .hb-stats > div{min-width:0}
@@ -329,11 +380,9 @@ tbody tr:hover{
 }
 .hb-stats .bonus-line{font-size:11px;color:var(--accent-1);font-weight:600;margin-top:6px}
 
-/* Coverage event row — used for active, ended, and incoming-coverage lists.
-   Primary line: [name] [badge] [source] [arrow] [target] ... [optional end button]
-   Secondary line: [reason pill] · [dates] · [במקום] · [תוספת]
-   Source goes first in DOM so RTL puts source on the RIGHT, target on LEFT
-   with the ← arrow pointing toward the target. */
+/* Absence row — used for the per-house "נעדרים פעילים" section.
+   Reuses the .event-row scaffold from v2 (same spacing, same DOM
+   conventions) so coverage info nests cleanly inside .event-meta. */
 .event-list{padding:6px 22px}
 .event-row{
   padding:16px 0;
@@ -361,19 +410,6 @@ tbody tr:hover{
   padding:3px 12px;
   border-radius:999px;
   letter-spacing:0.02em;
-}
-.event-route{
-  display:inline-flex;
-  align-items:center;
-  gap:8px;
-  color:var(--ink-soft);
-  font-size:14px;
-  font-weight:500;
-}
-.event-route .arrow{
-  color:var(--accent-1);
-  font-weight:700;
-  font-size:15px;
 }
 .event-action{margin-inline-start:auto}
 .event-meta{
@@ -404,6 +440,36 @@ tbody tr:hover{
   color:var(--ink-soft);
   margin-top:6px;
   font-style:italic;
+}
+/* Coverage line inside an absence row: "מחליף/ה: X (מבית Y) · תוספת ₪Z".
+   Sits below the main absence row, slightly indented so the parent/
+   child relationship is visible at a glance. */
+.coverage-line{
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:6px 12px;
+  margin-top:8px;
+  padding-inline-start:14px;
+  border-inline-start:2px solid var(--accent-soft);
+  font-size:12px;
+  color:var(--ink-soft);
+}
+.coverage-line .cov-name{font-weight:600;color:var(--ink)}
+.coverage-line .cov-house{color:var(--muted);font-size:11px}
+.coverage-line .cov-extra{color:var(--accent-1);font-weight:600}
+.no-coverage{
+  display:inline-flex;
+  align-items:center;
+  gap:10px;
+  margin-top:8px;
+  padding:6px 12px;
+  background:rgba(226,75,74,0.10);
+  border:1px dashed rgba(226,75,74,0.40);
+  color:#FFB8B7;
+  border-radius:10px;
+  font-size:12px;
+  font-weight:600;
 }
 
 .section-note{font-size:12px;color:var(--muted);margin-top:10px;line-height:1.5}
@@ -639,183 +705,101 @@ tbody tr:hover{
 
 <div class="wrap" id="app" style="display:none"></div>
 
-<!-- Employee modal -->
-<div class="overlay" id="empOverlay">
-  <div class="modal">
-    <div class="modal-head">
-      <h3 id="empModalTitle">עובד חדש</h3>
-      <p id="empModalSub"></p>
-    </div>
-    <div class="modal-body">
-      <div class="field">
-        <label>שם מלא</label>
-        <input id="f_name" type="text" placeholder="שם העובד"/>
-      </div>
-      <div class="field">
-        <label>תפקיד</label>
-        <select id="f_role" onchange="onRoleChange()"></select>
-      </div>
-      <div class="field hidden" id="f_roleDetail_wrap">
-        <label id="f_roleDetail_label">פירוט תפקיד</label>
-        <input id="f_roleDetail" type="text" placeholder=""/>
-      </div>
-      <div class="field-row">
-        <div class="field">
-          <label>שכר ברוטו חודשי</label>
-          <input id="f_salary" type="number" placeholder="0"/>
-        </div>
-        <div class="field">
-          <label>חלקיות משרה באחוזים</label>
-          <input id="f_pct" type="number" min="1" max="100" placeholder="100"/>
-        </div>
-      </div>
-      <div class="field">
-        <label>הערות</label>
-        <textarea id="f_notes" placeholder="הערות פנימיות"></textarea>
-      </div>
-    </div>
-    <div class="modal-foot">
-      <button class="btn btn-primary" id="empSaveBtn" onclick="saveEmp()">שמירה</button>
-      <button class="btn btn-ghost" onclick="closeEmp()">ביטול</button>
-    </div>
-  </div>
-</div>
-
-<!-- Coverage modal -->
-<div class="overlay" id="coverOverlay">
-  <div class="modal">
-    <div class="modal-head">
-      <h3>תיעוד מעבר זמני</h3>
-      <p id="coverModalSub"></p>
-    </div>
-    <div class="modal-body">
-      <div class="field">
-        <label>בית מתארח</label>
-        <select id="cv_hostHouse" onchange="onCoverHostChange()"></select>
-      </div>
-      <div class="field-row">
-        <div class="field">
-          <label>מתאריך</label>
-          <input id="cv_startDate" type="date"/>
-        </div>
-        <div class="field">
-          <label>עד תאריך</label>
-          <input id="cv_endDate" type="date"/>
-        </div>
-      </div>
-      <div class="field">
-        <label>סיבת המעבר</label>
-        <select id="cv_reasonType"></select>
-      </div>
-      <div class="field">
-        <label>פירוט</label>
-        <textarea id="cv_reasonDetail" placeholder="פירוט חופשי"></textarea>
-      </div>
-      <div class="field">
-        <label>במקום</label>
-        <select id="cv_coversEmployeeId">
-          <option value="">— ללא —</option>
-        </select>
-        <div class="hint">בחירה אופציונלית — האדם בבית המתארח שמוחלף בעקבות המעבר</div>
-      </div>
-      <div class="field">
-        <label>תוספת תשלום למעבר (₪)</label>
-        <input id="cv_bonusAmount" type="number" min="0" step="100" placeholder="0"/>
-        <div class="hint">נספרת בעלות הבית המתארח כל עוד האירוע פעיל</div>
-      </div>
-    </div>
-    <div class="modal-foot">
-      <button class="btn btn-primary" id="coverSaveBtn" onclick="saveCover()">תיעוד</button>
-      <button class="btn btn-ghost" onclick="closeCover()">ביטול</button>
-    </div>
-  </div>
-</div>
-
-<!-- Terminate modal -->
-<div class="overlay" id="termOverlay">
-  <div class="modal">
-    <div class="modal-head">
-      <h3>הפסקת עבודה</h3>
-      <p id="termModalSub"></p>
-    </div>
-    <div class="modal-body">
-      <div class="field">
-        <label>תאריך סיום עבודה</label>
-        <input id="tm_terminationDate" type="date"/>
-        <div class="hint">מותר גם תאריך עתידי — למשל הודעה מוקדמת לסוף החודש. השכר ימשיך להיספר בעלות הבית עד התאריך הזה.</div>
-      </div>
-      <div class="field">
-        <label>סיבת סיום</label>
-        <select id="tm_reasonType">
-          <option value="">— ללא ציון —</option>
-        </select>
-      </div>
-      <div class="field">
-        <label>הערה</label>
-        <textarea id="tm_reasonDetail" placeholder="פירוט חופשי"></textarea>
-      </div>
-    </div>
-    <div class="modal-foot">
-      <button class="btn btn-primary" id="termSaveBtn" onclick="saveTerminate()">אישור הפסקת עבודה</button>
-      <button class="btn btn-ghost" onclick="closeTerminate()">ביטול</button>
-    </div>
-  </div>
-</div>
+<!-- Modal overlays are intentionally not in this build. The v3 worker /
+     assignment / absence / coverage / termination flows are wired in
+     follow-up commits ("v3 UI: conditional employment type form" and
+     "v3 UI: two-step absence→coverage flow"). Keeping the modals out
+     of commit 1 makes the read-only-render slice cleanly reviewable. -->
 
 <div class="toast" id="toast"></div>
 
 <script src="/lib/calc.js"></script>
 <script>
 /* ============================================================
-   E-ZONE — ניהול כוח אדם (גרסת ענן)
+   E-ZONE — ניהול כוח אדם (גרסת ענן, v3)
    נתונים נשמרים ב-Google Sheets דרך פרוקסי Express.
    שימוש בלעדי: מורן, משאבי אנוש.
+
+   המודל בגרסה זו: workers (זהות עובד/ת) + assignments (שיבוץ פר-בית
+   עם תנאי העסקה משלו) + absences (היעדרות מבית מסוים) + coverages
+   (מי מחליף/ה את הנעדר/ת ובאיזה בית הוא/היא רגיל/ה לעבוד) +
+   archive_v3 (שיבוצים שהופסקו). השכר נספר תמיד פר-שיבוץ, ולא נחלק
+   בין בתים אוטומטית.
+
+   קומיט זה כולל אך ורק את שכבת התצוגה (לקריאה בלבד) — פעולות
+   הוספה/עריכה/מחיקה נוספות בקומיטים הבאים.
    ============================================================ */
 
 const HOUSES = [
-  {id:'ramot',   name:'רמות השבים',    mgr:'שחר'},
-  {id:'asher',   name:'רעננה אשר',     mgr:'עידו'},
-  {id:'ofroni',  name:'קיסריה עפרוני', mgr:'חנן'},
-  {id:'rehab',   name:'קיסריה ריהאב',  mgr:'רנטה'},
+  {id:'ramot',       name:'בית מאזן רמות השבים',  mgr:'שחר'},
+  {id:'asher',       name:'איזון רעננה - אשר',     mgr:'עידו'},
+  {id:'ofroni',      name:'קיסריה עפרוני',          mgr:'חנן'},
+  {id:'rehab',       name:'קיסריה ריהאב',           mgr:'רנטה'},
+  {id:'pardes',      name:'איזון רעננה - פרדס',    mgr:''},
+  {id:'sde_eliezer', name:'שדה אליעזר',              mgr:''},
+  {id:'hq',          name:'מטה',                     mgr:''},
 ];
 
 const ROLE_OPTIONS = [
   'מנהל/ת','רכז/ת','מדריך/ה','מטפל/ת','אחות',
   'פסיכיאטר/ית','טבח/ית','איש/אשת אחזקה','אחר',
 ];
-const REASON_TYPES = [
-  'חופשה','חל״ת','מחלה','חופשת לידה','ניתוח','צורך תפעולי','אחר',
+const ABSENCE_REASON_TYPES = [
+  'חופשה','חל״ת','מחלה','חופשת לידה','ניתוח','צורך תפעולי','אישי','אחר',
 ];
 const TERMINATION_REASONS = [
   'התפטרות','פיטורין','סיום חוזה','מעבר תפקיד','אחר',
 ];
+const EMPLOYMENT_TYPE_LABELS = {
+  full_time:      'משכורת חודשית מלאה',
+  part_time:      'משכורת חודשית חלקית',
+  hourly:         'שכר שעתי',
+  per_session:    'תשלום לפי מפגש',
+  fixed_retainer: 'ריטיינר חודשי קבוע',
+};
+const EMPLOYMENT_TYPE_LABELS_SHORT = {
+  full_time:      'חודשי',
+  part_time:      'חלקי',
+  hourly:         'שעתי',
+  per_session:    'לפי מפגש',
+  fixed_retainer: 'ריטיינר',
+};
 
 const TOKEN_KEY = 'ezone_staff_token_v1';
+
+// Every calc.js global is aliased here so the destructure cannot collide
+// with the same names already bound on the global env (the dup-identifier
+// trap caught by tests/page-load.test.js). Add `func: calcFunc,` for any
+// new calc.js export.
 const {
-  cost: calcCost,
-  houseCost: calcHouseCost,
-  houseGross: calcHouseGross,
-  avgPct: calcAvgPct,
-  todayStr: calcToday,
-  isActive: calcIsActive,
-  activeEvents: calcActiveEvents,
-  endedEvents: calcEndedEvents,
-  eventsHostedBy: calcEventsHostedBy,
-  activeBonus: calcActiveBonus,
+  assignmentCategory: calcAssignmentCategory,
+  assignmentCost: calcAssignmentCost,
+  assignmentsByHouse: calcAssignmentsByHouse,
+  houseAssignmentsCost: calcHouseAssignmentsCost,
+  splitByCategory: calcSplitByCategory,
+  todayStr: calcTodayStr,
+  isAbsenceActive: calcIsAbsenceActive,
+  activeAbsences: calcActiveAbsences,
+  openAbsences: calcOpenAbsences,
+  coveragesForAbsence: calcCoveragesForAbsence,
+  activeCoveragesByHouse: calcActiveCoveragesByHouse,
+  coverageExtra: calcCoverageExtra,
   pendingTerminations: calcPendingTerminations,
-  pendingHomeCost: calcPendingHomeCost,
+  pendingHouseCost: calcPendingHouseCost,
   houseTotal: calcHouseTotal,
   networkTotal: calcNetworkTotal,
-  activeOutgoingFor: calcActiveOutgoingFor,
+  assignmentsForWorker: calcAssignmentsForWorker,
+  workerTotalCost: calcWorkerTotalCost,
+  activeAbsenceForWorker: calcActiveAbsenceForWorker,
 } = window.EZONE_CALC;
 
-let DATA = {ramot:[], asher:[], ofroni:[], rehab:[]};
-let EVENTS = [];
-let ARCHIVE = [];
+// ---------- state ----------
+let WORKERS = [];
+let ASSIGNMENTS = [];
+let ABSENCES = [];
+let COVERAGES = [];
+let ARCHIVE_V3 = [];
 let view = 'central';
-let editEmp = null;    // {houseId, empId?}
-let coverFrom = null;  // {houseId, empId}
-let termFrom = null;   // {houseId, empId, empName}
 
 /* ---------- API layer ---------- */
 
@@ -842,14 +826,11 @@ async function apiFetch(path, opts){
 
 async function loadData(){
   const d = await apiFetch('/api/data');
-  DATA = d.houses || {ramot:[], asher:[], ofroni:[], rehab:[]};
-  HOUSES.forEach(h => { if (!DATA[h.id]) DATA[h.id] = []; });
-  EVENTS = d.events || [];
-  ARCHIVE = d.archive || [];
-}
-
-async function doAction(payload){
-  return apiFetch('/api/action', {method:'POST', body: JSON.stringify(payload)});
+  WORKERS     = Array.isArray(d.workers)     ? d.workers     : [];
+  ASSIGNMENTS = Array.isArray(d.assignments) ? d.assignments : [];
+  ABSENCES    = Array.isArray(d.absences)    ? d.absences    : [];
+  COVERAGES   = Array.isArray(d.coverages)   ? d.coverages   : [];
+  ARCHIVE_V3  = Array.isArray(d.archiveV3)   ? d.archiveV3   : [];
 }
 
 /* ---------- PIN gate ---------- */
@@ -910,26 +891,56 @@ function fmtDate(s){
 }
 const houseName = id => (HOUSES.find(h=>h.id===id)||{}).name||id;
 const houseMgr  = id => (HOUSES.find(h=>h.id===id)||{}).mgr||'';
-function houseCount(id){ return (DATA[id]||[]).length; }
-function totalCount(){ return HOUSES.reduce((s,h)=>s+houseCount(h.id),0); }
-function totalCost(today){ return calcNetworkTotal(DATA, EVENTS, today, ARCHIVE); }
+
 function escapeHtml(s){
   return String(s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
-function roleLabel(emp){
-  const r = escapeHtml(emp.role||'—');
-  const d = (emp.roleDetail||'').trim();
+
+function workerById(id){
+  return WORKERS.find(w => w.id === id) || null;
+}
+function workerName(id){
+  const w = workerById(id);
+  return w ? w.name : (id || '');
+}
+
+function rosterAt(houseId){
+  return calcAssignmentsByHouse(ASSIGNMENTS, houseId);
+}
+function rosterCount(houseId){ return rosterAt(houseId).length; }
+function totalWorkers(){ return WORKERS.length; }
+function totalAssignments(){ return ASSIGNMENTS.length; }
+function totalCost(today){
+  const houseIds = HOUSES.map(h => h.id);
+  return calcNetworkTotal(ASSIGNMENTS, COVERAGES, ABSENCES, ARCHIVE_V3, houseIds, today);
+}
+
+function roleLabel(a){
+  const r = escapeHtml(a.role||'—');
+  const d = (a.roleDetail||'').trim();
   return d ? `${r} – ${escapeHtml(d)}` : r;
 }
-function empById(houseId, empId){
-  return (DATA[houseId]||[]).find(e=>e.id===empId);
+function typeLabelShort(employmentType){
+  return EMPLOYMENT_TYPE_LABELS_SHORT[employmentType] || employmentType || '—';
 }
-function empName(employeeId){
-  for (const h of HOUSES) {
-    const e = (DATA[h.id]||[]).find(x => x.id === employeeId);
-    if (e) return e.name;
+
+// Per-assignment terms display: chooses the appropriate string per type
+// (full salary, salary×pct, rate×hours, rate×sessions, retainer).
+function termsHtml(a){
+  switch (a.employmentType){
+    case 'full_time':
+      return `<div class="money">${fmt(a.salary)}</div>`;
+    case 'part_time':
+      return `<div class="money">${fmt(a.salary)} × ${Number(a.pct)||0}%</div>`;
+    case 'hourly':
+      return `<div class="money">${fmt(a.hourlyRate)}/שעה × ${Number(a.estHours)||0} ש'</div>`;
+    case 'per_session':
+      return `<div class="money">${fmt(a.sessionRate)}/מפגש × ${Number(a.estSessions)||0}</div>`;
+    case 'fixed_retainer':
+      return `<div class="money">${fmt(a.retainerAmount)}</div>`;
+    default:
+      return `<div class="money">—</div>`;
   }
-  return employeeId || '';
 }
 
 function toast(msg, isErr){
@@ -940,54 +951,13 @@ function toast(msg, isErr){
   window.__toastTimer = setTimeout(()=>{ t.className='toast' + (isErr?' err':''); }, 3200);
 }
 
-function setBusy(btnId, busy, busyLabel){
-  const b = document.getElementById(btnId);
-  if (!b) return;
-  if (busy){
-    b.dataset.label = b.textContent;
-    b.textContent = busyLabel || 'שמירה…';
-    b.disabled = true;
-  } else {
-    if (b.dataset.label) b.textContent = b.dataset.label;
-    b.disabled = false;
-  }
-}
-
-// One row used for every coverage-event display (active, ended, incoming).
-// DOM order: source FIRST, then arrow, then target — so RTL renders
-// `target ← source` visually, with the ← pointing toward the target.
-function renderEventRow(ev, withEndButton){
-  const coversName = ev.coversEmployeeId ? empName(ev.coversEmployeeId) : '';
-  const dates = `${escapeHtml(fmtDate(ev.startDate))} – ${escapeHtml(fmtDate(ev.endDate))}`;
-  return `
-  <div class="event-row">
-    <div class="event-main">
-      <span class="name">${escapeHtml(ev.employeeName)}</span>
-      <span class="event-badge">החלפה</span>
-      <span class="event-route">
-        <span>${escapeHtml(houseName(ev.homeHouse))}</span>
-        <span class="arrow">←</span>
-        <span>${escapeHtml(houseName(ev.hostHouse))}</span>
-      </span>
-      ${withEndButton ? `<button class="btn btn-sm event-action" onclick="endCover('${ev.id}','${escapeHtml(ev.employeeName)}')">סיום</button>` : ''}
-    </div>
-    <div class="event-meta">
-      <span class="reason-pill">${escapeHtml(ev.reasonType)}</span>
-      <span class="event-dates">${dates}</span>
-      ${coversName ? `<span>במקום: ${escapeHtml(coversName)}</span>` : ''}
-      ${ev.bonusAmount ? `<span class="event-bonus">תוספת: ${fmt(ev.bonusAmount)}</span>` : ''}
-    </div>
-    ${ev.reasonDetail ? `<div class="event-detail">${escapeHtml(ev.reasonDetail)}</div>` : ''}
-  </div>`;
-}
-
 /* ---------- rendering ---------- */
 
 function renderSwitch(){
   const el=document.getElementById('houseSwitch');
   let html=`<button class="central ${view==='central'?'on':''}" onclick="go('central')">מבט כללי</button>`;
   HOUSES.forEach(h=>{
-    html+=`<button class="${view===h.id?'on':''}" onclick="go('${h.id}')">${h.name}</button>`;
+    html+=`<button class="${view===h.id?'on':''}" onclick="go('${h.id}')">${escapeHtml(h.name)}</button>`;
   });
   html += `<button class="topbar-link ${view==='archive'?'on':''}" onclick="go('archive')">ארכיב עובדים</button>`;
   html += `<button class="logout" onclick="logout()">יציאה</button>`;
@@ -1005,33 +975,35 @@ function render(){
 }
 
 function centralView(){
-  const today = calcToday();
-  const active = calcActiveEvents(EVENTS, today);
+  const today = calcTodayStr();
+  const open = calcOpenAbsences(ABSENCES, today);
+  const active = calcActiveAbsences(ABSENCES, today);
 
   const houseBoxes = HOUSES.map(h=>{
-    const bonus = calcActiveBonus(EVENTS, h.id, today);
-    const pending = calcPendingHomeCost(ARCHIVE, h.id, today);
+    const roster = rosterAt(h.id);
+    const houseT = calcHouseTotal(ASSIGNMENTS, COVERAGES, ABSENCES, ARCHIVE_V3, h.id, today);
+    const extra = calcCoverageExtra(COVERAGES, ABSENCES, h.id, today);
+    const pending = calcPendingHouseCost(ARCHIVE_V3, h.id, today);
+    const mgrPill = h.mgr
+      ? `<span class="hb-mgr">מנהל: ${escapeHtml(h.mgr)}</span>`
+      : '';
     return `
     <div class="house-box" onclick="go('${h.id}')">
       <div class="hb-top">
         <b>${escapeHtml(h.name)}</b>
-        <span class="hb-mgr">מנהל: ${escapeHtml(h.mgr)}</span>
+        ${mgrPill}
       </div>
       <div class="hb-stats">
-        <div><div class="n">${houseCount(h.id)}</div><div class="t">עובדי בית</div></div>
+        <div><div class="n">${roster.length}</div><div class="t">שיבוצים בבית</div></div>
         <div>
-          <div class="n">${fmt(calcHouseTotal(DATA[h.id]||[], EVENTS, h.id, today, ARCHIVE))}</div>
+          <div class="n">${fmt(houseT)}</div>
           <div class="t">עלות חודשית</div>
-          ${bonus ? `<div class="bonus-line">כולל בונוסי כיסוי ${fmt(bonus)}</div>` : ''}
-          ${pending ? `<div class="bonus-line">כולל עובדים בתקופת הודעה ${fmt(pending)}</div>` : ''}
+          ${extra ? `<div class="bonus-line">כולל תוספות מחליפים ${fmt(extra)}</div>` : ''}
+          ${pending ? `<div class="bonus-line">כולל בתקופת הודעה ${fmt(pending)}</div>` : ''}
         </div>
       </div>
     </div>`;
   }).join('');
-
-  const activeList = active.length
-    ? active.map(ev => renderEventRow(ev, true)).join('')
-    : `<div class="empty">אין כרגע שיבוץ החלפות פעיל</div>`;
 
   return `
   <div class="head">
@@ -1041,50 +1013,43 @@ function centralView(){
 
   <div class="stats">
     <div class="stat accent">
-      <div class="lbl">סה״כ עובדים</div>
-      <div class="val">${totalCount()}</div>
-      <div class="sub">בכל הרשת</div>
+      <div class="lbl">סה״כ עובדים/ות</div>
+      <div class="val">${totalWorkers()}</div>
+      <div class="sub">${totalAssignments()} שיבוצים בכל הרשת</div>
     </div>
     <div class="stat">
       <div class="lbl">עלות שכר חודשית</div>
       <div class="val">${fmt(totalCost(today))}</div>
-      <div class="sub">משכורות בית + בונוסי כיסוי פעילים</div>
+      <div class="sub">שיבוצים + תוספות מחליפים פעילות + תקופת הודעה</div>
     </div>
     <div class="stat">
       <div class="lbl">בתים פעילים</div>
       <div class="val">${HOUSES.length}</div>
-      <div class="sub">רמות · אשר · עפרוני · ריהאב</div>
+      <div class="sub">כולל מטה</div>
     </div>
     <div class="stat">
-      <div class="lbl">שיבוץ החלפות בין בתים</div>
+      <div class="lbl">נעדרים פעילים היום</div>
       <div class="val">${active.length}</div>
-      <div class="sub">היום ${escapeHtml(fmtDate(today))}</div>
+      <div class="sub">${open.length} פתוחים בסך הכל · היום ${escapeHtml(fmtDate(today))}</div>
     </div>
   </div>
 
   <div class="section">
     <div class="section-head"><h2>פירוט לפי בית</h2></div>
     <div class="house-grid">${houseBoxes}</div>
-  </div>
-
-  <div class="section">
-    <div class="section-head">
-      <h2>שיבוץ החלפות בין בתים</h2>
-      <span class="count-pill">${active.length}</span>
-    </div>
-    <div class="tablecard accent-edge">
-      <div class="event-list">${activeList}</div>
-    </div>
   </div>`;
 }
 
 function archiveView(){
-  const rows = ARCHIVE.length
-    ? ARCHIVE.slice().sort((a,b)=> String(b.terminationDate).localeCompare(String(a.terminationDate))).map(a => `
+  const rows = ARCHIVE_V3.length
+    ? ARCHIVE_V3.slice().sort((a,b)=> String(b.terminationDate).localeCompare(String(a.terminationDate))).map(a => `
       <tr>
         <td class="emp-name">${escapeHtml(a.name)}</td>
-        <td>${escapeHtml(houseName(a.homeHouse))}</td>
-        <td><span class="role-tag">${escapeHtml(a.role||'—')}${a.roleDetail?` – ${escapeHtml(a.roleDetail)}`:''}</span></td>
+        <td>${escapeHtml(houseName(a.house))}</td>
+        <td>
+          <span class="role-tag">${escapeHtml(a.role||'—')}${a.roleDetail?` – ${escapeHtml(a.roleDetail)}`:''}</span>
+          <span class="type-tag">${escapeHtml(typeLabelShort(a.employmentType))}</span>
+        </td>
         <td class="col-date">${escapeHtml(fmtDate(a.terminationDate))}</td>
         <td>${a.reasonType ? escapeHtml(a.reasonType) : '<span style="color:var(--muted)">—</span>'}</td>
         <td class="note-cell">${a.reasonDetail ? escapeHtml(a.reasonDetail) : '<span style="color:var(--muted)">—</span>'}</td>
@@ -1094,13 +1059,13 @@ function archiveView(){
   return `
   <div class="head">
     <h1>ארכיב עובדים</h1>
-    <p>רשומות של עובדים שעבודתם הופסקה. ממוין לפי תאריך הסיום — חדש ביותר ראשון.</p>
+    <p>רשומות של שיבוצים שהופסקו. ממוין לפי תאריך הסיום — חדש ביותר ראשון.</p>
   </div>
 
   <div class="stats">
     <div class="stat accent">
       <div class="lbl">סה״כ רשומות בארכיב</div>
-      <div class="val">${ARCHIVE.length}</div>
+      <div class="val">${ARCHIVE_V3.length}</div>
     </div>
   </div>
 
@@ -1119,338 +1084,158 @@ function archiveView(){
   </div>`;
 }
 
+// One row of the roster — used inside both the salaried and freelancer
+// sub-groups. Read-only in commit 1; the actions column is reserved
+// (rendered empty) for the upcoming row-action buttons in commit 2.
+function rosterRow(a){
+  return `
+  <tr>
+    <td class="emp-name">${escapeHtml(workerName(a.workerId))}</td>
+    <td>
+      <span class="role-tag">${roleLabel(a)}</span>
+      <span class="type-tag">${escapeHtml(typeLabelShort(a.employmentType))}</span>
+    </td>
+    <td>${termsHtml(a)}</td>
+    <td class="money">${fmt(calcAssignmentCost(a))}</td>
+    <td class="note-cell">${a.notes?escapeHtml(a.notes):'<span style="color:#B6B0A0">—</span>'}</td>
+  </tr>`;
+}
+
+function rosterTable(rows){
+  const body = rows.length
+    ? rows.map(rosterRow).join('')
+    : `<tr><td colspan="5"><div class="empty-soft">אין שיבוצים בקטגוריה זו</div></td></tr>`;
+  return `
+  <div class="table-scroll">
+    <table>
+      <thead><tr>
+        <th>שם</th><th>תפקיד / סוג העסקה</th><th>תנאים</th>
+        <th>עלות חודשית</th><th>הערות</th>
+      </tr></thead>
+      <tbody>${body}</tbody>
+    </table>
+  </div>`;
+}
+
+// Renders one active absence + (optionally) its coverage(s) nested
+// underneath. If the absence has no coverage, a "ללא מחליף" prompt
+// renders in place — its "הוסף החלפה" button is wired in commit 3.
+function renderAbsenceRow(absence){
+  const wName = escapeHtml(workerName(absence.workerId) || 'ללא רישום נעדר/ת');
+  const dates = `${escapeHtml(fmtDate(absence.startDate))} – ${escapeHtml(fmtDate(absence.endDate))}`;
+  const covs = calcCoveragesForAbsence(COVERAGES, absence.id);
+  const coverageLines = covs.length
+    ? covs.map(c => `
+        <div class="coverage-line">
+          <span>מחליף/ה:</span>
+          <span class="cov-name">${escapeHtml(workerName(c.coveringWorkerId))}</span>
+          <span class="cov-house">(מ${escapeHtml(houseName(c.providingHouse))})</span>
+          ${c.extraPayment ? `<span class="cov-extra">תוספת ${fmt(c.extraPayment)}</span>` : ''}
+          ${c.notes ? `<span style="color:var(--muted)">${escapeHtml(c.notes)}</span>` : ''}
+        </div>`).join('')
+    : `<div class="no-coverage">ללא מחליף — שיבוץ ההחלפה יתבצע בקומיט הבא</div>`;
+  return `
+  <div class="event-row">
+    <div class="event-main">
+      <span class="name">${wName}</span>
+      <span class="event-badge">היעדרות</span>
+    </div>
+    <div class="event-meta">
+      <span class="reason-pill">${escapeHtml(absence.reasonType)}</span>
+      <span class="event-dates">${dates}</span>
+    </div>
+    ${absence.reasonDetail ? `<div class="event-detail">${escapeHtml(absence.reasonDetail)}</div>` : ''}
+    ${coverageLines}
+  </div>`;
+}
+
 function houseView(id){
-  const today = calcToday();
-  const list = DATA[id] || [];
-  const incoming = calcEventsHostedBy(EVENTS, id, today);
-  const incomingBonus = calcActiveBonus(EVENTS, id, today);
-  const pendingTerm = calcPendingHomeCost(ARCHIVE, id, today);
-  const houseT = calcHouseTotal(list, EVENTS, id, today, ARCHIVE);
+  const today = calcTodayStr();
+  const list = rosterAt(id);
+  const split = calcSplitByCategory(list);
+  const houseT = calcHouseTotal(ASSIGNMENTS, COVERAGES, ABSENCES, ARCHIVE_V3, id, today);
+  const extra = calcCoverageExtra(COVERAGES, ABSENCES, id, today);
+  const pending = calcPendingHouseCost(ARCHIVE_V3, id, today);
+  const houseAbsences = calcActiveAbsences(ABSENCES, today).filter(ab => ab.house === id);
 
-  const rows = list.length ? list.map(e=>{
-    const outgoing = calcActiveOutgoingFor(EVENTS, e.id, today);
-    const badge = outgoing
-      ? `<span class="cover-flag">החלפה</span><span class="cover-meta">ב${escapeHtml(houseName(outgoing.hostHouse))} · עד ${escapeHtml(fmtDate(outgoing.endDate))}</span>`
-      : '';
-    return `
-    <tr>
-      <td class="emp-name">${escapeHtml(e.name)}${badge}</td>
-      <td><span class="role-tag">${roleLabel(e)}</span></td>
-      <td class="money">${fmt(e.salary)}</td>
-      <td>
-        <div class="pct-bar">
-          <div class="pct-track"><div class="pct-fill" style="width:${e.pct}%"></div></div>
-          <span style="font-size:13px;font-weight:600">${e.pct}%</span>
-        </div>
-      </td>
-      <td class="money">${fmt(calcCost(e))}</td>
-      <td class="note-cell">${e.notes?escapeHtml(e.notes):'<span style="color:#B6B0A0">—</span>'}</td>
-      <td>
-        <div class="row-actions">
-          <button class="btn btn-sm" onclick="openCover('${id}','${e.id}')">תיעוד מעבר</button>
-          <button class="btn btn-sm btn-accent-hover" onclick="openEmp('${id}','${e.id}')">עריכה</button>
-          <button class="btn btn-sm btn-danger-hover" onclick="openTerminate('${id}','${e.id}')">הפסקת עבודה</button>
-          <button class="btn btn-sm btn-danger-hover" onclick="delEmp('${id}','${e.id}')">מחיקה</button>
-        </div>
-      </td>
-    </tr>`;
-  }).join('') : `<tr><td colspan="7"><div class="empty">אין עובדים בבית זה. ניתן להוסיף עובד חדש בכפתור למעלה.</div></td></tr>`;
+  const subSalaried = `
+  <div class="subgroup">
+    <h3 class="subgroup-head">שכירים <span class="count-pill">${split.salaried.length}</span></h3>
+    ${rosterTable(split.salaried)}
+  </div>`;
+  const subFreelancer = `
+  <div class="subgroup">
+    <h3 class="subgroup-head">פרילנסרים <span class="count-pill">${split.freelancer.length}</span></h3>
+    ${rosterTable(split.freelancer)}
+  </div>`;
 
-  const incomingSection = incoming.length ? `
+  const absencesSection = `
   <div class="section">
     <div class="section-head">
-      <h2>כיסוי זמני</h2>
-      <span class="count-pill">${incoming.length}</span>
+      <h2>נעדרים פעילים</h2>
+      <span class="count-pill">${houseAbsences.length}</span>
     </div>
     <div class="tablecard accent-edge">
-      <div class="event-list">${incoming.map(ev => renderEventRow(ev, true)).join('')}</div>
+      ${houseAbsences.length
+        ? `<div class="event-list">${houseAbsences.map(renderAbsenceRow).join('')}</div>`
+        : `<div class="empty">אין כרגע היעדרויות פעילות בבית זה</div>`}
     </div>
-    <div class="section-note">השכר הבסיסי של עובדים אלו נספר בעלות הבית שבו הם משויכים. רק התוספת מופיעה כאן.</div>
-  </div>` : '';
+    <div class="section-note">תוספת מחליף/ה נספרת בעלות הבית שממנו חסר/ה העובד/ת — לא בבית שממנו מגיע/ה המחליף/ה.</div>
+  </div>`;
+
+  const mgrPill = houseMgr(id)
+    ? `<span class="mgr">מנהל הבית: ${escapeHtml(houseMgr(id))}</span>`
+    : '';
+
+  const subBreakdown = (split.salaried.length || split.freelancer.length)
+    ? `${split.salaried.length} שכירים · ${split.freelancer.length} פרילנסרים`
+    : 'אין שיבוצים בבית זה';
 
   return `
   <div class="head">
     <h1>${escapeHtml(houseName(id))}</h1>
-    <p>מצבת עובדים, שכר ברוטו וחלקיות משרה</p>
-    <span class="mgr">מנהל הבית: ${escapeHtml(houseMgr(id))}</span>
+    <p>צוות הבית, נעדרים והחלפות פעילות</p>
+    ${mgrPill}
   </div>
 
   <div class="stats">
     <div class="stat accent">
-      <div class="lbl">עובדים בבית</div>
+      <div class="lbl">שיבוצים בבית</div>
       <div class="val">${list.length}</div>
+      <div class="sub">${subBreakdown}</div>
     </div>
     <div class="stat">
       <div class="lbl">עלות חודשית כוללת</div>
       <div class="val">${fmt(houseT)}</div>
-      <div class="sub">${incomingBonus||pendingTerm
+      <div class="sub">${extra||pending
         ? [
-            incomingBonus?`+ בונוסי כיסוי ${fmt(incomingBonus)}`:'',
-            pendingTerm?`+ תקופת הודעה ${fmt(pendingTerm)}`:'',
+            extra?`+ תוספות מחליפים ${fmt(extra)}`:'',
+            pending?`+ תקופת הודעה ${fmt(pending)}`:'',
           ].filter(Boolean).join(' · ')
-        : 'משוקלל לחלקיות'}</div>
+        : 'סך עלויות השיבוצים בבית'}</div>
     </div>
     <div class="stat">
-      <div class="lbl">סה״כ ברוטו במשרה מלאה</div>
-      <div class="val">${fmt(calcHouseGross(list))}</div>
-      <div class="sub">ללא שקלול חלקיות</div>
+      <div class="lbl">היעדרויות פעילות היום</div>
+      <div class="val">${houseAbsences.length}</div>
+      <div class="sub">היום ${escapeHtml(fmtDate(today))}</div>
     </div>
     <div class="stat">
-      <div class="lbl">חלקיות ממוצעת</div>
-      <div class="val">${calcAvgPct(list)}%</div>
+      <div class="lbl">מחליפים נכנסים</div>
+      <div class="val">${houseAbsences.reduce((s,ab)=>s+calcCoveragesForAbsence(COVERAGES,ab.id).length,0)}</div>
+      <div class="sub">סך רשומות החלפה על היעדרויות פעילות</div>
     </div>
   </div>
 
-  ${incomingSection}
-
   <div class="section">
     <div class="section-head">
-      <h2>מצבת עובדים</h2>
-      <button class="btn btn-primary" onclick="openEmp('${id}')">+ עובד חדש</button>
+      <h2>צוות הבית</h2>
+      <span class="count-pill">${list.length}</span>
     </div>
-    <div class="tablecard">
-      <div class="table-scroll">
-      <table>
-        <thead><tr>
-          <th>שם</th><th>תפקיד</th><th>שכר ברוטו</th><th>חלקיות</th>
-          <th>עלות בפועל</th><th>הערות</th><th>פעולות</th>
-        </tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-      </div>
-    </div>
-  </div>`;
-}
+    ${subSalaried}
+    ${subFreelancer}
+  </div>
 
-/* ---------- employee CRUD ---------- */
-
-function renderRoleSelect(currentRole, currentDetail){
-  const sel = document.getElementById('f_role');
-  let html = '';
-  const known = ROLE_OPTIONS.includes(currentRole);
-  const effectiveRole = known ? currentRole : (currentRole ? 'אחר' : ROLE_OPTIONS[0]);
-  ROLE_OPTIONS.forEach(r=>{
-    html += `<option value="${escapeHtml(r)}" ${r===effectiveRole?'selected':''}>${escapeHtml(r)}</option>`;
-  });
-  sel.innerHTML = html;
-  // If the stored role isn't in the dropdown, surface it via roleDetail so
-  // round-trip preserves the original wording.
-  const detail = known ? (currentDetail||'') : (currentRole || currentDetail || '');
-  document.getElementById('f_roleDetail').value = detail;
-  onRoleChange();
-}
-
-function onRoleChange(){
-  const role = document.getElementById('f_role').value;
-  const wrap = document.getElementById('f_roleDetail_wrap');
-  const lbl = document.getElementById('f_roleDetail_label');
-  const inp = document.getElementById('f_roleDetail');
-  if (role === 'מטפל/ת'){
-    wrap.classList.remove('hidden');
-    lbl.textContent = 'התמחות / סוג טיפול';
-    inp.placeholder = 'לדוגמה: אמנות, קבוצות, CBT';
-  } else if (role === 'אחר'){
-    wrap.classList.remove('hidden');
-    lbl.textContent = 'פירוט תפקיד';
-    inp.placeholder = 'תפקיד חופשי';
-  } else {
-    wrap.classList.add('hidden');
-    inp.value = '';
-  }
-}
-
-function openEmp(houseId, empId){
-  editEmp = empId ? {houseId,empId} : {houseId};
-  const isEdit = !!empId;
-  document.getElementById('empModalTitle').textContent = isEdit?'עריכת עובד':'עובד חדש';
-  document.getElementById('empModalSub').textContent = houseName(houseId);
-  let e = {name:'',role:'',roleDetail:'',salary:'',pct:100,notes:''};
-  if(isEdit){ e = empById(houseId, empId) || e; }
-  f_name.value = e.name;
-  renderRoleSelect(e.role||'', e.roleDetail||'');
-  f_salary.value = e.salary;
-  f_pct.value = e.pct;
-  f_notes.value = e.notes||'';
-  document.getElementById('empOverlay').classList.add('show');
-  setTimeout(()=>f_name.focus(), 50);
-}
-function closeEmp(){ document.getElementById('empOverlay').classList.remove('show'); }
-
-async function saveEmp(){
-  const {houseId,empId}=editEmp;
-  const role = document.getElementById('f_role').value;
-  const employee={
-    name: f_name.value.trim(),
-    role,
-    roleDetail: document.getElementById('f_roleDetail').value.trim(),
-    salary: Number(f_salary.value)||0,
-    pct: Math.min(100,Math.max(1,Number(f_pct.value)||100)),
-    notes: f_notes.value.trim()
-  };
-  if(!employee.name){ alert('יש להזין שם'); return; }
-  if(role === 'אחר' && !employee.roleDetail){ alert('כשהתפקיד "אחר" יש לפרט'); return; }
-  setBusy('empSaveBtn', true);
-  try{
-    if(empId){
-      await doAction({action:'updateEmployee', house:houseId, id:empId, employee});
-      toast('העדכון נשמר');
-    } else {
-      await doAction({action:'addEmployee', house:houseId, employee});
-      toast('ההוספה הושלמה');
-    }
-    await loadData();
-    closeEmp();
-    render();
-  } catch(err){
-    toast(err.message || 'שגיאה בשמירה', true);
-  } finally {
-    setBusy('empSaveBtn', false);
-  }
-}
-
-async function delEmp(houseId,empId){
-  if(!confirm('למחוק את העובד מהמערכת?')) return;
-  try{
-    await doAction({action:'deleteEmployee', house:houseId, id:empId});
-    await loadData();
-    render();
-    toast('המחיקה הושלמה');
-  } catch(err){
-    toast(err.message || 'שגיאה במחיקה', true);
-  }
-}
-
-/* ---------- coverage events ---------- */
-
-function openCover(houseId, empId){
-  const e = empById(houseId, empId);
-  if(!e) return;
-  coverFrom = {houseId, empId};
-  document.getElementById('coverModalSub').textContent =
-    `${e.name} · בית אם: ${houseName(houseId)}`;
-  const sel = document.getElementById('cv_hostHouse');
-  sel.innerHTML = HOUSES.filter(h=>h.id!==houseId)
-    .map(h=>`<option value="${h.id}">${escapeHtml(h.name)} · מנהל ${escapeHtml(h.mgr)}</option>`).join('');
-  const reasonSel = document.getElementById('cv_reasonType');
-  reasonSel.innerHTML = REASON_TYPES.map(r=>`<option value="${escapeHtml(r)}">${escapeHtml(r)}</option>`).join('');
-  document.getElementById('cv_reasonDetail').value = '';
-  document.getElementById('cv_bonusAmount').value = '';
-  const today = calcToday();
-  document.getElementById('cv_startDate').value = today;
-  document.getElementById('cv_endDate').value = today;
-  onCoverHostChange();
-  document.getElementById('coverOverlay').classList.add('show');
-}
-function closeCover(){ document.getElementById('coverOverlay').classList.remove('show'); }
-
-function onCoverHostChange(){
-  const host = document.getElementById('cv_hostHouse').value;
-  const sel = document.getElementById('cv_coversEmployeeId');
-  const roster = DATA[host] || [];
-  let html = '<option value="">— ללא —</option>';
-  roster.forEach(e=>{
-    html += `<option value="${escapeHtml(e.id)}">${escapeHtml(e.name)}</option>`;
-  });
-  sel.innerHTML = html;
-}
-
-async function saveCover(){
-  const {houseId, empId} = coverFrom;
-  const payload = {
-    action: 'startCoverage',
-    employeeId: empId,
-    homeHouse: houseId,
-    hostHouse: document.getElementById('cv_hostHouse').value,
-    startDate: document.getElementById('cv_startDate').value,
-    endDate: document.getElementById('cv_endDate').value,
-    reasonType: document.getElementById('cv_reasonType').value,
-    reasonDetail: document.getElementById('cv_reasonDetail').value.trim(),
-    coversEmployeeId: document.getElementById('cv_coversEmployeeId').value,
-    bonusAmount: Number(document.getElementById('cv_bonusAmount').value)||0,
-  };
-  if (!payload.startDate || !payload.endDate){
-    alert('יש להזין תאריך התחלה ותאריך סיום');
-    return;
-  }
-  if (payload.endDate < payload.startDate){
-    alert('תאריך סיום מוקדם מתאריך התחלה');
-    return;
-  }
-  setBusy('coverSaveBtn', true, 'שומר…');
-  try{
-    await doAction(payload);
-    await loadData();
-    closeCover();
-    render();
-    toast('אירוע הכיסוי נשמר');
-  } catch(err){
-    toast(err.message || 'שגיאה בשמירה', true);
-  } finally {
-    setBusy('coverSaveBtn', false);
-  }
-}
-
-async function endCover(eventId, name){
-  if(!confirm(`לסיים את אירוע הכיסוי של ${name}?`)) return;
-  try{
-    await doAction({action:'endCoverage', eventId});
-    await loadData();
-    render();
-    toast('אירוע הכיסוי נסגר');
-  } catch(err){
-    toast(err.message || 'שגיאה בסגירה', true);
-  }
-}
-
-/* ---------- termination ---------- */
-
-function openTerminate(houseId, empId){
-  const e = empById(houseId, empId);
-  if(!e) return;
-  termFrom = {houseId, empId, empName: e.name};
-  document.getElementById('termModalSub').textContent =
-    `${e.name} · ${houseName(houseId)}`;
-  document.getElementById('tm_terminationDate').value = calcToday();
-  document.getElementById('tm_reasonDetail').value = '';
-  const sel = document.getElementById('tm_reasonType');
-  let html = '<option value="">— ללא ציון —</option>';
-  TERMINATION_REASONS.forEach(r => {
-    html += `<option value="${escapeHtml(r)}">${escapeHtml(r)}</option>`;
-  });
-  sel.innerHTML = html;
-  document.getElementById('termOverlay').classList.add('show');
-}
-function closeTerminate(){ document.getElementById('termOverlay').classList.remove('show'); }
-
-async function saveTerminate(){
-  const {houseId, empId, empName} = termFrom;
-  const terminationDate = document.getElementById('tm_terminationDate').value;
-  const reasonType = document.getElementById('tm_reasonType').value;
-  const reasonDetail = document.getElementById('tm_reasonDetail').value.trim();
-  if (!terminationDate){
-    alert('יש להזין תאריך סיום עבודה');
-    return;
-  }
-  if (!confirm(`להפסיק את העבודה של ${empName} בתאריך ${fmtDate(terminationDate)}?`)) return;
-  setBusy('termSaveBtn', true, 'שמירה…');
-  try{
-    await doAction({
-      action: 'terminateEmployee',
-      house: houseId,
-      id: empId,
-      terminationDate,
-      reasonType,
-      reasonDetail,
-    });
-    await loadData();
-    closeTerminate();
-    render();
-    toast('הפסקת העבודה נשמרה');
-  } catch(err){
-    toast(err.message || 'שגיאה בשמירה', true);
-  } finally {
-    setBusy('termSaveBtn', false);
-  }
+  ${absencesSection}`;
 }
 
 /* ---------- boot ---------- */
