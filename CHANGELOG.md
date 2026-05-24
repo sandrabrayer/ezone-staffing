@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased] — v3 work in progress
+
+> The full v3 entry will be written when v3 ships; this section is a running journal of v3-only changes that haven't been folded into a release entry yet.
+
+- **Houses expanded from 4 to 7.** Added `pardes` (איזון רעננה - פרדס), `sde_eliezer` (שדה אליעזר), and `hq` (מטה — a pseudo-house for HQ / admin staff who don't belong to a physical house). The validator (`lib/validate.js` and its mirror in `apps-script/Code.gs`) now accepts all seven codes. The v3 Sheet schema is unchanged — rosters live in the unified `assignments` table, so no per-house tabs were added. See `MIGRATION.md` "Houses" for the canonical id → Hebrew name table.
+
 ## [2.1.2] — 2026-05-22 — Archive on a dedicated page + Hebrew typo fix
 
 - **Spelling**: section header was `אורכיב עובדים` — the correct Hebrew is `ארכיב` (without the ו). Fixed every occurrence in `public/index.html` and `CHANGELOG.md`. New `tests/spelling.test.js` walks the whole repo on every test run and asserts `אורכיב` never appears again, plus asserts the dashboard nav uses the correctly-spelled `ארכיב עובדים`.

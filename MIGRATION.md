@@ -19,6 +19,26 @@ The legacy tabs (`ramot`/`asher`/`ofroni`/`rehab`, `events`, `history`, `archive
 
 ---
 
+## Houses
+
+v3 supports **seven** house codes — the original four plus two new physical houses and one HQ pseudo-house. House codes are stored verbatim in `assignment.house`, `absence.house`, `coverage.providing_house`, and `archive_v3.house`. The validator (`lib/validate.js` and the mirror in `apps-script/Code.gs`) rejects any unknown code.
+
+| code | Hebrew display name | notes |
+|---|---|---|
+| `ramot` | רמות השבים | original house |
+| `asher` | רעננה אשר | original house |
+| `ofroni` | קיסריה עפרוני | original house |
+| `rehab` | קיסריה ריהאב | original house |
+| `pardes` | איזון רעננה - פרדס | new in v3 |
+| `sde_eliezer` | שדה אליעזר | new in v3 |
+| `hq` | מטה | **pseudo-house** for headquarters / admin staff who don't belong to a specific physical house. Same validation rules as any other house |
+
+**Note on Sheet schema.** v3 has no per-house Sheet tabs — all rosters live in the unified `assignments` table, keyed by `house`. So adding the three new codes requires **no Sheet schema changes**: `setupSheetsV3` doesn't create a tab per house, and `migrateToV3` only reads legacy data (which exists only for the original four). Assignments for `pardes` / `sde_eliezer` / `hq` are created through the UI after migration, never through migration itself.
+
+**Hebrew display names** are a UI concern, not a validation concern, so they live in the UI's `HOUSES` list (in `public/index.html`) rather than `lib/validate.js`. The table above is the canonical source — keep it and the UI list in sync.
+
+---
+
 ## Before/after: sample rows
 
 This is what `migrateToV3` will produce from a tiny synthetic legacy dataset. Use it to sanity-check the mapping before running anything.

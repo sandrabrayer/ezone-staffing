@@ -58,7 +58,14 @@
    return empty / [].
    ============================================================ */
 
-const HOUSE_IDS = ['ramot', 'asher', 'ofroni', 'rehab'];
+// `hq` is a pseudo-house for headquarters / admin staff. See
+// lib/validate.js and MIGRATION.md "Houses" for the canonical id →
+// Hebrew display name mapping; this list must mirror lib/validate.js.
+const HOUSE_IDS = [
+  'ramot', 'asher', 'ofroni', 'rehab',
+  'pardes', 'sde_eliezer',
+  'hq',
+];
 
 // v3 tabs
 const WORKERS_TAB = 'workers';

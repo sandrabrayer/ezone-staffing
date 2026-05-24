@@ -14,8 +14,21 @@ const {
 
 // ---------- constants ----------
 
-test('HOUSE_IDS: four houses', () => {
-  assert.deepEqual(HOUSE_IDS, ['ramot', 'asher', 'ofroni', 'rehab']);
+test('HOUSE_IDS: seven houses incl. pardes, sde_eliezer, hq', () => {
+  assert.deepEqual(HOUSE_IDS, [
+    'ramot', 'asher', 'ofroni', 'rehab',
+    'pardes', 'sde_eliezer',
+    'hq',
+  ]);
+});
+
+test('isHouse: accepts all new house codes', () => {
+  // Regression guard for the v3 expansion. If anything breaks the
+  // validator's recognition of these specifically, this test fails
+  // loudly rather than hiding inside a single assertion above.
+  ['pardes', 'sde_eliezer', 'hq'].forEach(id => {
+    assert.equal(isHouse(id), true, `expected isHouse('${id}') === true`);
+  });
 });
 
 test('ROLE_OPTIONS: nine roles', () => {
