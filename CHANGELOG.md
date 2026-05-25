@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Changed
+
+- v3 UX rename pass: tighter Hebrew labels (`אירוע היעדרות` / `אירוע החלפה`); the `בית מתארח` concept is no longer surfaced in the UI. The coverage form's source-house field is relabeled `בית מקור של המחליף/ה` to describe what is stored (the covering worker's home house) without the `מתארח` / `מספק` framing. Strings-only commit — no logic, schema, or data-field changes.
+
 ## [3.0.0] — 2026-05-25 — Workers + per-house assignments + absence/coverage split
 
 Major data-model redesign. The v2 "employee at a house" abstraction is replaced by **worker × assignment** — one worker can hold an assignment at multiple houses, each with its own role, employment type, and cost terms. The v2 coverage *event* (a single row mixing absentee + helper + bonus) is split into a normalized **absence + coverage** pair, so an absence can have zero, one, or many coverages, and coverage records survive the absence's end as audit history.

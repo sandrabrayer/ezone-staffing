@@ -863,7 +863,7 @@ tbody tr:hover{
 <div class="overlay" id="absenceOverlay">
   <div class="modal">
     <div class="modal-head">
-      <h3>רישום היעדרות</h3>
+      <h3>אירוע היעדרות</h3>
       <p id="absenceModalSub"></p>
     </div>
     <div class="modal-body">
@@ -930,7 +930,7 @@ tbody tr:hover{
 <div class="overlay" id="coverageOverlay">
   <div class="modal">
     <div class="modal-head">
-      <h3>הוספת מחליף/ה</h3>
+      <h3>אירוע החלפה</h3>
       <p id="coverageModalSub"></p>
     </div>
     <div class="modal-body">
@@ -940,7 +940,7 @@ tbody tr:hover{
         <div class="hint">העובד/ת הנעדר/ת לא מופיע/ה ברשימה — אי אפשר לכסות לעצמך.</div>
       </div>
       <div class="field">
-        <label>בית מקור</label>
+        <label>בית מקור של המחליף/ה</label>
         <select id="cv_providingHouse"></select>
         <div class="hint">הבית שממנו מגיע/ה המחליף/ה. ברירת המחדל לפי השיבוץ הקיים, אפשר לשנות.</div>
       </div>
@@ -1790,7 +1790,7 @@ async function saveCoverage(){
   const extraPayment = Number(document.getElementById('cv_extraPayment').value) || 0;
   const notes = document.getElementById('cv_notes').value.trim();
   if (!coveringWorkerId){ toast('יש לבחור מחליף/ה', true); return; }
-  if (!providingHouse){ toast('יש לבחור בית מקור', true); return; }
+  if (!providingHouse){ toast('יש לבחור בית מקור של המחליף/ה', true); return; }
 
   setBusy('coverageSaveBtn', true);
   try {
@@ -2081,7 +2081,7 @@ function houseView(id){
       <h2>נעדרים פעילים</h2>
       <div style="display:flex;gap:10px;align-items:center">
         <span class="count-pill">${houseAbsences.length}</span>
-        <button class="btn btn-primary" onclick="openAbsence({house:'${escapeHtml(id)}'})">+ רישום היעדרות</button>
+        <button class="btn btn-primary" onclick="openAbsence({house:'${escapeHtml(id)}'})">+ אירוע היעדרות</button>
       </div>
     </div>
     <div class="tablecard accent-edge">
