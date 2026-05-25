@@ -857,6 +857,110 @@ tbody tr:hover{
   </div>
 </div>
 
+<!-- Absence modal: log a worker absent FROM a house for a date range.
+     Server has no updateAbsence — only logAbsence + endAbsence +
+     deleteAbsence — so "editing" an absence means delete + recreate. -->
+<div class="overlay" id="absenceOverlay">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>רישום היעדרות</h3>
+      <p id="absenceModalSub"></p>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>עובד/ת</label>
+        <select id="ab_worker"></select>
+      </div>
+      <div class="field">
+        <label>בית</label>
+        <select id="ab_house"></select>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label>מתאריך</label>
+          <input id="ab_startDate" type="date"/>
+        </div>
+        <div class="field">
+          <label>עד</label>
+          <input id="ab_endDate" type="date"/>
+        </div>
+      </div>
+      <div class="field">
+        <label>סיבה</label>
+        <select id="ab_reasonType"></select>
+      </div>
+      <div class="field">
+        <label>פירוט</label>
+        <textarea id="ab_reasonDetail" placeholder="פירוט חופשי" maxlength="500"></textarea>
+      </div>
+      <div class="field">
+        <label>הערות</label>
+        <textarea id="ab_notes" placeholder="הערות פנימיות" maxlength="500"></textarea>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-primary" id="absenceSaveBtn" onclick="saveAbsence()">שמירה</button>
+      <button class="btn btn-ghost" onclick="closeAbsence()">ביטול</button>
+    </div>
+  </div>
+</div>
+
+<!-- "Add coverage now?" follow-up prompt — step 2 of the two-step flow.
+     A custom modal instead of browser confirm() to match the rest of the
+     app's dark/gold UX. Set by saveAbsence() right after a successful
+     logAbsence. -->
+<div class="overlay" id="coveragePromptOverlay">
+  <div class="modal" style="max-width:380px">
+    <div class="modal-head">
+      <h3>ההיעדרות נשמרה</h3>
+      <p>לרשום מחליף/ה עכשיו?</p>
+    </div>
+    <div class="modal-foot" style="justify-content:flex-end">
+      <button class="btn btn-ghost" onclick="declineCoveragePrompt()">לא</button>
+      <button class="btn btn-primary" onclick="acceptCoveragePrompt()">הוסף מחליף/ה</button>
+    </div>
+  </div>
+</div>
+
+<!-- Coverage modal: link a covering worker (+ providing house + optional
+     extra payment) to an existing absence. The absence itself is locked
+     by the opener (set via openCoverage({absenceId})) and displayed in
+     the sub-header. The extra payment accrues to absence.house, not the
+     covering worker's home house. -->
+<div class="overlay" id="coverageOverlay">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>הוספת מחליף/ה</h3>
+      <p id="coverageModalSub"></p>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>מחליף/ה</label>
+        <select id="cv_worker" onchange="onCoverageWorkerChange()"></select>
+        <div class="hint">העובד/ת הנעדר/ת לא מופיע/ה ברשימה — אי אפשר לכסות לעצמך.</div>
+      </div>
+      <div class="field">
+        <label>בית מקור</label>
+        <select id="cv_providingHouse"></select>
+        <div class="hint">הבית שממנו מגיע/ה המחליף/ה. ברירת המחדל לפי השיבוץ הקיים, אפשר לשנות.</div>
+      </div>
+      <div class="field">
+        <label>תוספת תשלום (₪)</label>
+        <input id="cv_extraPayment" type="number" min="0" step="100" placeholder="0"/>
+        <div class="hint">סכום שמשולם למחליף/ה מעבר לשכר הרגיל. נספר בעלות הבית הנעדר.</div>
+      </div>
+      <div class="field">
+        <label>הערות</label>
+        <textarea id="cv_notes" placeholder="הערות פנימיות" maxlength="500"></textarea>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-primary" id="coverageSaveBtn" onclick="saveCoverage()">שמירה</button>
+      <button class="btn btn-ghost" onclick="closeCoverage()">ביטול</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script src="/lib/calc.js"></script>
@@ -1495,6 +1599,230 @@ async function saveTerminate(){
   }
 }
 
+/* ---------- absence CRUD + two-step coverage flow ---------- */
+
+// Server has logAbsence / endAbsence / deleteAbsence (no update — to
+// change dates after the fact, Moran deletes + recreates). The flow
+// here is the user-confirmed Q2 two-step pattern: save absence → modal
+// prompts "add coverage now?" → either opens the coverage dialog with
+// the new absence prelinked, or closes silently.
+
+let editingAbsence = null;         // { house? }
+let editingCoverage = null;        // { absenceId, house }
+let coveragePromptAbsenceId = null;
+
+function fillAbsenceWorkerDropdown(selectedId){
+  const sel = document.getElementById('ab_worker');
+  let html = `<option value="">— בחירה —</option>`;
+  WORKERS.forEach(w => {
+    html += `<option value="${escapeHtml(w.id)}"${w.id===selectedId?' selected':''}>${escapeHtml(w.name)}</option>`;
+  });
+  sel.innerHTML = html;
+}
+function fillAbsenceHouseDropdown(selectedHouse){
+  const sel = document.getElementById('ab_house');
+  sel.innerHTML = HOUSES.map(h =>
+    `<option value="${escapeHtml(h.id)}"${h.id===selectedHouse?' selected':''}>${escapeHtml(h.name)}</option>`
+  ).join('');
+}
+function fillAbsenceReasonDropdown(selectedReason){
+  const sel = document.getElementById('ab_reasonType');
+  sel.innerHTML = ABSENCE_REASON_TYPES.map(r =>
+    `<option value="${escapeHtml(r)}"${r===selectedReason?' selected':''}>${escapeHtml(r)}</option>`
+  ).join('');
+}
+
+function openAbsence(opts){
+  const o = opts || {};
+  editingAbsence = { house: o.house || HOUSES[0].id };
+  document.getElementById('absenceModalSub').textContent = 'בבית ' + houseName(editingAbsence.house);
+  fillAbsenceWorkerDropdown('');
+  fillAbsenceHouseDropdown(editingAbsence.house);
+  fillAbsenceReasonDropdown(ABSENCE_REASON_TYPES[0]);
+  const today = calcTodayStr();
+  document.getElementById('ab_startDate').value = today;
+  document.getElementById('ab_endDate').value = today;
+  document.getElementById('ab_reasonDetail').value = '';
+  document.getElementById('ab_notes').value = '';
+  document.getElementById('absenceOverlay').classList.add('show');
+}
+
+function closeAbsence(){
+  document.getElementById('absenceOverlay').classList.remove('show');
+  editingAbsence = null;
+}
+
+async function saveAbsence(){
+  if (!editingAbsence) return;
+  const workerId = document.getElementById('ab_worker').value;
+  const house = document.getElementById('ab_house').value;
+  const startDate = document.getElementById('ab_startDate').value;
+  const endDate = document.getElementById('ab_endDate').value;
+  const reasonType = document.getElementById('ab_reasonType').value;
+  const reasonDetail = document.getElementById('ab_reasonDetail').value.trim();
+  const notes = document.getElementById('ab_notes').value.trim();
+  if (!workerId){ toast('יש לבחור עובד/ת', true); return; }
+  if (!house){ toast('יש לבחור בית', true); return; }
+  if (!startDate || !endDate){ toast('יש להזין תאריכים', true); return; }
+  if (endDate < startDate){ toast('תאריך סיום מוקדם מתאריך התחלה', true); return; }
+
+  setBusy('absenceSaveBtn', true);
+  try {
+    const result = await doAction({
+      action: 'logAbsence',
+      absence: { workerId, house, startDate, endDate, reasonType, reasonDetail, notes },
+    });
+    await loadData();
+    closeAbsence();
+    render();
+    toast('ההיעדרות נשמרה');
+    // Step 2 of the two-step flow: capture the new absence id and pop
+    // the "add coverage now?" prompt. If the user declines, the absence
+    // stays on the house view as "ללא מחליף" with a הוסף החלפה button
+    // for later.
+    const newAbsenceId = result && result.absence && result.absence.id;
+    if (newAbsenceId){
+      coveragePromptAbsenceId = newAbsenceId;
+      document.getElementById('coveragePromptOverlay').classList.add('show');
+    }
+  } catch (err) {
+    toast(err.message || 'שגיאה בשמירה', true);
+  } finally {
+    setBusy('absenceSaveBtn', false);
+  }
+}
+
+function declineCoveragePrompt(){
+  document.getElementById('coveragePromptOverlay').classList.remove('show');
+  coveragePromptAbsenceId = null;
+}
+function acceptCoveragePrompt(){
+  const absenceId = coveragePromptAbsenceId;
+  document.getElementById('coveragePromptOverlay').classList.remove('show');
+  coveragePromptAbsenceId = null;
+  if (absenceId) openCoverage({ absenceId });
+}
+
+async function endAbsence(absenceId){
+  const ab = ABSENCES.find(x => x.id === absenceId);
+  if (!ab) return;
+  if (!confirm('לסיים את ההיעדרות של ' + workerName(ab.workerId) + '?\n(תאריך הסיום יעודכן להיום אם הוא בעתיד.)')) return;
+  try {
+    await doAction({ action: 'endAbsence', id: absenceId });
+    await loadData();
+    render();
+    toast('ההיעדרות נסגרה');
+  } catch (err) {
+    toast(err.message || 'שגיאה בסגירה', true);
+  }
+}
+
+async function deleteAbsence(absenceId){
+  const ab = ABSENCES.find(x => x.id === absenceId);
+  if (!ab) return;
+  if (!confirm('למחוק את רישום ההיעדרות של ' + workerName(ab.workerId) + '?')) return;
+  try {
+    await doAction({ action: 'deleteAbsence', id: absenceId });
+    await loadData();
+    render();
+    toast('ההיעדרות נמחקה');
+  } catch (err) {
+    toast(err.message || 'שגיאה במחיקה', true);
+  }
+}
+
+/* ---------- coverage CRUD ---------- */
+
+function fillCoverageWorkerDropdown(selectedId, excludeWorkerId){
+  const sel = document.getElementById('cv_worker');
+  let html = `<option value="">— בחירה —</option>`;
+  WORKERS.forEach(w => {
+    if (w.id === excludeWorkerId) return;
+    html += `<option value="${escapeHtml(w.id)}"${w.id===selectedId?' selected':''}>${escapeHtml(w.name)}</option>`;
+  });
+  sel.innerHTML = html;
+}
+function fillCoverageHouseDropdown(selectedHouse){
+  const sel = document.getElementById('cv_providingHouse');
+  sel.innerHTML = HOUSES.map(h =>
+    `<option value="${escapeHtml(h.id)}"${h.id===selectedHouse?' selected':''}>${escapeHtml(h.name)}</option>`
+  ).join('');
+}
+
+// Convenience nudge: when the covering worker is chosen, pre-select
+// the providing house to their first existing assignment's house —
+// usually right. Moran can still override.
+function onCoverageWorkerChange(){
+  const wId = document.getElementById('cv_worker').value;
+  if (!wId) return;
+  const myAsg = ASSIGNMENTS.find(a => a.workerId === wId);
+  if (myAsg){
+    document.getElementById('cv_providingHouse').value = myAsg.house;
+  }
+}
+
+function openCoverage(opts){
+  const o = opts || {};
+  const absence = ABSENCES.find(a => a.id === o.absenceId);
+  if (!absence){ toast('היעדרות לא נמצאה', true); return; }
+  editingCoverage = { absenceId: absence.id, house: absence.house };
+  document.getElementById('coverageModalSub').textContent =
+    'להיעדרות של ' + workerName(absence.workerId) +
+    ' מבית ' + houseName(absence.house) +
+    ' (' + fmtDate(absence.startDate) + ' – ' + fmtDate(absence.endDate) + ')';
+  // Absentee can't cover for themselves — exclude from the dropdown.
+  fillCoverageWorkerDropdown('', absence.workerId);
+  fillCoverageHouseDropdown(HOUSES[0].id);
+  document.getElementById('cv_extraPayment').value = '';
+  document.getElementById('cv_notes').value = '';
+  document.getElementById('coverageOverlay').classList.add('show');
+}
+
+function closeCoverage(){
+  document.getElementById('coverageOverlay').classList.remove('show');
+  editingCoverage = null;
+}
+
+async function saveCoverage(){
+  if (!editingCoverage) return;
+  const coveringWorkerId = document.getElementById('cv_worker').value;
+  const providingHouse = document.getElementById('cv_providingHouse').value;
+  const extraPayment = Number(document.getElementById('cv_extraPayment').value) || 0;
+  const notes = document.getElementById('cv_notes').value.trim();
+  if (!coveringWorkerId){ toast('יש לבחור מחליף/ה', true); return; }
+  if (!providingHouse){ toast('יש לבחור בית מקור', true); return; }
+
+  setBusy('coverageSaveBtn', true);
+  try {
+    await doAction({
+      action: 'addCoverage',
+      coverage: { absenceId: editingCoverage.absenceId, coveringWorkerId, providingHouse, extraPayment, notes },
+    });
+    await loadData();
+    closeCoverage();
+    render();
+    toast('המחליף/ה נרשם/ה');
+  } catch (err) {
+    toast(err.message || 'שגיאה בשמירה', true);
+  } finally {
+    setBusy('coverageSaveBtn', false);
+  }
+}
+
+async function deleteCoverage(coverageId){
+  const c = COVERAGES.find(x => x.id === coverageId);
+  if (!c) return;
+  if (!confirm('למחוק את רישום המחליף/ה ' + workerName(c.coveringWorkerId) + '?')) return;
+  try {
+    await doAction({ action: 'deleteCoverage', id: coverageId });
+    await loadData();
+    render();
+    toast('המחליף/ה נמחק/ה');
+  } catch (err) {
+    toast(err.message || 'שגיאה במחיקה', true);
+  }
+}
+
 /* ---------- rendering ---------- */
 
 function renderSwitch(){
@@ -1673,13 +2001,17 @@ function rosterTable(rows){
   </div>`;
 }
 
-// Renders one active absence + (optionally) its coverage(s) nested
-// underneath. If the absence has no coverage, a "ללא מחליף" prompt
-// renders in place — its "הוסף החלפה" button is wired in commit 3.
+// Renders one active absence + its coverage(s) nested underneath. Each
+// coverage line has its own מחיקה button. Absences without coverage
+// render the "ללא מחליף" prompt with the active הוסף החלפה button.
+// Multiple coverages per absence are supported (e.g., two workers split
+// the coverage week-on / week-off); + עוד מחליף/ה stays available.
 function renderAbsenceRow(absence){
   const wName = escapeHtml(workerName(absence.workerId) || 'ללא רישום נעדר/ת');
   const dates = `${escapeHtml(fmtDate(absence.startDate))} – ${escapeHtml(fmtDate(absence.endDate))}`;
   const covs = calcCoveragesForAbsence(COVERAGES, absence.id);
+  const aId = escapeHtml(absence.id);
+
   const coverageLines = covs.length
     ? covs.map(c => `
         <div class="coverage-line">
@@ -1688,13 +2020,31 @@ function renderAbsenceRow(absence){
           <span class="cov-house">(מ${escapeHtml(houseName(c.providingHouse))})</span>
           ${c.extraPayment ? `<span class="cov-extra">תוספת ${fmt(c.extraPayment)}</span>` : ''}
           ${c.notes ? `<span style="color:var(--muted)">${escapeHtml(c.notes)}</span>` : ''}
+          <button class="btn btn-sm btn-danger-hover" onclick="deleteCoverage('${escapeHtml(c.id)}')" style="margin-inline-start:auto">מחיקה</button>
         </div>`).join('')
-    : `<div class="no-coverage">ללא מחליף — שיבוץ ההחלפה יתבצע בקומיט הבא</div>`;
+      + `<button class="btn btn-sm" onclick="openCoverage({absenceId:'${aId}'})" style="margin-top:10px">+ עוד מחליף/ה</button>`
+    : `<div class="no-coverage">
+        <span>ללא מחליף</span>
+        <button class="btn btn-sm btn-primary" onclick="openCoverage({absenceId:'${aId}'})" style="padding:5px 14px">הוסף החלפה</button>
+       </div>`;
+
+  // Row-level absence actions on the right (RTL: visually leftmost).
+  // "מחיקה" is hidden when coverages reference this absence — server
+  // rejects with 409 otherwise; matching the same FK guard pattern as
+  // the worker dialog.
+  const rowActions = absence.status === 'active'
+    ? `<div class="event-action" style="display:flex;gap:6px">
+         <button class="btn btn-sm" onclick="endAbsence('${aId}')">סיום</button>
+         ${covs.length ? '' : `<button class="btn btn-sm btn-danger-hover" onclick="deleteAbsence('${aId}')">מחיקה</button>`}
+       </div>`
+    : '';
+
   return `
   <div class="event-row">
     <div class="event-main">
       <span class="name">${wName}</span>
       <span class="event-badge">היעדרות</span>
+      ${rowActions}
     </div>
     <div class="event-meta">
       <span class="reason-pill">${escapeHtml(absence.reasonType)}</span>
@@ -1729,7 +2079,10 @@ function houseView(id){
   <div class="section">
     <div class="section-head">
       <h2>נעדרים פעילים</h2>
-      <span class="count-pill">${houseAbsences.length}</span>
+      <div style="display:flex;gap:10px;align-items:center">
+        <span class="count-pill">${houseAbsences.length}</span>
+        <button class="btn btn-primary" onclick="openAbsence({house:'${escapeHtml(id)}'})">+ רישום היעדרות</button>
+      </div>
     </div>
     <div class="tablecard accent-edge">
       ${houseAbsences.length

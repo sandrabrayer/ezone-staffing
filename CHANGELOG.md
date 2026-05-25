@@ -14,6 +14,11 @@ All notable changes to this project are documented here. Format inspired by [Kee
   - **Worker names in the roster are clickable links** that open a separate worker dialog (name + notes). Delete from there is only enabled when the worker has no references — matches the server's 409-on-FK guard.
   - The assignment dialog's worker dropdown includes a **+ צור עובד/ת חדש/ה** pseudo-option that opens the worker dialog layered above, then returns to the assignment dialog with the new worker pre-selected.
   - Client-side validation mirrors the server's strictness: foreign cost fields are never even sent (the form only POSTs the type's allowed fields), and per-type required fields are checked before the round-trip so Moran sees the error immediately.
+- **Two-step absence → coverage flow** (commit 3 of the 3-part v3 UI rewrite). Completes the write surface:
+  - Each per-house view now has a **+ רישום היעדרות** button in the נעדרים פעילים section head. Opens an absence dialog (worker + house + date range + reason + notes). On save: success toast + a small "ההיעדרות נשמרה — לרשום מחליף/ה עכשיו?" follow-up modal. Picking `הוסף מחליף/ה` opens the coverage dialog with the new absence prelinked; picking `לא` closes silently and the absence appears in the house view in its `ללא מחליף` state.
+  - The `ללא מחליף` prompt on absences without coverage (placeholder'd in commit 1) is now wired — its **הוסף החלפה** button opens the coverage dialog directly. Each existing coverage line shows the covering worker, source house, extra payment, and a per-row **מחיקה** button. A **+ עוד מחליף/ה** link below supports multiple coverages per absence (e.g., two workers splitting a week-on / week-off arrangement).
+  - The absentee is filtered out of the covering-worker dropdown — you can't cover for yourself. Picking a covering worker auto-defaults the providing-house dropdown to one of their existing assignment houses; Moran can still override.
+  - Each active absence row now has **סיום** (calls `endAbsence`; truncates `end_date` to today and marks `status='ended'`) and **מחיקה** (only when no coverages reference it — matches the server's 409-on-FK guard). Hovering the danger-tint follows the same v2 button modifier conventions as the roster row actions.
 
 ## [2.1.2] — 2026-05-22 — Archive on a dedicated page + Hebrew typo fix
 
