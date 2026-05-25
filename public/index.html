@@ -274,6 +274,21 @@ tbody tr:hover{
   box-shadow:inset -3px 0 0 0 var(--accent-2);
 }
 .emp-name{font-weight:600;font-size:15px;color:var(--ink)}
+/* Worker-name in a roster row, styled as an inline link rather than a
+   button. Clicking opens the worker-edit dialog — separate from the
+   assignment-edit action button to its right. */
+.link-name{
+  background:transparent;
+  border:none;
+  padding:0;
+  font:inherit;
+  color:var(--ink);
+  font-weight:600;
+  font-size:15px;
+  cursor:pointer;
+  text-align:inherit;
+}
+.link-name:hover{color:var(--accent-1);text-decoration:underline;text-underline-offset:3px;text-decoration-color:var(--accent-2)}
 .role-tag{
   display:inline-block;
   font-size:12px;
@@ -705,11 +720,142 @@ tbody tr:hover{
 
 <div class="wrap" id="app" style="display:none"></div>
 
-<!-- Modal overlays are intentionally not in this build. The v3 worker /
-     assignment / absence / coverage / termination flows are wired in
-     follow-up commits ("v3 UI: conditional employment type form" and
-     "v3 UI: two-step absence→coverage flow"). Keeping the modals out
-     of commit 1 makes the read-only-render slice cleanly reviewable. -->
+<!-- Worker modal: identity only (name + notes). No house, no terms —
+     those live on assignments, one per worker × house pair. -->
+<div class="overlay" id="workerOverlay">
+  <div class="modal">
+    <div class="modal-head">
+      <h3 id="workerModalTitle">עובד/ת חדש/ה</h3>
+      <p id="workerModalSub"></p>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>שם מלא</label>
+        <input id="w_name" type="text" placeholder="שם העובד/ת" maxlength="80"/>
+      </div>
+      <div class="field">
+        <label>הערות</label>
+        <textarea id="w_notes" placeholder="הערות פנימיות" maxlength="500"></textarea>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-primary" id="workerSaveBtn" onclick="saveWorker()">שמירה</button>
+      <button class="btn btn-ghost" onclick="closeWorker()">ביטול</button>
+      <!-- Delete is only enabled when no FK refs (server rejects with 409
+           otherwise). The button is hidden by JS in that case. -->
+      <button class="btn btn-danger-hover" id="workerDeleteBtn" onclick="deleteWorker()" style="margin-inline-start:auto;display:none">מחיקה</button>
+    </div>
+  </div>
+</div>
+
+<!-- Assignment modal: create / edit a per-house assignment.
+     - On create: worker + house dropdowns visible. Worker dropdown
+       includes a "+ צור עובד/ת חדש/ה" pseudo-option that opens the
+       worker dialog layered above.
+     - On edit: worker + house are immutable (server enforces; UI hides
+       the dropdowns and shows the values in the sub-header instead).
+     - Per-type cost fields are toggled by onAssignmentTypeChange()
+       reading data-cost-field. Notes stays visible regardless of type. -->
+<div class="overlay" id="assignmentOverlay">
+  <div class="modal">
+    <div class="modal-head">
+      <h3 id="assignmentModalTitle">הוספת שיבוץ</h3>
+      <p id="assignmentModalSub"></p>
+    </div>
+    <div class="modal-body">
+      <div class="field" id="asg_worker_wrap">
+        <label>עובד/ת</label>
+        <select id="asg_worker" onchange="onAssignmentWorkerChange()"></select>
+      </div>
+      <div class="field" id="asg_house_wrap">
+        <label>בית</label>
+        <select id="asg_house" onchange="updateAssignmentSubHeader()"></select>
+      </div>
+      <div class="field">
+        <label>תפקיד</label>
+        <select id="asg_role" onchange="onAssignmentRoleChange()"></select>
+      </div>
+      <div class="field hidden" id="asg_roleDetail_wrap">
+        <label id="asg_roleDetail_label">פירוט תפקיד</label>
+        <input id="asg_roleDetail" type="text" maxlength="80"/>
+      </div>
+      <div class="field">
+        <label>סוג העסקה</label>
+        <select id="asg_type" onchange="onAssignmentTypeChange()"></select>
+      </div>
+      <div class="field" data-cost-field="salary">
+        <label>שכר ברוטו חודשי (₪)</label>
+        <input id="asg_salary" type="number" min="0" step="100" placeholder="0"/>
+      </div>
+      <div class="field" data-cost-field="pct">
+        <label>חלקיות משרה (%)</label>
+        <input id="asg_pct" type="number" min="1" max="100" placeholder="100"/>
+        <div class="hint">העלות בפועל = שכר × חלקיות / 100</div>
+      </div>
+      <div class="field" data-cost-field="hourlyRate">
+        <label>תעריף שעה (₪)</label>
+        <input id="asg_hourlyRate" type="number" min="0" step="1" placeholder="0"/>
+      </div>
+      <div class="field" data-cost-field="estHours">
+        <label>שעות בחודש (הערכה)</label>
+        <input id="asg_estHours" type="number" min="0" step="1" placeholder="0"/>
+      </div>
+      <div class="field" data-cost-field="sessionRate">
+        <label>תעריף למפגש (₪)</label>
+        <input id="asg_sessionRate" type="number" min="0" step="10" placeholder="0"/>
+      </div>
+      <div class="field" data-cost-field="estSessions">
+        <label>מפגשים בחודש (הערכה)</label>
+        <input id="asg_estSessions" type="number" min="0" step="1" placeholder="0"/>
+      </div>
+      <div class="field" data-cost-field="retainerAmount">
+        <label>ריטיינר חודשי (₪)</label>
+        <input id="asg_retainerAmount" type="number" min="0" step="100" placeholder="0"/>
+      </div>
+      <div class="field">
+        <label>הערות</label>
+        <textarea id="asg_notes" placeholder="הערות פנימיות (תנאים מיוחדים, ימי עבודה וכו')" maxlength="500"></textarea>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-primary" id="assignmentSaveBtn" onclick="saveAssignment()">שמירה</button>
+      <button class="btn btn-ghost" onclick="closeAssignment()">ביטול</button>
+    </div>
+  </div>
+</div>
+
+<!-- Terminate modal: ends a single assignment, snapshots to archive_v3.
+     Future dates are allowed (e.g. "end of next month" announcements);
+     cost continues counting until that date arrives. -->
+<div class="overlay" id="termOverlay">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>הפסקת שיבוץ</h3>
+      <p id="termModalSub"></p>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>תאריך סיום</label>
+        <input id="tm_date" type="date"/>
+        <div class="hint">מותר גם תאריך עתידי. העלות תמשיך להיספר בעלות הבית עד התאריך הזה.</div>
+      </div>
+      <div class="field">
+        <label>סיבת סיום</label>
+        <select id="tm_reasonType">
+          <option value="">— ללא ציון —</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>הערה</label>
+        <textarea id="tm_reasonDetail" placeholder="פירוט חופשי" maxlength="500"></textarea>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-primary" id="termSaveBtn" onclick="saveTerminate()">אישור הפסקת שיבוץ</button>
+      <button class="btn btn-ghost" onclick="closeTerminate()">ביטול</button>
+    </div>
+  </div>
+</div>
 
 <div class="toast" id="toast"></div>
 
@@ -951,6 +1097,404 @@ function toast(msg, isErr){
   window.__toastTimer = setTimeout(()=>{ t.className='toast' + (isErr?' err':''); }, 3200);
 }
 
+function setBusy(btnId, busy, busyLabel){
+  const b = document.getElementById(btnId);
+  if (!b) return;
+  if (busy){
+    if (!b.dataset.label) b.dataset.label = b.textContent;
+    b.textContent = busyLabel || 'שמירה…';
+    b.disabled = true;
+  } else {
+    if (b.dataset.label) b.textContent = b.dataset.label;
+    b.disabled = false;
+  }
+}
+
+/* ---------- action layer ---------- */
+
+async function doAction(payload){
+  return apiFetch('/api/action', {method:'POST', body: JSON.stringify(payload)});
+}
+
+// Which cost fields each employment_type is allowed to set. MUST mirror
+// TYPE_COST_FIELDS in lib/validate.js + apps-script/Code.gs — the server
+// will 400 on any mismatch, so the form here zeros foreign fields out
+// before the POST.
+const TYPE_COST_FIELDS = {
+  full_time:      ['salary'],
+  part_time:      ['salary', 'pct'],
+  hourly:         ['hourlyRate', 'estHours'],
+  per_session:    ['sessionRate', 'estSessions'],
+  fixed_retainer: ['retainerAmount'],
+};
+const ALL_COST_FIELDS = [
+  'salary', 'pct',
+  'hourlyRate', 'estHours',
+  'sessionRate', 'estSessions',
+  'retainerAmount',
+];
+
+// Human label for the per-type required-field error messages.
+function labelForCostField(f){
+  return {
+    salary:         'שכר ברוטו',
+    pct:            'חלקיות משרה',
+    hourlyRate:     'תעריף שעה',
+    estHours:       'שעות בחודש',
+    sessionRate:    'תעריף למפגש',
+    estSessions:    'מפגשים בחודש',
+    retainerAmount: 'ריטיינר חודשי',
+  }[f] || f;
+}
+
+// ---------- modal state ----------
+let editingWorker = null;      // { id?, name, notes }
+let editingAssignment = null;  // { id?, workerId, house }
+let editingTerm = null;        // { assignmentId, workerName, house, role }
+
+/* ---------- worker CRUD ---------- */
+
+// If a worker has any references the server will reject deleteWorker with
+// 409. Mirror that check client-side so the delete button can be hidden
+// instead of showing-and-erroring.
+function workerHasReferences(workerId){
+  if (ASSIGNMENTS.some(a => a.workerId === workerId)) return 'assignments';
+  if (ABSENCES.some(a => a.workerId === workerId)) return 'absences';
+  if (COVERAGES.some(c => c.coveringWorkerId === workerId)) return 'coverages';
+  if (ARCHIVE_V3.some(a => a.workerId === workerId)) return 'archive';
+  return null;
+}
+
+function openWorker(workerId){
+  const w = workerId ? workerById(workerId) : null;
+  editingWorker = w
+    ? { id: w.id, name: w.name, notes: w.notes || '' }
+    : { name: '', notes: '' };
+  document.getElementById('workerModalTitle').textContent = w ? 'עריכת עובד/ת' : 'עובד/ת חדש/ה';
+  const sub = document.getElementById('workerModalSub');
+  const delBtn = document.getElementById('workerDeleteBtn');
+  if (w){
+    const ref = workerHasReferences(w.id);
+    sub.textContent = ref
+      ? 'שינוי שם / הערות. מחיקה לא אפשרית — קיימות רשומות תלויות.'
+      : 'שינוי שם / הערות.';
+    delBtn.style.display = ref ? 'none' : '';
+  } else {
+    sub.textContent = '';
+    delBtn.style.display = 'none';
+  }
+  document.getElementById('w_name').value = editingWorker.name;
+  document.getElementById('w_notes').value = editingWorker.notes;
+  document.getElementById('workerOverlay').classList.add('show');
+  setTimeout(() => document.getElementById('w_name').focus(), 50);
+}
+function closeWorker(){
+  document.getElementById('workerOverlay').classList.remove('show');
+  editingWorker = null;
+}
+
+async function saveWorker(){
+  if (!editingWorker) return;
+  const name = document.getElementById('w_name').value.trim();
+  const notes = document.getElementById('w_notes').value.trim();
+  if (!name){ toast('יש להזין שם', true); return; }
+  setBusy('workerSaveBtn', true);
+  const wasEdit = !!editingWorker.id;
+  try {
+    const payload = wasEdit
+      ? { action: 'updateWorker', id: editingWorker.id, worker: { name, notes } }
+      : { action: 'createWorker', worker: { name, notes } };
+    const result = await doAction(payload);
+    await loadData();
+    closeWorker();
+    // If the assignment dialog is open layered underneath, refresh its
+    // worker dropdown so the newly created worker is selectable + pre-
+    // selected. (This is the "+ צור עובד/ת חדש/ה" inline flow.)
+    if (!wasEdit && document.getElementById('assignmentOverlay').classList.contains('show') && editingAssignment){
+      const newId = result && result.worker && result.worker.id;
+      fillAssignmentWorkerDropdown(newId);
+    } else {
+      render();
+    }
+    toast(wasEdit ? 'העדכון נשמר' : 'העובד/ת נוסף/ה');
+  } catch (err) {
+    toast(err.message || 'שגיאה בשמירה', true);
+  } finally {
+    setBusy('workerSaveBtn', false);
+  }
+}
+
+async function deleteWorker(){
+  if (!editingWorker || !editingWorker.id) return;
+  if (!confirm('למחוק את ' + editingWorker.name + ' מהמערכת?')) return;
+  try {
+    await doAction({ action: 'deleteWorker', id: editingWorker.id });
+    await loadData();
+    closeWorker();
+    render();
+    toast('העובד/ת נמחק/ה');
+  } catch (err) {
+    toast(err.message || 'שגיאה במחיקה', true);
+  }
+}
+
+/* ---------- assignment CRUD ---------- */
+
+function fillAssignmentWorkerDropdown(selectedId){
+  const sel = document.getElementById('asg_worker');
+  let html = `<option value="">— בחירה —</option>`;
+  WORKERS.forEach(w => {
+    const sel2 = w.id === selectedId ? ' selected' : '';
+    html += `<option value="${escapeHtml(w.id)}"${sel2}>${escapeHtml(w.name)}</option>`;
+  });
+  html += `<option value="__new__">+ צור עובד/ת חדש/ה...</option>`;
+  sel.innerHTML = html;
+}
+function fillAssignmentHouseDropdown(selectedHouse){
+  const sel = document.getElementById('asg_house');
+  sel.innerHTML = HOUSES.map(h =>
+    `<option value="${escapeHtml(h.id)}"${h.id===selectedHouse?' selected':''}>${escapeHtml(h.name)}</option>`
+  ).join('');
+}
+function fillAssignmentRoleDropdown(selectedRole){
+  const sel = document.getElementById('asg_role');
+  // If the stored role isn't in the dropdown (e.g., legacy free-text),
+  // default to "אחר" so the round-trip can preserve the original wording
+  // via roleDetail. Same trick the v2 form used.
+  const effective = ROLE_OPTIONS.indexOf(selectedRole) >= 0 ? selectedRole : (selectedRole ? 'אחר' : ROLE_OPTIONS[0]);
+  sel.innerHTML = ROLE_OPTIONS.map(r =>
+    `<option value="${escapeHtml(r)}"${r===effective?' selected':''}>${escapeHtml(r)}</option>`
+  ).join('');
+}
+function fillAssignmentTypeDropdown(selectedType){
+  const sel = document.getElementById('asg_type');
+  sel.innerHTML = Object.keys(EMPLOYMENT_TYPE_LABELS).map(k =>
+    `<option value="${k}"${k===selectedType?' selected':''}>${escapeHtml(EMPLOYMENT_TYPE_LABELS[k])}</option>`
+  ).join('');
+}
+
+function onAssignmentWorkerChange(){
+  const sel = document.getElementById('asg_worker');
+  if (sel.value === '__new__'){
+    // Bounce the dropdown back so the picker is in a recoverable state
+    // if the user cancels worker creation, then open the worker dialog
+    // layered above the assignment one.
+    sel.value = '';
+    openWorker();
+  }
+}
+
+function onAssignmentRoleChange(){
+  const role = document.getElementById('asg_role').value;
+  const wrap = document.getElementById('asg_roleDetail_wrap');
+  const lbl  = document.getElementById('asg_roleDetail_label');
+  const inp  = document.getElementById('asg_roleDetail');
+  if (role === 'מטפל/ת'){
+    wrap.classList.remove('hidden');
+    lbl.textContent = 'התמחות / סוג טיפול';
+    inp.placeholder = 'לדוגמה: אמנות, קבוצות, CBT';
+  } else if (role === 'אחר'){
+    wrap.classList.remove('hidden');
+    lbl.textContent = 'פירוט תפקיד';
+    inp.placeholder = 'תפקיד חופשי';
+  } else {
+    wrap.classList.add('hidden');
+    inp.value = '';
+  }
+}
+
+function onAssignmentTypeChange(){
+  const t = document.getElementById('asg_type').value;
+  const allowed = TYPE_COST_FIELDS[t] || [];
+  document.querySelectorAll('[data-cost-field]').forEach(el => {
+    const f = el.dataset.costField;
+    if (allowed.indexOf(f) >= 0){
+      el.classList.remove('hidden');
+    } else {
+      el.classList.add('hidden');
+      // Foreign field stays in the DOM with its value untouched (a quick
+      // type-toggle round-trip preserves input). saveAssignment() reads
+      // only the type's allowed fields, so foreign values are dropped on
+      // submit — the server's strict guard never sees them.
+    }
+  });
+}
+
+function updateAssignmentSubHeader(){
+  if (!editingAssignment || editingAssignment.id) return;
+  const house = document.getElementById('asg_house').value;
+  document.getElementById('assignmentModalSub').textContent = 'לבית ' + houseName(house);
+}
+
+function openAssignment(opts){
+  const o = opts || {};
+  const a = o.assignmentId ? ASSIGNMENTS.find(x => x.id === o.assignmentId) : null;
+  editingAssignment = a
+    ? { id: a.id, workerId: a.workerId, house: a.house }
+    : { workerId: '', house: o.house || HOUSES[0].id };
+
+  const titleEl = document.getElementById('assignmentModalTitle');
+  const subEl = document.getElementById('assignmentModalSub');
+  if (a){
+    titleEl.textContent = 'עריכת שיבוץ';
+    subEl.textContent = workerName(a.workerId) + ' · ' + houseName(a.house);
+  } else {
+    titleEl.textContent = 'הוספת שיבוץ';
+    subEl.textContent = 'לבית ' + houseName(editingAssignment.house);
+  }
+
+  // (worker, house) is immutable on edit — server rejects mismatches.
+  // Hide the dropdowns; the sub-header carries the locked values.
+  document.getElementById('asg_worker_wrap').style.display = a ? 'none' : '';
+  document.getElementById('asg_house_wrap').style.display = a ? 'none' : '';
+
+  fillAssignmentWorkerDropdown(a ? a.workerId : '');
+  fillAssignmentHouseDropdown(a ? a.house : editingAssignment.house);
+  fillAssignmentRoleDropdown(a ? a.role : ROLE_OPTIONS[0]);
+  fillAssignmentTypeDropdown(a ? a.employmentType : 'full_time');
+
+  // Cost-field inputs. On edit, prefill from the row; on create, clear.
+  ALL_COST_FIELDS.forEach(f => {
+    const el = document.getElementById('asg_' + f);
+    el.value = a && a[f] ? a[f] : '';
+  });
+  document.getElementById('asg_roleDetail').value = a ? (a.roleDetail || '') : '';
+  document.getElementById('asg_notes').value = a ? (a.notes || '') : '';
+
+  onAssignmentRoleChange();
+  onAssignmentTypeChange();
+  document.getElementById('assignmentOverlay').classList.add('show');
+}
+
+function closeAssignment(){
+  document.getElementById('assignmentOverlay').classList.remove('show');
+  editingAssignment = null;
+}
+
+async function saveAssignment(){
+  if (!editingAssignment) return;
+  const isEdit = !!editingAssignment.id;
+  const workerId = isEdit ? editingAssignment.workerId : document.getElementById('asg_worker').value;
+  const house    = isEdit ? editingAssignment.house    : document.getElementById('asg_house').value;
+  const role     = document.getElementById('asg_role').value;
+  const roleDetail = document.getElementById('asg_roleDetail').value.trim();
+  const employmentType = document.getElementById('asg_type').value;
+  const notes    = document.getElementById('asg_notes').value.trim();
+
+  // Mirror the server-side checks so feedback is immediate. The server
+  // is still the source of truth.
+  if (!isEdit && !workerId){ toast('יש לבחור עובד/ת', true); return; }
+  if (!isEdit && !house){ toast('יש לבחור בית', true); return; }
+  if (!role){ toast('יש לבחור תפקיד', true); return; }
+  if (role === 'אחר' && !roleDetail){ toast('בתפקיד "אחר" יש לפרט', true); return; }
+
+  // Only the type's allowed cost fields are sent. Foreign fields are
+  // simply not included — keeps the payload small and the server's
+  // strict guard never even sees them.
+  const allowed = TYPE_COST_FIELDS[employmentType] || [];
+  const costFields = {};
+  for (let i = 0; i < allowed.length; i++){
+    const f = allowed[i];
+    const raw = document.getElementById('asg_' + f).value;
+    const v = Number(raw);
+    if (!Number.isFinite(v) || v <= 0){
+      toast('יש להזין ' + labelForCostField(f) + ' חיובי לסוג העסקה ' + EMPLOYMENT_TYPE_LABELS[employmentType], true);
+      return;
+    }
+    costFields[f] = v;
+  }
+
+  const assignment = Object.assign(
+    { workerId, house, role, roleDetail, employmentType, notes },
+    costFields,
+  );
+
+  setBusy('assignmentSaveBtn', true);
+  try {
+    const payload = isEdit
+      ? { action: 'updateAssignment', id: editingAssignment.id, assignment }
+      : { action: 'addAssignment', assignment };
+    await doAction(payload);
+    await loadData();
+    closeAssignment();
+    render();
+    toast(isEdit ? 'העדכון נשמר' : 'השיבוץ נוסף');
+  } catch (err) {
+    toast(err.message || 'שגיאה בשמירה', true);
+  } finally {
+    setBusy('assignmentSaveBtn', false);
+  }
+}
+
+async function deleteAssignment(assignmentId){
+  const a = ASSIGNMENTS.find(x => x.id === assignmentId);
+  if (!a) return;
+  const wName = workerName(a.workerId);
+  const hName = houseName(a.house);
+  if (!confirm('למחוק את השיבוץ של ' + wName + ' בבית ' + hName + '?\n(העובד/ת לא יימחק/תימחק.)')) return;
+  try {
+    await doAction({ action: 'deleteAssignment', id: assignmentId });
+    await loadData();
+    render();
+    toast('השיבוץ נמחק');
+  } catch (err) {
+    toast(err.message || 'שגיאה במחיקה', true);
+  }
+}
+
+/* ---------- terminate (assignment lifecycle) ---------- */
+
+function openTerminate(assignmentId){
+  const a = ASSIGNMENTS.find(x => x.id === assignmentId);
+  if (!a) return;
+  editingTerm = {
+    assignmentId,
+    workerName: workerName(a.workerId),
+    house: a.house,
+    role: a.role,
+  };
+  document.getElementById('termModalSub').textContent =
+    editingTerm.workerName + ' · ' + houseName(a.house) + ' · ' + a.role;
+  document.getElementById('tm_date').value = calcTodayStr();
+  document.getElementById('tm_reasonDetail').value = '';
+  const sel = document.getElementById('tm_reasonType');
+  let html = '<option value="">— ללא ציון —</option>';
+  TERMINATION_REASONS.forEach(r => {
+    html += `<option value="${escapeHtml(r)}">${escapeHtml(r)}</option>`;
+  });
+  sel.innerHTML = html;
+  document.getElementById('termOverlay').classList.add('show');
+}
+function closeTerminate(){
+  document.getElementById('termOverlay').classList.remove('show');
+  editingTerm = null;
+}
+
+async function saveTerminate(){
+  if (!editingTerm) return;
+  const terminationDate = document.getElementById('tm_date').value;
+  const reasonType = document.getElementById('tm_reasonType').value;
+  const reasonDetail = document.getElementById('tm_reasonDetail').value.trim();
+  if (!terminationDate){ toast('יש להזין תאריך סיום', true); return; }
+  if (!confirm('להפסיק את השיבוץ של ' + editingTerm.workerName + ' בתאריך ' + fmtDate(terminationDate) + '?')) return;
+  setBusy('termSaveBtn', true, 'שומר…');
+  try {
+    await doAction({
+      action: 'terminateAssignment',
+      id: editingTerm.assignmentId,
+      terminationDate, reasonType, reasonDetail,
+    });
+    await loadData();
+    closeTerminate();
+    render();
+    toast('השיבוץ הופסק');
+  } catch (err) {
+    toast(err.message || 'שגיאה בשמירה', true);
+  } finally {
+    setBusy('termSaveBtn', false);
+  }
+}
+
 /* ---------- rendering ---------- */
 
 function renderSwitch(){
@@ -1085,12 +1629,17 @@ function archiveView(){
 }
 
 // One row of the roster — used inside both the salaried and freelancer
-// sub-groups. Read-only in commit 1; the actions column is reserved
-// (rendered empty) for the upcoming row-action buttons in commit 2.
+// sub-groups. Worker name is a link that opens the worker-edit dialog;
+// the actions column holds assignment-level actions (edit terms,
+// terminate, delete the assignment row only — the worker stays).
 function rosterRow(a){
+  const wId = escapeHtml(a.workerId);
+  const aId = escapeHtml(a.id);
   return `
   <tr>
-    <td class="emp-name">${escapeHtml(workerName(a.workerId))}</td>
+    <td>
+      <button class="link-name" onclick="openWorker('${wId}')">${escapeHtml(workerName(a.workerId))}</button>
+    </td>
     <td>
       <span class="role-tag">${roleLabel(a)}</span>
       <span class="type-tag">${escapeHtml(typeLabelShort(a.employmentType))}</span>
@@ -1098,19 +1647,26 @@ function rosterRow(a){
     <td>${termsHtml(a)}</td>
     <td class="money">${fmt(calcAssignmentCost(a))}</td>
     <td class="note-cell">${a.notes?escapeHtml(a.notes):'<span style="color:#B6B0A0">—</span>'}</td>
+    <td>
+      <div class="row-actions">
+        <button class="btn btn-sm btn-accent-hover" onclick="openAssignment({assignmentId:'${aId}'})">עריכה</button>
+        <button class="btn btn-sm btn-danger-hover" onclick="openTerminate('${aId}')">הפסקת עבודה</button>
+        <button class="btn btn-sm btn-danger-hover" onclick="deleteAssignment('${aId}')">מחיקת שיבוץ</button>
+      </div>
+    </td>
   </tr>`;
 }
 
 function rosterTable(rows){
   const body = rows.length
     ? rows.map(rosterRow).join('')
-    : `<tr><td colspan="5"><div class="empty-soft">אין שיבוצים בקטגוריה זו</div></td></tr>`;
+    : `<tr><td colspan="6"><div class="empty-soft">אין שיבוצים בקטגוריה זו</div></td></tr>`;
   return `
   <div class="table-scroll">
     <table>
       <thead><tr>
         <th>שם</th><th>תפקיד / סוג העסקה</th><th>תנאים</th>
-        <th>עלות חודשית</th><th>הערות</th>
+        <th>עלות חודשית</th><th>הערות</th><th>פעולות</th>
       </tr></thead>
       <tbody>${body}</tbody>
     </table>
@@ -1229,7 +1785,10 @@ function houseView(id){
   <div class="section">
     <div class="section-head">
       <h2>צוות הבית</h2>
-      <span class="count-pill">${list.length}</span>
+      <div style="display:flex;gap:10px;align-items:center">
+        <span class="count-pill">${list.length}</span>
+        <button class="btn btn-primary" onclick="openAssignment({house:'${escapeHtml(id)}'})">+ שיבוץ חדש</button>
+      </div>
     </div>
     ${subSalaried}
     ${subFreelancer}
