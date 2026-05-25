@@ -857,9 +857,12 @@ tbody tr:hover{
   </div>
 </div>
 
-<!-- Absence modal: log a worker absent FROM a house for a date range.
-     Server has no updateAbsence — only logAbsence + endAbsence +
-     deleteAbsence — so "editing" an absence means delete + recreate. -->
+<!-- Absence modal: log an absence AT a house for a date range. v3.1 made
+     this strictly a single event — the "log absence → prompt for
+     coverage" two-step flow is gone, and the absence form no longer
+     picks the house (it's set by the opener, which is always a per-house
+     view button). The worker dropdown is filtered to workers with an
+     active assignment at the opener's house. -->
 <div class="overlay" id="absenceOverlay">
   <div class="modal">
     <div class="modal-head">
@@ -870,10 +873,7 @@ tbody tr:hover{
       <div class="field">
         <label>עובד/ת</label>
         <select id="ab_worker"></select>
-      </div>
-      <div class="field">
-        <label>בית</label>
-        <select id="ab_house"></select>
+        <div class="hint">רק עובדי/ות הבית. רישום ללא עובד/ת ספציפי/ת אפשרי לתיעוד משבצת לא מאוישת.</div>
       </div>
       <div class="field-row">
         <div class="field">
@@ -905,28 +905,18 @@ tbody tr:hover{
   </div>
 </div>
 
-<!-- "Add coverage now?" follow-up prompt — step 2 of the two-step flow.
-     A custom modal instead of browser confirm() to match the rest of the
-     app's dark/gold UX. Set by saveAbsence() right after a successful
-     logAbsence. -->
-<div class="overlay" id="coveragePromptOverlay">
-  <div class="modal" style="max-width:380px">
-    <div class="modal-head">
-      <h3>ההיעדרות נשמרה</h3>
-      <p>לרשום מחליף/ה עכשיו?</p>
-    </div>
-    <div class="modal-foot" style="justify-content:flex-end">
-      <button class="btn btn-ghost" onclick="declineCoveragePrompt()">לא</button>
-      <button class="btn btn-primary" onclick="acceptCoveragePrompt()">הוסף מחליף/ה</button>
-    </div>
-  </div>
-</div>
-
-<!-- Coverage modal: link a covering worker (+ providing house + optional
-     extra payment) to an existing absence. The absence itself is locked
-     by the opener (set via openCoverage({absenceId})) and displayed in
-     the sub-header. The extra payment accrues to absence.house, not the
-     covering worker's home house. -->
+<!-- Coverage modal: log an independent coverage event. v3.1 made
+     coverage independent of absence. coveringHouse is fixed by the
+     opener (= the house view we're on); the user picks:
+       - covering worker (filtered to active assignments at coveringHouse)
+       - receivingHouse (any other house)
+       - linked absence (optional; populated from active absences AT the
+         chosen receivingHouse — re-fetched whenever receivingHouse
+         changes)
+       - the coverage's own start/end dates
+       - extraPayment (accrues to receivingHouse)
+     There is no UI entry from absence rows; the only launch path is
+     the "+ אירוע החלפה" button on a house view. -->
 <div class="overlay" id="coverageOverlay">
   <div class="modal">
     <div class="modal-head">
@@ -936,18 +926,33 @@ tbody tr:hover{
     <div class="modal-body">
       <div class="field">
         <label>מחליף/ה</label>
-        <select id="cv_worker" onchange="onCoverageWorkerChange()"></select>
-        <div class="hint">העובד/ת הנעדר/ת לא מופיע/ה ברשימה — אי אפשר לכסות לעצמך.</div>
+        <select id="cv_worker"></select>
+        <div class="hint">רק עובדי/ות עם שיבוץ פעיל בבית הנוכחי.</div>
       </div>
       <div class="field">
-        <label>בית מקור של המחליף/ה</label>
-        <select id="cv_providingHouse"></select>
-        <div class="hint">הבית שממנו מגיע/ה המחליף/ה. ברירת המחדל לפי השיבוץ הקיים, אפשר לשנות.</div>
+        <label>בית שמקבל את ההחלפה</label>
+        <select id="cv_receivingHouse" onchange="onCoverageReceivingHouseChange()"></select>
+        <div class="hint">הבית שאליו הולכת ההחלפה. תוספת התשלום נספרת בעלות בית זה.</div>
+      </div>
+      <div class="field">
+        <label>היעדרות מקושרת</label>
+        <select id="cv_absenceId"></select>
+        <div class="hint">אופציונלי. רק היעדרויות פעילות בבית היעד מופיעות.</div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label>מתאריך</label>
+          <input id="cv_startDate" type="date"/>
+        </div>
+        <div class="field">
+          <label>עד</label>
+          <input id="cv_endDate" type="date"/>
+        </div>
       </div>
       <div class="field">
         <label>תוספת תשלום (₪)</label>
         <input id="cv_extraPayment" type="number" min="0" step="100" placeholder="0"/>
-        <div class="hint">סכום שמשולם למחליף/ה מעבר לשכר הרגיל. נספר בעלות הבית הנעדר.</div>
+        <div class="hint">סכום שמשולם למחליף/ה מעבר לשכר הרגיל. נספר בעלות הבית שמקבל את ההחלפה.</div>
       </div>
       <div class="field">
         <label>הערות</label>
@@ -1032,6 +1037,7 @@ const {
   activeAbsences: calcActiveAbsences,
   openAbsences: calcOpenAbsences,
   coveragesForAbsence: calcCoveragesForAbsence,
+  isCoverageActive: calcIsCoverageActive,
   activeCoveragesByHouse: calcActiveCoveragesByHouse,
   coverageExtra: calcCoverageExtra,
   pendingTerminations: calcPendingTerminations,
@@ -1599,31 +1605,35 @@ async function saveTerminate(){
   }
 }
 
-/* ---------- absence CRUD + two-step coverage flow ---------- */
+/* ---------- absence CRUD (v3.1 — independent of coverage) ---------- */
 
 // Server has logAbsence / endAbsence / deleteAbsence (no update — to
-// change dates after the fact, Moran deletes + recreates). The flow
-// here is the user-confirmed Q2 two-step pattern: save absence → modal
-// prompts "add coverage now?" → either opens the coverage dialog with
-// the new absence prelinked, or closes silently.
+// change dates after the fact, Moran deletes + recreates). v3.1 dropped
+// the "after save, prompt for coverage" two-step flow; absences and
+// coverages are independent events now and recorded separately.
 
-let editingAbsence = null;         // { house? }
-let editingCoverage = null;        // { absenceId, house }
-let coveragePromptAbsenceId = null;
+let editingAbsence = null;         // { house }
+let editingCoverage = null;        // { coveringHouse }
 
-function fillAbsenceWorkerDropdown(selectedId){
+// Workers with an active assignment at the given house. Mirrors the
+// server's FK check (worker must be assigned to absence.house) so the
+// dropdown can't offer anyone the server would reject.
+function workersAtHouse(houseId){
+  const ids = new Set(
+    ASSIGNMENTS.filter(a => a.house === houseId).map(a => a.workerId)
+  );
+  return WORKERS.filter(w => ids.has(w.id));
+}
+
+function fillAbsenceWorkerDropdown(houseId, selectedId){
   const sel = document.getElementById('ab_worker');
-  let html = `<option value="">— בחירה —</option>`;
-  WORKERS.forEach(w => {
+  // First option is the empty / stub choice — explicitly allowed by the
+  // server for "unfilled position, no identified absentee".
+  let html = `<option value="">— ללא עובד/ת ספציפי/ת (משבצת לא מאוישת) —</option>`;
+  workersAtHouse(houseId).forEach(w => {
     html += `<option value="${escapeHtml(w.id)}"${w.id===selectedId?' selected':''}>${escapeHtml(w.name)}</option>`;
   });
   sel.innerHTML = html;
-}
-function fillAbsenceHouseDropdown(selectedHouse){
-  const sel = document.getElementById('ab_house');
-  sel.innerHTML = HOUSES.map(h =>
-    `<option value="${escapeHtml(h.id)}"${h.id===selectedHouse?' selected':''}>${escapeHtml(h.name)}</option>`
-  ).join('');
 }
 function fillAbsenceReasonDropdown(selectedReason){
   const sel = document.getElementById('ab_reasonType');
@@ -1636,8 +1646,7 @@ function openAbsence(opts){
   const o = opts || {};
   editingAbsence = { house: o.house || HOUSES[0].id };
   document.getElementById('absenceModalSub').textContent = 'בבית ' + houseName(editingAbsence.house);
-  fillAbsenceWorkerDropdown('');
-  fillAbsenceHouseDropdown(editingAbsence.house);
+  fillAbsenceWorkerDropdown(editingAbsence.house, '');
   fillAbsenceReasonDropdown(ABSENCE_REASON_TYPES[0]);
   const today = calcTodayStr();
   document.getElementById('ab_startDate').value = today;
@@ -1654,21 +1663,19 @@ function closeAbsence(){
 
 async function saveAbsence(){
   if (!editingAbsence) return;
-  const workerId = document.getElementById('ab_worker').value;
-  const house = document.getElementById('ab_house').value;
+  const workerId = document.getElementById('ab_worker').value;  // '' = stub
+  const house = editingAbsence.house;
   const startDate = document.getElementById('ab_startDate').value;
   const endDate = document.getElementById('ab_endDate').value;
   const reasonType = document.getElementById('ab_reasonType').value;
   const reasonDetail = document.getElementById('ab_reasonDetail').value.trim();
   const notes = document.getElementById('ab_notes').value.trim();
-  if (!workerId){ toast('יש לבחור עובד/ת', true); return; }
-  if (!house){ toast('יש לבחור בית', true); return; }
   if (!startDate || !endDate){ toast('יש להזין תאריכים', true); return; }
   if (endDate < startDate){ toast('תאריך סיום מוקדם מתאריך התחלה', true); return; }
 
   setBusy('absenceSaveBtn', true);
   try {
-    const result = await doAction({
+    await doAction({
       action: 'logAbsence',
       absence: { workerId, house, startDate, endDate, reasonType, reasonDetail, notes },
     });
@@ -1676,15 +1683,8 @@ async function saveAbsence(){
     closeAbsence();
     render();
     toast('ההיעדרות נשמרה');
-    // Step 2 of the two-step flow: capture the new absence id and pop
-    // the "add coverage now?" prompt. If the user declines, the absence
-    // stays on the house view as "ללא מחליף" with a הוסף החלפה button
-    // for later.
-    const newAbsenceId = result && result.absence && result.absence.id;
-    if (newAbsenceId){
-      coveragePromptAbsenceId = newAbsenceId;
-      document.getElementById('coveragePromptOverlay').classList.add('show');
-    }
+    // v3.1: no follow-up "add coverage?" prompt. If Moran wants to log a
+    // coverage, she clicks "+ אירוע החלפה" on the house view explicitly.
   } catch (err) {
     toast(err.message || 'שגיאה בשמירה', true);
   } finally {
@@ -1692,21 +1692,10 @@ async function saveAbsence(){
   }
 }
 
-function declineCoveragePrompt(){
-  document.getElementById('coveragePromptOverlay').classList.remove('show');
-  coveragePromptAbsenceId = null;
-}
-function acceptCoveragePrompt(){
-  const absenceId = coveragePromptAbsenceId;
-  document.getElementById('coveragePromptOverlay').classList.remove('show');
-  coveragePromptAbsenceId = null;
-  if (absenceId) openCoverage({ absenceId });
-}
-
 async function endAbsence(absenceId){
   const ab = ABSENCES.find(x => x.id === absenceId);
   if (!ab) return;
-  if (!confirm('לסיים את ההיעדרות של ' + workerName(ab.workerId) + '?\n(תאריך הסיום יעודכן להיום אם הוא בעתיד.)')) return;
+  if (!confirm('לסיים את ההיעדרות של ' + (workerName(ab.workerId) || 'משבצת לא מאוישת') + '?\n(תאריך הסיום יעודכן להיום אם הוא בעתיד.)')) return;
   try {
     await doAction({ action: 'endAbsence', id: absenceId });
     await loadData();
@@ -1720,7 +1709,8 @@ async function endAbsence(absenceId){
 async function deleteAbsence(absenceId){
   const ab = ABSENCES.find(x => x.id === absenceId);
   if (!ab) return;
-  if (!confirm('למחוק את רישום ההיעדרות של ' + workerName(ab.workerId) + '?')) return;
+  const who = workerName(ab.workerId) || 'משבצת לא מאוישת';
+  if (!confirm('למחוק את רישום ההיעדרות של ' + who + '?')) return;
   try {
     await doAction({ action: 'deleteAbsence', id: absenceId });
     await loadData();
@@ -1731,48 +1721,75 @@ async function deleteAbsence(absenceId){
   }
 }
 
-/* ---------- coverage CRUD ---------- */
+/* ---------- coverage CRUD (v3.1 — independent of absence) ---------- */
 
-function fillCoverageWorkerDropdown(selectedId, excludeWorkerId){
+// Active absences at a specific house, used to populate the linked-
+// absence dropdown when the user picks a receivingHouse in the coverage
+// form. Only ACTIVE absences (status='active' and today within range)
+// are offered — the server enforces the same and date-range overlap on
+// save.
+function activeAbsencesAtHouse(houseId){
+  const today = calcTodayStr();
+  return ABSENCES.filter(a =>
+    a.house === houseId && calcIsAbsenceActive(a, today)
+  );
+}
+
+function fillCoverageWorkerDropdown(coveringHouse, selectedId){
   const sel = document.getElementById('cv_worker');
   let html = `<option value="">— בחירה —</option>`;
-  WORKERS.forEach(w => {
-    if (w.id === excludeWorkerId) return;
+  workersAtHouse(coveringHouse).forEach(w => {
     html += `<option value="${escapeHtml(w.id)}"${w.id===selectedId?' selected':''}>${escapeHtml(w.name)}</option>`;
   });
   sel.innerHTML = html;
 }
-function fillCoverageHouseDropdown(selectedHouse){
-  const sel = document.getElementById('cv_providingHouse');
-  sel.innerHTML = HOUSES.map(h =>
-    `<option value="${escapeHtml(h.id)}"${h.id===selectedHouse?' selected':''}>${escapeHtml(h.name)}</option>`
-  ).join('');
+
+function fillCoverageReceivingHouseDropdown(coveringHouse, selectedHouse){
+  const sel = document.getElementById('cv_receivingHouse');
+  let html = `<option value="">— בחירה —</option>`;
+  HOUSES.forEach(h => {
+    if (h.id === coveringHouse) return;  // can't receive coverage from itself
+    html += `<option value="${escapeHtml(h.id)}"${h.id===selectedHouse?' selected':''}>${escapeHtml(h.name)}</option>`;
+  });
+  sel.innerHTML = html;
 }
 
-// Convenience nudge: when the covering worker is chosen, pre-select
-// the providing house to their first existing assignment's house —
-// usually right. Moran can still override.
-function onCoverageWorkerChange(){
-  const wId = document.getElementById('cv_worker').value;
-  if (!wId) return;
-  const myAsg = ASSIGNMENTS.find(a => a.workerId === wId);
-  if (myAsg){
-    document.getElementById('cv_providingHouse').value = myAsg.house;
+// Repopulated whenever receivingHouse changes. First option is always
+// "no linked absence" — coverage can stand alone.
+function fillCoverageAbsenceDropdown(receivingHouse, selectedId){
+  const sel = document.getElementById('cv_absenceId');
+  let html = `<option value="">— אין היעדרות מקושרת —</option>`;
+  if (receivingHouse){
+    activeAbsencesAtHouse(receivingHouse).forEach(ab => {
+      const who = workerName(ab.workerId) || 'משבצת לא מאוישת';
+      const label = who + ' · ' + fmtDate(ab.startDate) + '–' + fmtDate(ab.endDate);
+      html += `<option value="${escapeHtml(ab.id)}"${ab.id===selectedId?' selected':''}>${escapeHtml(label)}</option>`;
+    });
   }
+  sel.innerHTML = html;
+}
+
+// receivingHouse changed → re-fetch the linked-absence options. The
+// previously-selected absence is unlikely to belong to the new house,
+// so we clear it.
+function onCoverageReceivingHouseChange(){
+  const receivingHouse = document.getElementById('cv_receivingHouse').value;
+  fillCoverageAbsenceDropdown(receivingHouse, '');
 }
 
 function openCoverage(opts){
   const o = opts || {};
-  const absence = ABSENCES.find(a => a.id === o.absenceId);
-  if (!absence){ toast('היעדרות לא נמצאה', true); return; }
-  editingCoverage = { absenceId: absence.id, house: absence.house };
+  // coveringHouse is fixed by the opener (always a per-house view button).
+  // No entry path from absence rows or the central dashboard.
+  editingCoverage = { coveringHouse: o.house || HOUSES[0].id };
   document.getElementById('coverageModalSub').textContent =
-    'להיעדרות של ' + workerName(absence.workerId) +
-    ' מבית ' + houseName(absence.house) +
-    ' (' + fmtDate(absence.startDate) + ' – ' + fmtDate(absence.endDate) + ')';
-  // Absentee can't cover for themselves — exclude from the dropdown.
-  fillCoverageWorkerDropdown('', absence.workerId);
-  fillCoverageHouseDropdown(HOUSES[0].id);
+    'בית מקור: ' + houseName(editingCoverage.coveringHouse);
+  fillCoverageWorkerDropdown(editingCoverage.coveringHouse, '');
+  fillCoverageReceivingHouseDropdown(editingCoverage.coveringHouse, '');
+  fillCoverageAbsenceDropdown('', '');  // empty until a receivingHouse is picked
+  const today = calcTodayStr();
+  document.getElementById('cv_startDate').value = today;
+  document.getElementById('cv_endDate').value = today;
   document.getElementById('cv_extraPayment').value = '';
   document.getElementById('cv_notes').value = '';
   document.getElementById('coverageOverlay').classList.add('show');
@@ -1785,23 +1802,42 @@ function closeCoverage(){
 
 async function saveCoverage(){
   if (!editingCoverage) return;
+  const coveringHouse = editingCoverage.coveringHouse;
   const coveringWorkerId = document.getElementById('cv_worker').value;
-  const providingHouse = document.getElementById('cv_providingHouse').value;
+  const receivingHouse = document.getElementById('cv_receivingHouse').value;
+  const absenceId = document.getElementById('cv_absenceId').value;  // '' = unlinked
+  const startDate = document.getElementById('cv_startDate').value;
+  const endDate = document.getElementById('cv_endDate').value;
   const extraPayment = Number(document.getElementById('cv_extraPayment').value) || 0;
   const notes = document.getElementById('cv_notes').value.trim();
   if (!coveringWorkerId){ toast('יש לבחור מחליף/ה', true); return; }
-  if (!providingHouse){ toast('יש לבחור בית מקור של המחליף/ה', true); return; }
+  if (!receivingHouse){ toast('יש לבחור בית שמקבל את ההחלפה', true); return; }
+  if (!startDate || !endDate){ toast('יש להזין תאריכים', true); return; }
+  if (endDate < startDate){ toast('תאריך סיום מוקדם מתאריך התחלה', true); return; }
+  // Client-side mirror of the server's linked-absence overlap check, so
+  // Moran gets feedback before the round-trip. Server still re-validates.
+  if (absenceId){
+    const abs = ABSENCES.find(a => a.id === absenceId);
+    if (abs && !(abs.startDate <= endDate && startDate <= abs.endDate)){
+      toast('תאריכי ההחלפה אינם חופפים את תאריכי ההיעדרות שנבחרה', true);
+      return;
+    }
+  }
 
   setBusy('coverageSaveBtn', true);
   try {
     await doAction({
       action: 'addCoverage',
-      coverage: { absenceId: editingCoverage.absenceId, coveringWorkerId, providingHouse, extraPayment, notes },
+      coverage: {
+        absenceId, coveringWorkerId,
+        coveringHouse, receivingHouse,
+        startDate, endDate, extraPayment, notes,
+      },
     });
     await loadData();
     closeCoverage();
     render();
-    toast('המחליף/ה נרשם/ה');
+    toast('ההחלפה נרשמה');
   } catch (err) {
     toast(err.message || 'שגיאה בשמירה', true);
   } finally {
@@ -1812,12 +1848,12 @@ async function saveCoverage(){
 async function deleteCoverage(coverageId){
   const c = COVERAGES.find(x => x.id === coverageId);
   if (!c) return;
-  if (!confirm('למחוק את רישום המחליף/ה ' + workerName(c.coveringWorkerId) + '?')) return;
+  if (!confirm('למחוק את רישום ההחלפה של ' + workerName(c.coveringWorkerId) + '?')) return;
   try {
     await doAction({ action: 'deleteCoverage', id: coverageId });
     await loadData();
     render();
-    toast('המחליף/ה נמחק/ה');
+    toast('ההחלפה נמחקה');
   } catch (err) {
     toast(err.message || 'שגיאה במחיקה', true);
   }
@@ -2001,41 +2037,19 @@ function rosterTable(rows){
   </div>`;
 }
 
-// Renders one active absence + its coverage(s) nested underneath. Each
-// coverage line has its own מחיקה button. Absences without coverage
-// render the "ללא מחליף" prompt with the active הוסף החלפה button.
-// Multiple coverages per absence are supported (e.g., two workers split
-// the coverage week-on / week-off); + עוד מחליף/ה stays available.
+// v3.1: absence row is self-contained. Coverages live in their own
+// section now (rendered separately). Stub absences (empty workerId) are
+// shown as full rows with the same actions; the worker slot reads
+// "משבצת לא מאוישת".
 function renderAbsenceRow(absence){
-  const wName = escapeHtml(workerName(absence.workerId) || 'ללא רישום נעדר/ת');
+  const wName = escapeHtml(workerName(absence.workerId) || 'משבצת לא מאוישת');
   const dates = `${escapeHtml(fmtDate(absence.startDate))} – ${escapeHtml(fmtDate(absence.endDate))}`;
-  const covs = calcCoveragesForAbsence(COVERAGES, absence.id);
   const aId = escapeHtml(absence.id);
 
-  const coverageLines = covs.length
-    ? covs.map(c => `
-        <div class="coverage-line">
-          <span>מחליף/ה:</span>
-          <span class="cov-name">${escapeHtml(workerName(c.coveringWorkerId))}</span>
-          <span class="cov-house">(מ${escapeHtml(houseName(c.providingHouse))})</span>
-          ${c.extraPayment ? `<span class="cov-extra">תוספת ${fmt(c.extraPayment)}</span>` : ''}
-          ${c.notes ? `<span style="color:var(--muted)">${escapeHtml(c.notes)}</span>` : ''}
-          <button class="btn btn-sm btn-danger-hover" onclick="deleteCoverage('${escapeHtml(c.id)}')" style="margin-inline-start:auto">מחיקה</button>
-        </div>`).join('')
-      + `<button class="btn btn-sm" onclick="openCoverage({absenceId:'${aId}'})" style="margin-top:10px">+ עוד מחליף/ה</button>`
-    : `<div class="no-coverage">
-        <span>ללא מחליף</span>
-        <button class="btn btn-sm btn-primary" onclick="openCoverage({absenceId:'${aId}'})" style="padding:5px 14px">הוסף החלפה</button>
-       </div>`;
-
-  // Row-level absence actions on the right (RTL: visually leftmost).
-  // "מחיקה" is hidden when coverages reference this absence — server
-  // rejects with 409 otherwise; matching the same FK guard pattern as
-  // the worker dialog.
   const rowActions = absence.status === 'active'
     ? `<div class="event-action" style="display:flex;gap:6px">
          <button class="btn btn-sm" onclick="endAbsence('${aId}')">סיום</button>
-         ${covs.length ? '' : `<button class="btn btn-sm btn-danger-hover" onclick="deleteAbsence('${aId}')">מחיקה</button>`}
+         <button class="btn btn-sm btn-danger-hover" onclick="deleteAbsence('${aId}')">מחיקה</button>
        </div>`
     : '';
 
@@ -2051,7 +2065,46 @@ function renderAbsenceRow(absence){
       <span class="event-dates">${dates}</span>
     </div>
     ${absence.reasonDetail ? `<div class="event-detail">${escapeHtml(absence.reasonDetail)}</div>` : ''}
-    ${coverageLines}
+  </div>`;
+}
+
+// v3.1: standalone coverage row, parallel to renderAbsenceRow. Shown
+// under "החלפות פעילות" on the house view of the coveringHouse — these
+// are this house's workers helping elsewhere. extraPayment accrues to
+// receivingHouse, not here, so we surface that explicitly in the meta
+// line. A linked-absence tag is added when absenceId points at a known
+// absence row (server doesn't enforce continued validity — link can
+// dangle if the absence is later deleted).
+function renderCoverageRow(coverage){
+  const wName = escapeHtml(workerName(coverage.coveringWorkerId));
+  const dates = `${escapeHtml(fmtDate(coverage.startDate))} – ${escapeHtml(fmtDate(coverage.endDate))}`;
+  const cId = escapeHtml(coverage.id);
+  const toHouse = escapeHtml(houseName(coverage.receivingHouse));
+
+  const linked = coverage.absenceId
+    ? `<span class="reason-pill">היעדרות מקושרת</span>`
+    : '';
+
+  const extraTag = coverage.extraPayment
+    ? `<span class="cov-extra">תוספת ${fmt(coverage.extraPayment)}</span>`
+    : '';
+
+  return `
+  <div class="event-row">
+    <div class="event-main">
+      <span class="name">${wName}</span>
+      <span class="event-badge">החלפה</span>
+      <div class="event-action" style="display:flex;gap:6px">
+        <button class="btn btn-sm btn-danger-hover" onclick="deleteCoverage('${cId}')">מחיקה</button>
+      </div>
+    </div>
+    <div class="event-meta">
+      <span class="cov-house">לבית ${toHouse}</span>
+      ${linked}
+      ${extraTag}
+      <span class="event-dates">${dates}</span>
+    </div>
+    ${coverage.notes ? `<div class="event-detail">${escapeHtml(coverage.notes)}</div>` : ''}
   </div>`;
 }
 
@@ -2062,7 +2115,14 @@ function houseView(id){
   const houseT = calcHouseTotal(ASSIGNMENTS, COVERAGES, ABSENCES, ARCHIVE_V3, id, today);
   const extra = calcCoverageExtra(COVERAGES, ABSENCES, id, today);
   const pending = calcPendingHouseCost(ARCHIVE_V3, id, today);
+  // v3.1: house view shows absences logged AT this house, and coverages
+  // logged AT this house (i.e. where this house's workers cover
+  // elsewhere). Two independent sections; coverages are no longer
+  // nested under absences.
   const houseAbsences = calcActiveAbsences(ABSENCES, today).filter(ab => ab.house === id);
+  const houseCoverages = COVERAGES.filter(c =>
+    c.coveringHouse === id && calcIsCoverageActive(c, today, ABSENCES)
+  );
 
   const subSalaried = `
   <div class="subgroup">
@@ -2078,7 +2138,7 @@ function houseView(id){
   const absencesSection = `
   <div class="section">
     <div class="section-head">
-      <h2>נעדרים פעילים</h2>
+      <h2>היעדרויות פעילות</h2>
       <div style="display:flex;gap:10px;align-items:center">
         <span class="count-pill">${houseAbsences.length}</span>
         <button class="btn btn-primary" onclick="openAbsence({house:'${escapeHtml(id)}'})">+ אירוע היעדרות</button>
@@ -2089,7 +2149,27 @@ function houseView(id){
         ? `<div class="event-list">${houseAbsences.map(renderAbsenceRow).join('')}</div>`
         : `<div class="empty">אין כרגע היעדרויות פעילות בבית זה</div>`}
     </div>
-    <div class="section-note">תוספת מחליף/ה נספרת בעלות הבית שממנו חסר/ה העובד/ת — לא בבית שממנו מגיע/ה המחליף/ה.</div>
+  </div>`;
+
+  // v3.1: coverages logged AT this house = this house's workers
+  // helping elsewhere. Independent of the absences section. Notice the
+  // section-note explains the cost split: extra payment is recorded
+  // here as an outgoing helper, but it accrues to the receivingHouse.
+  const coveragesSection = `
+  <div class="section">
+    <div class="section-head">
+      <h2>החלפות פעילות</h2>
+      <div style="display:flex;gap:10px;align-items:center">
+        <span class="count-pill">${houseCoverages.length}</span>
+        <button class="btn btn-primary" onclick="openCoverage({house:'${escapeHtml(id)}'})">+ אירוע החלפה</button>
+      </div>
+    </div>
+    <div class="tablecard accent-edge">
+      ${houseCoverages.length
+        ? `<div class="event-list">${houseCoverages.map(renderCoverageRow).join('')}</div>`
+        : `<div class="empty">אין כרגע החלפות פעילות מבית זה לבתים אחרים</div>`}
+    </div>
+    <div class="section-note">תוספת ההחלפה נספרת בעלות הבית שמקבל את ההחלפה — לא בבית הנוכחי.</div>
   </div>`;
 
   const mgrPill = houseMgr(id)
@@ -2129,9 +2209,9 @@ function houseView(id){
       <div class="sub">היום ${escapeHtml(fmtDate(today))}</div>
     </div>
     <div class="stat">
-      <div class="lbl">מחליפים נכנסים</div>
-      <div class="val">${houseAbsences.reduce((s,ab)=>s+calcCoveragesForAbsence(COVERAGES,ab.id).length,0)}</div>
-      <div class="sub">סך רשומות החלפה על היעדרויות פעילות</div>
+      <div class="lbl">החלפות יוצאות פעילות</div>
+      <div class="val">${houseCoverages.length}</div>
+      <div class="sub">עובדי/ות הבית שמחליפים/ות בבתים אחרים</div>
     </div>
   </div>
 
@@ -2147,7 +2227,8 @@ function houseView(id){
     ${subFreelancer}
   </div>
 
-  ${absencesSection}`;
+  ${absencesSection}
+  ${coveragesSection}`;
 }
 
 /* ---------- boot ---------- */

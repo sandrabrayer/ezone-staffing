@@ -173,16 +173,27 @@ function makeFakeUpstream() {
       // ---------- absences ----------
       case 'logAbsence': {
         const a = b.absence;
-        if (!state.workers.some(w => w.id === a.workerId)) {
-          return { status: 200, json: { _status: 404, error: 'worker not found' } };
+        // v3.1: stub rows (workerId='') skip the FK + overlap guards.
+        if (a.workerId) {
+          if (!state.workers.some(w => w.id === a.workerId)) {
+            return { status: 200, json: { _status: 404, error: 'worker not found' } };
+          }
+          // Mirror Code.gs: the absent worker must have an active
+          // assignment at this house.
+          const hasAsg = state.assignments.some(x =>
+            x.workerId === a.workerId && x.house === a.house
+          );
+          if (!hasAsg) {
+            return { status: 200, json: { _status: 409, error: 'העובד/ת אינו/ה משובץ/ת בבית הנבחר' } };
+          }
+          const conflict = state.absences.find(x =>
+            x.workerId === a.workerId &&
+            x.house === a.house &&
+            x.status === 'active' &&
+            overlap(x.startDate, x.endDate, a.startDate, a.endDate)
+          );
+          if (conflict) return { status: 200, json: { _status: 409, error: 'worker already has an absence in this range' } };
         }
-        const conflict = state.absences.find(x =>
-          x.workerId === a.workerId &&
-          x.house === a.house &&
-          x.status === 'active' &&
-          overlap(x.startDate, x.endDate, a.startDate, a.endDate)
-        );
-        if (conflict) return { status: 200, json: { _status: 409, error: 'worker already has an absence in this range' } };
         const t = today();
         const status = isActive(a.startDate, a.endDate, t) ? 'active' : 'ended';
         const row = Object.assign({ id: newId('ab'), status, createdAt: nowIso() }, a);
@@ -199,9 +210,10 @@ function makeFakeUpstream() {
         return { status: 200, json: { _status: 200, ok: true, id: ab.id, endDate: newEnd, status: 'ended' } };
       }
       case 'deleteAbsence': {
-        if (state.coverages.some(c => c.absenceId === b.id)) {
-          return { status: 200, json: { _status: 409, error: 'absence has coverage records' } };
-        }
+        // v3.1: deleting an absence no longer cascades to coverages and is
+        // no longer blocked by linked coverages. The coverage's absenceId
+        // becomes a dangling reference; cost attribution is unaffected
+        // (coverage carries its own dates + receivingHouse).
         const i = state.absences.findIndex(x => x.id === b.id);
         if (i < 0) return { status: 200, json: { _status: 404, error: 'absence not found' } };
         state.absences.splice(i, 1);
@@ -211,11 +223,29 @@ function makeFakeUpstream() {
       // ---------- coverages ----------
       case 'addCoverage': {
         const c = b.coverage;
-        if (!state.absences.some(a => a.id === c.absenceId)) {
-          return { status: 200, json: { _status: 404, error: 'absence not found' } };
-        }
         if (!state.workers.some(w => w.id === c.coveringWorkerId)) {
           return { status: 200, json: { _status: 404, error: 'covering worker not found' } };
+        }
+        // v3.1: covering worker must have an active assignment at the
+        // coveringHouse (mirror of the absence rule).
+        const hasAsg = state.assignments.some(x =>
+          x.workerId === c.coveringWorkerId && x.house === c.coveringHouse
+        );
+        if (!hasAsg) {
+          return { status: 200, json: { _status: 409, error: 'המחליף/ה אינו/ה משובץ/ת בבית המקור הנבחר' } };
+        }
+        // Linked absence is optional. When present, validate the link.
+        if (c.absenceId) {
+          const abs = state.absences.find(a => a.id === c.absenceId);
+          if (!abs) {
+            return { status: 200, json: { _status: 404, error: 'absence not found' } };
+          }
+          if (abs.house !== c.receivingHouse) {
+            return { status: 200, json: { _status: 409, error: 'הבית של ההיעדרות המקושרת אינו תואם את בית היעד של ההחלפה' } };
+          }
+          if (!overlap(abs.startDate, abs.endDate, c.startDate, c.endDate)) {
+            return { status: 200, json: { _status: 409, error: 'תאריכי ההחלפה אינם חופפים את תאריכי ההיעדרות שנבחרה' } };
+          }
         }
         const row = Object.assign({ id: newId('c'), createdAt: nowIso() }, c);
         state.coverages.push(row);
@@ -768,6 +798,7 @@ test('logAbsence → endAbsence round-trip', async () => {
   try {
     const token = await login(base);
     const workerId = await createWorker(base, token, 'דנה');
+    await addAssignment(base, token, { workerId, house: 'ramot' });
 
     let r = await post(base, token, {
       action: 'logAbsence',
@@ -797,6 +828,12 @@ test('logAbsence: rejects overlapping active absence for same (worker, house)', 
   try {
     const token = await login(base);
     const workerId = await createWorker(base, token, 'דנה');
+    // v3.1: absences require the worker to have an active assignment at
+    // the same house. Set up assignments at both ramot and asher so the
+    // body of the test (overlap check, cross-house allowance) is what's
+    // being exercised, not the new FK guard.
+    await addAssignment(base, token, { workerId, house: 'ramot' });
+    await addAssignment(base, token, { workerId, house: 'asher' });
 
     let r = await post(base, token, {
       action: 'logAbsence',
@@ -820,6 +857,37 @@ test('logAbsence: rejects overlapping active absence for same (worker, house)', 
         startDate: plusDays(5), endDate: plusDays(15), reasonType: 'מחלה' },
     });
     assert.equal(r.status, 200);
+  } finally { await close(srv); }
+});
+
+test('logAbsence: rejects worker without an active assignment at the house (v3.1)', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    const workerId = await createWorker(base, token, 'X');
+    // Worker exists, but no assignment at ramot.
+    const r = await post(base, token, {
+      action: 'logAbsence',
+      absence: { workerId, house: 'ramot',
+        startDate: todayStr(), endDate: plusDays(3), reasonType: 'חופשה' },
+    });
+    assert.equal(r.status, 409);
+    assert.match(r.json.error, /משובץ/);
+  } finally { await close(srv); }
+});
+
+test('logAbsence: accepts stub absence with empty workerId (v3.1)', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    // No worker, no assignment — stubs are independent of those.
+    const r = await post(base, token, {
+      action: 'logAbsence',
+      absence: { workerId: '', house: 'ramot',
+        startDate: todayStr(), endDate: plusDays(3), reasonType: 'מחלה' },
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.absence.workerId, '');
   } finally { await close(srv); }
 });
 
@@ -856,6 +924,7 @@ test('logAbsence: accepts new "אישי" reason type', async () => {
   try {
     const token = await login(base);
     const workerId = await createWorker(base, token, 'X');
+    await addAssignment(base, token, { workerId, house: 'ramot' });
     const r = await post(base, token, {
       action: 'logAbsence',
       absence: { workerId, house: 'ramot',
@@ -865,12 +934,18 @@ test('logAbsence: accepts new "אישי" reason type', async () => {
   } finally { await close(srv); }
 });
 
-test('deleteAbsence: refuses while a coverage still references it', async () => {
+test('deleteAbsence: succeeds even when coverages still reference it (v3.1)', async () => {
+  // v3.1: absence and coverage are independent events. Deleting the
+  // absence leaves the coverage row intact — it keeps its own
+  // receivingHouse + dates, so cost attribution doesn't change. The
+  // coverage's absenceId becomes a dangling reference.
   const { srv, base } = await listen();
   try {
     const token = await login(base);
     const absentee = await createWorker(base, token, 'דנה');
     const helper = await createWorker(base, token, 'יוסי');
+    await addAssignment(base, token, { workerId: absentee, house: 'ramot' });
+    await addAssignment(base, token, { workerId: helper, house: 'asher' });
 
     let r = await post(base, token, {
       action: 'logAbsence',
@@ -882,23 +957,29 @@ test('deleteAbsence: refuses while a coverage still references it', async () => 
     r = await post(base, token, {
       action: 'addCoverage',
       coverage: { absenceId, coveringWorkerId: helper,
-        providingHouse: 'asher', extraPayment: 1500 },
+        coveringHouse: 'asher', receivingHouse: 'ramot',
+        startDate: todayStr(), endDate: plusDays(5),
+        extraPayment: 1500 },
     });
     assert.equal(r.status, 200);
 
     r = await post(base, token, { action: 'deleteAbsence', id: absenceId });
-    assert.equal(r.status, 409);
+    assert.equal(r.status, 200, 'deleteAbsence should succeed even with linked coverages');
   } finally { await close(srv); }
 });
 
 // ----- coverages lifecycle -----
 
-test('addCoverage → deleteCoverage round-trip', async () => {
+test('addCoverage → deleteCoverage round-trip (linked to an absence)', async () => {
   const { srv, base } = await listen();
   try {
     const token = await login(base);
     const absentee = await createWorker(base, token, 'דנה');
     const helper = await createWorker(base, token, 'יוסי');
+    // v3.1: covering worker needs an active assignment at coveringHouse,
+    // and absent worker needs one at the absence house.
+    await addAssignment(base, token, { workerId: absentee, house: 'ramot' });
+    await addAssignment(base, token, { workerId: helper, house: 'asher' });
 
     let r = await post(base, token, {
       action: 'logAbsence',
@@ -910,15 +991,16 @@ test('addCoverage → deleteCoverage round-trip', async () => {
     r = await post(base, token, {
       action: 'addCoverage',
       coverage: { absenceId, coveringWorkerId: helper,
-        providingHouse: 'asher', extraPayment: 2000,
-        notes: 'מחליף את דנה' },
+        coveringHouse: 'asher', receivingHouse: 'ramot',
+        startDate: todayStr(), endDate: plusDays(7),
+        extraPayment: 2000, notes: 'מחליף את דנה' },
     });
     assert.equal(r.status, 200);
     assert.equal(r.json.coverage.extraPayment, 2000);
+    assert.equal(r.json.coverage.coveringHouse, 'asher');
+    assert.equal(r.json.coverage.receivingHouse, 'ramot');
     const covId = r.json.coverage.id;
 
-    // Both absentee and helper stay on their own rosters — coverage is
-    // just a record of who's helping out, not a transfer.
     const data = await get(base, token);
     assert.equal(data.json.workers.length, 2, 'both workers still present');
     assert.equal(data.json.coverages.length, 1);
@@ -928,28 +1010,129 @@ test('addCoverage → deleteCoverage round-trip', async () => {
   } finally { await close(srv); }
 });
 
-test('addCoverage: rejects unknown providingHouse', async () => {
+test('addCoverage: unlinked coverage (no absenceId) is accepted (v3.1)', async () => {
+  // Ad-hoc coverage not tied to any recorded absentee — still a valid
+  // event with its own dates + receivingHouse.
   const { srv, base } = await listen();
   try {
     const token = await login(base);
+    const helper = await createWorker(base, token, 'יוסי');
+    await addAssignment(base, token, { workerId: helper, house: 'asher' });
+
     const r = await post(base, token, {
       action: 'addCoverage',
-      coverage: { absenceId: 'ab1', coveringWorkerId: 'w1',
-        providingHouse: 'nope', extraPayment: 100 },
+      coverage: { absenceId: '', coveringWorkerId: helper,
+        coveringHouse: 'asher', receivingHouse: 'ramot',
+        startDate: todayStr(), endDate: plusDays(3),
+        extraPayment: 500 },
     });
-    assert.equal(r.status, 400);
+    assert.equal(r.status, 200);
+    assert.equal(r.json.coverage.absenceId, '');
   } finally { await close(srv); }
 });
 
-test('addCoverage: rejects missing absenceId', async () => {
+test('addCoverage: rejects unknown coveringHouse', async () => {
   const { srv, base } = await listen();
   try {
     const token = await login(base);
     const r = await post(base, token, {
       action: 'addCoverage',
-      coverage: { coveringWorkerId: 'w1', providingHouse: 'ramot', extraPayment: 100 },
+      coverage: { coveringWorkerId: 'w1',
+        coveringHouse: 'nope', receivingHouse: 'ramot',
+        startDate: todayStr(), endDate: plusDays(1), extraPayment: 100 },
     });
     assert.equal(r.status, 400);
+    assert.match(r.json.error, /coveringHouse/);
+  } finally { await close(srv); }
+});
+
+test('addCoverage: rejects receivingHouse === coveringHouse', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    const r = await post(base, token, {
+      action: 'addCoverage',
+      coverage: { coveringWorkerId: 'w1',
+        coveringHouse: 'ramot', receivingHouse: 'ramot',
+        startDate: todayStr(), endDate: plusDays(1), extraPayment: 100 },
+    });
+    assert.equal(r.status, 400);
+    assert.match(r.json.error, /must differ/);
+  } finally { await close(srv); }
+});
+
+test('addCoverage: rejects helper without an active assignment at coveringHouse', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    const helper = await createWorker(base, token, 'יוסי');
+    // Helper exists but has NO assignment at 'asher' (coveringHouse).
+    const r = await post(base, token, {
+      action: 'addCoverage',
+      coverage: { coveringWorkerId: helper,
+        coveringHouse: 'asher', receivingHouse: 'ramot',
+        startDate: todayStr(), endDate: plusDays(1), extraPayment: 100 },
+    });
+    assert.equal(r.status, 409);
+    assert.match(r.json.error, /משובץ/);
+  } finally { await close(srv); }
+});
+
+test('addCoverage with linked absence: rejects house mismatch', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    const absentee = await createWorker(base, token, 'דנה');
+    const helper = await createWorker(base, token, 'יוסי');
+    await addAssignment(base, token, { workerId: absentee, house: 'ramot' });
+    await addAssignment(base, token, { workerId: helper, house: 'asher' });
+
+    let r = await post(base, token, {
+      action: 'logAbsence',
+      absence: { workerId: absentee, house: 'ramot',
+        startDate: todayStr(), endDate: plusDays(7), reasonType: 'חופשה' },
+    });
+    const absenceId = r.json.absence.id;
+
+    // Coverage receivingHouse=ofroni doesn't match the absence's house=ramot.
+    r = await post(base, token, {
+      action: 'addCoverage',
+      coverage: { absenceId, coveringWorkerId: helper,
+        coveringHouse: 'asher', receivingHouse: 'ofroni',
+        startDate: todayStr(), endDate: plusDays(7),
+        extraPayment: 100 },
+    });
+    assert.equal(r.status, 409);
+    assert.match(r.json.error, /אינו תואם/);
+  } finally { await close(srv); }
+});
+
+test('addCoverage with linked absence: rejects non-overlapping dates', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    const absentee = await createWorker(base, token, 'דנה');
+    const helper = await createWorker(base, token, 'יוסי');
+    await addAssignment(base, token, { workerId: absentee, house: 'ramot' });
+    await addAssignment(base, token, { workerId: helper, house: 'asher' });
+
+    let r = await post(base, token, {
+      action: 'logAbsence',
+      absence: { workerId: absentee, house: 'ramot',
+        startDate: todayStr(), endDate: plusDays(7), reasonType: 'חופשה' },
+    });
+    const absenceId = r.json.absence.id;
+
+    // Coverage range starts AFTER the absence's endDate.
+    r = await post(base, token, {
+      action: 'addCoverage',
+      coverage: { absenceId, coveringWorkerId: helper,
+        coveringHouse: 'asher', receivingHouse: 'ramot',
+        startDate: plusDays(10), endDate: plusDays(15),
+        extraPayment: 100 },
+    });
+    assert.equal(r.status, 409);
+    assert.match(r.json.error, /חופפים/);
   } finally { await close(srv); }
 });
 

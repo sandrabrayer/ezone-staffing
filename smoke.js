@@ -92,12 +92,27 @@ function isAbsenceActive(ab, tsDate) {
   if (!ab || String(ab.status) === 'ended') return false;
   return ab.startDate && ab.endDate && ab.startDate <= tsDate && tsDate <= ab.endDate;
 }
+// v3.1: coverage cost accrues to receivingHouse. Linked coverages
+// (absenceId set) are gated by the linked absence being active —
+// closing the absence early stops the cost on the same day. Unlinked
+// coverages accrue on their own dates independently.
+function isCoverageActiveInline(c, tsDate, absences) {
+  if (!c) return false;
+  const s = String(c.startDate || '');
+  const e = String(c.endDate || '');
+  if (!s || !e) return false;
+  if (!(s <= tsDate && tsDate <= e)) return false;
+  const absenceId = String(c.absenceId || '');
+  if (!absenceId) return true;
+  const abs = (absences || []).find(a => a && a.id === absenceId);
+  if (!abs) return true;  // dangling — treat as unlinked
+  if (String(abs.status) === 'ended') return false;
+  return abs.startDate && abs.endDate && abs.startDate <= tsDate && tsDate <= abs.endDate;
+}
 function coverageExtraForHouse(coverages, absences, house, tsDate) {
   return coverages.reduce((s, c) => {
-    const parent = absences.find(a => a.id === c.absenceId);
-    if (!parent) return s;
-    if (parent.house !== house) return s;
-    if (!isAbsenceActive(parent, tsDate)) return s;
+    if (c.receivingHouse !== house) return s;
+    if (!isCoverageActiveInline(c, tsDate, absences)) return s;
     return s + (Number(c.extraPayment) || 0);
   }, 0);
 }
@@ -253,7 +268,10 @@ function coverageExtraForHouse(coverages, absences, house, tsDate) {
     log('logAbsence ok', { id: absence.id, status: absence.status });
   }
 
-  // 10. addCoverage: B covers for the absence; comes from asher; extra 2000.
+  // 10. addCoverage: B from asher helps ramot. v3.1 carries coveringHouse
+  //     + receivingHouse + own dates on the coverage row. We link to the
+  //     absence here to also exercise the FK-overlap check; the absence's
+  //     range covers the coverage's range so the server accepts it.
   const extraPayment = 2000;
   let coverage;
   {
@@ -262,7 +280,9 @@ function coverageExtraForHouse(coverages, absences, house, tsDate) {
       coverage: {
         absenceId: absence.id,
         coveringWorkerId: workerB.id,
-        providingHouse: 'asher',
+        coveringHouse: 'asher',
+        receivingHouse: 'ramot',
+        startDate, endDate,   // match the absence range
         extraPayment,
         notes: 'smoke coverage',
       },
@@ -272,9 +292,29 @@ function coverageExtraForHouse(coverages, absences, house, tsDate) {
     log('addCoverage ok', { id: coverage.id, extra: coverage.extraPayment });
   }
 
-  // 11. cost attribution: ramot now = baseline_ramot + A's assignment
-  //     + coverage extra (accrues to absence.house=ramot). asher just
-  //     has B's assignment; the coverage extra goes to ramot, not asher.
+  // 10a. mismatch guard: linking a coverage whose receivingHouse doesn't
+  //      match the absence's house must 409. Proves the v3.1 FK
+  //      consistency check landed end-to-end.
+  {
+    const r = await jpost('/api/action', {
+      action: 'addCoverage',
+      coverage: {
+        absenceId: absence.id,
+        coveringWorkerId: workerB.id,
+        coveringHouse: 'asher',
+        receivingHouse: 'ofroni',  // doesn't match absence.house=ramot
+        startDate, endDate, extraPayment: 100,
+      },
+    }, token);
+    if (r.status !== 409 || !/אינו תואם/.test(r.body.error || '')) {
+      fail('linked-absence house mismatch should 409', r);
+    }
+    log('linked-absence mismatch ok', { error: r.body.error });
+  }
+
+  // 11. cost attribution: ramot now = baseline + A's assignment +
+  //     coverage extra (accrues to receivingHouse=ramot). asher just has
+  //     B's assignment; the coverage extra goes to ramot, not asher.
   {
     const r = await jget('/api/data', token);
     if (r.status !== 200) fail('GET /api/data after coverage', r);
@@ -295,7 +335,7 @@ function coverageExtraForHouse(coverages, absences, house, tsDate) {
       fail('cost: asher assignment delta wrong', { delta: asherAsg - asherBase, expected: bSalary });
     }
     if (asherExtra !== 0) {
-      fail('cost: asher should have zero coverage extra (coverage extras go to absence.house, not providingHouse)', { asherExtra });
+      fail('cost: asher should have zero coverage extra (extras go to receivingHouse, not coveringHouse)', { asherExtra });
     }
     log('cost attribution ok', {
       ramotAsgDelta: expectedACost, ramotExtra,
@@ -348,7 +388,10 @@ function coverageExtraForHouse(coverages, absences, house, tsDate) {
 
   // 14. cost attribution post-terminate: ramot back to baseline.
   //     A's assignment is gone, and the coverage extra is 0 because its
-  //     parent absence is no longer active.
+  //     linked absence is no longer active (terminateAssignment
+  //     auto-truncated the absence to today + status='ended'). v3.1
+  //     keeps this clamp for linked coverages — substitute pay stops
+  //     when the regular employee's absence stops.
   {
     const r = await jget('/api/data', token);
     const t = today();
@@ -360,25 +403,27 @@ function coverageExtraForHouse(coverages, absences, house, tsDate) {
         { now: ramotAsg, baseline: ramotBase });
     }
     if (ramotExtra !== 0) {
-      fail('cost: ramot coverage extra should be 0 after parent absence ended',
+      fail('cost: ramot coverage extra should be 0 after linked absence ended',
         { actual: ramotExtra });
     }
     log('cost post-terminate ok', { ramotAsg, ramotExtra });
   }
 
-  // 15. cleanup: deleteCoverage. (Required before deleteAbsence — server
-  //     rejects with 409 otherwise.)
+  // 15. v3.1: deleteAbsence no longer requires deleting coverages first.
+  //     The coverage's absenceId becomes a dangling reference but the
+  //     coverage row itself remains valid (it carries its own dates +
+  //     receivingHouse). Exercise that order on purpose, then clean up
+  //     the dangling coverage.
+  {
+    const r = await jpost('/api/action', { action: 'deleteAbsence', id: absence.id }, token);
+    if (r.status !== 200 || !r.body.ok) fail('deleteAbsence (with linked coverage still present)', r);
+    log('deleteAbsence ok (coverage left dangling per v3.1 independence)');
+  }
+  // 16. deleteCoverage — cost stops accruing now too.
   {
     const r = await jpost('/api/action', { action: 'deleteCoverage', id: coverage.id }, token);
     if (r.status !== 200 || !r.body.ok) fail('deleteCoverage', r);
     log('deleteCoverage ok');
-  }
-
-  // 16. deleteAbsence (FK lock released).
-  {
-    const r = await jpost('/api/action', { action: 'deleteAbsence', id: absence.id }, token);
-    if (r.status !== 200 || !r.body.ok) fail('deleteAbsence', r);
-    log('deleteAbsence ok');
   }
 
   // 17. deleteAssignment B + deleteWorker B (no FK refs).

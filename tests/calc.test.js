@@ -6,7 +6,7 @@ const {
   assignmentCategory, assignmentCost,
   assignmentsByHouse, houseAssignmentsCost, splitByCategory,
   isAbsenceActive, activeAbsences, openAbsences,
-  coveragesForAbsence, activeCoveragesByHouse, coverageExtra,
+  coveragesForAbsence, isCoverageActive, activeCoveragesByHouse, coverageExtra,
   pendingTerminations, pendingHouseCost,
   houseTotal, networkTotal,
   assignmentsForWorker, workerTotalCost,
@@ -56,7 +56,13 @@ function cov(over) {
     id: 'c1',
     absenceId: 'ab1',
     coveringWorkerId: 'w2',
-    providingHouse: 'asher',
+    // v3.1: coverage carries its own houses + dates, independent of any
+    // linked absence. coveringHouse = where the helper is from;
+    // receivingHouse = where the help is going (extra accrues here).
+    coveringHouse: 'asher',
+    receivingHouse: 'ramot',
+    startDate: '2026-05-01',
+    endDate: '2026-05-31',
     extraPayment: 2000,
     notes: '',
   }, over);
@@ -257,45 +263,117 @@ test('coveragesForAbsence: filters by absenceId', () => {
 
 // ---------- coverage extras attribution ----------
 
-test('coverageExtra: paid to absence.house, not providingHouse', () => {
-  // Worker absent from ramot. Helper from asher provides coverage. The
-  // extra_payment is a COST to ramot (the house that needs help).
-  const absences = [abs({ id: 'ab1', workerId: 'w1', house: 'ramot' })];
-  const coverages = [cov({ id: 'c1', absenceId: 'ab1', providingHouse: 'asher', extraPayment: 1500 })];
-  assert.equal(coverageExtra(coverages, absences, 'ramot', TODAY), 1500);
-  assert.equal(coverageExtra(coverages, absences, 'asher', TODAY), 0);
+test('isCoverageActive (unlinked): today inside the coverage range', () => {
+  // No absenceId → cost accrues purely on the coverage's own dates.
+  const c = cov({ absenceId: '', startDate: '2026-05-01', endDate: '2026-05-31' });
+  assert.equal(isCoverageActive(c, TODAY, []), true);
+  assert.equal(isCoverageActive(cov({ absenceId: '', startDate: TODAY, endDate: '2026-06-01' }), TODAY, []), true);
+  assert.equal(isCoverageActive(cov({ absenceId: '', startDate: '2026-05-01', endDate: TODAY }), TODAY, []), true);
+  assert.equal(isCoverageActive(cov({ absenceId: '', startDate: '2026-06-01', endDate: '2026-06-15' }), TODAY, []), false);
+  assert.equal(isCoverageActive(null, TODAY, []), false);
 });
 
-test('coverageExtra: ignores coverages whose absence is inactive', () => {
-  const absences = [abs({ id: 'ab1', house: 'ramot', endDate: '2026-04-01' })]; // past
-  const coverages = [cov({ id: 'c1', absenceId: 'ab1', extraPayment: 9999 })];
-  assert.equal(coverageExtra(coverages, absences, 'ramot', TODAY), 0);
-});
-
-test('coverageExtra: sums multiple active coverages on same absence', () => {
-  const absences = [abs({ id: 'ab1', house: 'ramot' })];
-  const coverages = [
-    cov({ id: 'c1', absenceId: 'ab1', providingHouse: 'asher', extraPayment: 1500 }),
-    cov({ id: 'c2', absenceId: 'ab1', providingHouse: 'ofroni', extraPayment: 800 }),
+test('isCoverageActive (linked): active only when the linked absence is also active', () => {
+  // Linked coverage is gated by isAbsenceActive — captures both:
+  //   - absence.endDate clamping the coverage from the right
+  //   - endAbsence flipping status='ended' (drops on the same day)
+  // even though the coverage's own endDate is later.
+  const absences = [
+    abs({ id: 'ab-open', house: 'ramot', endDate: '2026-05-31' }),                // active
+    abs({ id: 'ab-ended-status', house: 'ramot', endDate: TODAY, status: 'ended' }),  // closed today
+    abs({ id: 'ab-past', house: 'ramot', endDate: '2026-04-01' }),               // past by date
   ];
-  assert.equal(coverageExtra(coverages, absences, 'ramot', TODAY), 2300);
+  // Coverage range extends past each absence end, but cost stops when
+  // the linked absence stops being active.
+  const cActive = cov({ id: 'c1', absenceId: 'ab-open', startDate: '2026-05-01', endDate: '2026-06-30' });
+  const cEnded  = cov({ id: 'c2', absenceId: 'ab-ended-status', startDate: '2026-05-01', endDate: '2026-06-30' });
+  const cPast   = cov({ id: 'c3', absenceId: 'ab-past', startDate: '2026-05-01', endDate: '2026-06-30' });
+  assert.equal(isCoverageActive(cActive, TODAY, absences), true);
+  assert.equal(isCoverageActive(cEnded,  TODAY, absences), false);
+  assert.equal(isCoverageActive(cPast,   TODAY, absences), false);
 });
 
-test('coverageExtra: orphan coverage (no parent absence) contributes nothing', () => {
-  const coverages = [cov({ id: 'c1', absenceId: 'gone', extraPayment: 1000 })];
+test('isCoverageActive (linked): dangling absenceId falls back to unlinked behavior', () => {
+  // Coverage has absenceId set but the absence has been deleted (or was
+  // never created). Same spirit as deleteAbsence not cascading — the
+  // coverage row stands on its own, gated only by its dates.
+  const c = cov({ id: 'c1', absenceId: 'gone', startDate: '2026-05-01', endDate: '2026-05-31' });
+  assert.equal(isCoverageActive(c, TODAY, []), true);
+});
+
+test('coverageExtra: paid to receivingHouse, not coveringHouse', () => {
+  // Helper from asher (coveringHouse) helps ramot (receivingHouse). The
+  // extra_payment is a COST to ramot.
+  const coverages = [cov({
+    id: 'c1', absenceId: '', coveringHouse: 'asher', receivingHouse: 'ramot',
+    extraPayment: 1500,
+  })];
+  assert.equal(coverageExtra(coverages, [], 'ramot', TODAY), 1500);
+  assert.equal(coverageExtra(coverages, [], 'asher', TODAY), 0);
+});
+
+test('coverageExtra (orphan): accrues on its own dates independently of any absence', () => {
+  // No absenceId → no linked-absence gate. Today within coverage range
+  // ⇒ extras accrue, even if there are no absences at all.
+  const cFuture = cov({ id: 'f', absenceId: '', receivingHouse: 'ramot',
+    startDate: '2026-06-01', endDate: '2026-06-15', extraPayment: 9999 });
+  const cNow    = cov({ id: 'n', absenceId: '', receivingHouse: 'ramot',
+    startDate: '2026-05-01', endDate: '2026-05-31', extraPayment: 1000 });
+  assert.equal(coverageExtra([cFuture], [], 'ramot', TODAY), 0);
+  assert.equal(coverageExtra([cNow], [], 'ramot', TODAY), 1000);
+});
+
+test('coverageExtra (linked): clamps to absence.endDate — early-end stops extras', () => {
+  // Coverage range stretches to 2026-06-30, but the linked absence was
+  // ended early (endAbsence pulled endDate to TODAY and flipped status
+  // to 'ended'). Real-world: regular employee returned, substitute is
+  // no longer needed. Cost stops on the absence's end date even though
+  // the coverage row is unchanged.
+  const earlyEnded = abs({ id: 'ab1', house: 'ramot', endDate: TODAY, status: 'ended' });
+  const c = cov({ id: 'c1', absenceId: 'ab1', receivingHouse: 'ramot',
+    startDate: '2026-05-01', endDate: '2026-06-30', extraPayment: 5000 });
+  assert.equal(coverageExtra([c], [earlyEnded], 'ramot', TODAY), 0);
+
+  // For comparison: if the absence is still active, the linked
+  // coverage's extra DOES count (despite its own endDate stretching
+  // past — capped by absence on the upper side, but absence is still
+  // open today so today is within both).
+  const stillOpen = abs({ id: 'ab1', house: 'ramot', endDate: '2026-05-31' });
+  assert.equal(coverageExtra([c], [stillOpen], 'ramot', TODAY), 5000);
+});
+
+test('coverageExtra (linked, dangling): absence deleted → falls back to own dates', () => {
+  // absenceId set but the absence is gone. v3.1 doesn't cascade-delete;
+  // the coverage carries its own dates + receivingHouse so it keeps
+  // accruing as if unlinked.
+  const c = cov({ id: 'c1', absenceId: 'gone', receivingHouse: 'ramot',
+    startDate: '2026-05-01', endDate: '2026-05-31', extraPayment: 1200 });
+  assert.equal(coverageExtra([c], [], 'ramot', TODAY), 1200);
+});
+
+test('coverageExtra: sums multiple active coverages at the same receivingHouse', () => {
+  const coverages = [
+    cov({ id: 'c1', absenceId: '', coveringHouse: 'asher',  receivingHouse: 'ramot', extraPayment: 1500 }),
+    cov({ id: 'c2', absenceId: '', coveringHouse: 'ofroni', receivingHouse: 'ramot', extraPayment: 800  }),
+  ];
+  assert.equal(coverageExtra(coverages, [], 'ramot', TODAY), 2300);
+});
+
+test('coverageExtra: orphan stub (receivingHouse="") contributes nowhere', () => {
+  // Migration of v2 events with no recorded absentee → stub coverages
+  // with receivingHouse=''. Cost cannot accrue without a destination
+  // house; Moran has to assign one via the UI before the extra counts.
+  const coverages = [cov({ id: 'c1', absenceId: '', receivingHouse: '', extraPayment: 1000 })];
   assert.equal(coverageExtra(coverages, [], 'ramot', TODAY), 0);
 });
 
-test('activeCoveragesByHouse: groups by absence.house only when active', () => {
-  const absences = [
-    abs({ id: 'ab1', house: 'ramot' }),
-    abs({ id: 'ab2', house: 'asher', endDate: '2026-04-01' }), // past
-    abs({ id: 'ab3', house: 'ofroni' }),
-  ];
+test('activeCoveragesByHouse: groups by receivingHouse only when coverage is active', () => {
+  const absences = [abs({ id: 'ab-open', house: 'ramot' })]; // still active today
   const coverages = [
-    cov({ id: 'c1', absenceId: 'ab1' }),
-    cov({ id: 'c2', absenceId: 'ab2' }),  // dropped — parent inactive
-    cov({ id: 'c3', absenceId: 'ab3' }),
+    cov({ id: 'c1', absenceId: '', receivingHouse: 'ramot' }),                                                  // active
+    cov({ id: 'c2', absenceId: '', receivingHouse: 'asher',  startDate: '2026-03-01', endDate: '2026-04-01' }), // past — drop
+    cov({ id: 'c3', absenceId: 'ab-open', receivingHouse: 'ofroni' }),                                          // active via link
+    cov({ id: 'c4', absenceId: '', receivingHouse: '' }),                                                       // orphan — drop
   ];
   const grouped = activeCoveragesByHouse(coverages, absences, TODAY);
   assert.deepEqual(Object.keys(grouped).sort(), ['ofroni', 'ramot']);
@@ -343,6 +421,7 @@ test('houseTotal: assignments + active coverage extras + pending terminations', 
     asg({ house: 'ramot', employmentType: 'full_time', salary: 18000 }),
   ];
   const absences = [abs({ id: 'ab1', house: 'ramot' })];
+  // cov() defaults to receivingHouse='ramot', active today.
   const coverages = [cov({ id: 'c1', absenceId: 'ab1', extraPayment: 1500 })];
   const archive = [arch({ house: 'ramot', salary: 6000, terminationDate: '2026-06-15' })];
   // 18000 + 1500 + 6000 = 25500
@@ -376,8 +455,11 @@ test('networkTotal: every assignment cost + every active coverage extra + pendin
     abs({ id: 'ab2', house: 'ofroni', endDate: '2026-04-01' }), // past
   ];
   const coverages = [
-    cov({ id: 'c1', absenceId: 'ab1', providingHouse: 'asher', extraPayment: 1500 }),
-    cov({ id: 'c2', absenceId: 'ab2', providingHouse: 'rehab', extraPayment: 9999 }), // dropped
+    // Active coverage at ramot — counts.
+    cov({ id: 'c1', absenceId: 'ab1', coveringHouse: 'asher', receivingHouse: 'ramot', extraPayment: 1500 }),
+    // Past coverage at ofroni — dropped on its OWN dates, not on its linked absence.
+    cov({ id: 'c2', absenceId: 'ab2', coveringHouse: 'rehab', receivingHouse: 'ofroni',
+      startDate: '2026-03-01', endDate: '2026-04-01', extraPayment: 9999 }),
   ];
   const archive = [
     arch({ house: 'ramot', employmentType: 'full_time', salary: 8000, terminationDate: '2026-06-15' }),
@@ -393,6 +475,7 @@ test('networkTotal equals sum of houseTotal across all houses', () => {
     asg({ house: 'ofroni', employmentType: 'hourly', hourlyRate: 80, estHours: 120, salary: 0 }), // 9600
   ];
   const absences = [abs({ id: 'ab1', house: 'ramot' })];
+  // Default cov() factory has receivingHouse='ramot', active today.
   const coverages = [cov({ id: 'c1', absenceId: 'ab1', extraPayment: 1200 })];
   const archive = [arch({ house: 'asher', salary: 5000, terminationDate: '2026-06-15' })];
   const net = networkTotal(assignments, coverages, absences, archive, HOUSES, TODAY);

@@ -32,12 +32,16 @@
      needing coverage" in the UI). status is derived from dates on
      read; stored value is a hint and gets lazily corrected.
 
-   coverages tab:
-     id | absence_id | covering_worker_id | providing_house |
-     extra_payment | notes | created_at
-     extra_payment accrues to the absence.house (= house needing
-     coverage). A coverage's effective date range is its parent
-     absence's range.
+   coverages tab (v3.1 — independent events):
+     id | absence_id | covering_worker_id | covering_house |
+     receiving_house | start_date | end_date | extra_payment |
+     notes | created_at
+     covering_house = where the helper is based (cost of their own
+     assignment continues to accrue there). receiving_house = where the
+     help is going (extra_payment accrues here). absence_id is OPTIONAL —
+     a coverage may be logged without a linked absence; if set, it's a
+     reference, not a parent pointer. A coverage's effective date range
+     is its own start_date..end_date, independent of any linked absence.
 
    archive_v3 tab:
      id | assignment_id | worker_id | name | house | role |
@@ -91,8 +95,14 @@ const HEADERS_ABSENCES = [
   'id', 'worker_id', 'house', 'start_date', 'end_date',
   'reason_type', 'reason_detail', 'notes', 'status', 'created_at',
 ];
+// v3.1 schema. The previous shape had `providing_house` and inherited
+// dates from the parent absence. migrateCoveragesToV3_1 rewrites the
+// existing tab in-place: providing_house → covering_house, plus new
+// receiving_house / start_date / end_date columns backfilled from the
+// linked absence.
 const HEADERS_COVERAGES = [
-  'id', 'absence_id', 'covering_worker_id', 'providing_house',
+  'id', 'absence_id', 'covering_worker_id',
+  'covering_house', 'receiving_house', 'start_date', 'end_date',
   'extra_payment', 'notes', 'created_at',
 ];
 const HEADERS_ARCHIVE_V3 = [
@@ -369,10 +379,10 @@ function validateAssignment(a) {
   };
 }
 
+// v3.1: workerId is optional (stub rows). Mirror of lib/validate.js.
 function validateAbsence(a) {
   if (!a || typeof a !== 'object') throw httpError(400, 'absence required');
-  const workerId = String(a.workerId || '').trim();
-  if (!workerId) throw httpError(400, 'workerId required');
+  const workerId = String(a.workerId || '').trim();  // '' allowed → stub
   if (!isHouse(a.house)) throw httpError(400, 'unknown house');
   const startDate = validateRequiredDate(a.startDate, 'startDate');
   const endDate = validateRequiredDate(a.endDate, 'endDate');
@@ -388,18 +398,33 @@ function validateAbsence(a) {
   };
 }
 
+// v3.1: coverage is now independent of any parent absence.
+//   - coveringHouse (was providingHouse): where the helper is based.
+//   - receivingHouse (NEW): where the help is going.
+//   - startDate/endDate are the coverage's own range, not the absence's.
+//   - absenceId is optional. When set, it's a reference; the server adds
+//     an extra FK consistency check in addCoverage.
+// Mirror of lib/validate.js.
 function validateCoverage(c) {
   if (!c || typeof c !== 'object') throw httpError(400, 'coverage required');
-  const absenceId = String(c.absenceId || '').trim();
-  if (!absenceId) throw httpError(400, 'absenceId required');
+  const absenceId = String(c.absenceId || '').trim();  // '' allowed → unlinked
   const coveringWorkerId = String(c.coveringWorkerId || '').trim();
   if (!coveringWorkerId) throw httpError(400, 'coveringWorkerId required');
-  if (!isHouse(c.providingHouse)) throw httpError(400, 'unknown providingHouse');
+  if (!isHouse(c.coveringHouse)) throw httpError(400, 'unknown coveringHouse');
+  if (!isHouse(c.receivingHouse)) throw httpError(400, 'unknown receivingHouse');
+  if (c.coveringHouse === c.receivingHouse) {
+    throw httpError(400, 'receivingHouse must differ from coveringHouse');
+  }
+  const startDate = validateRequiredDate(c.startDate, 'startDate');
+  const endDate = validateRequiredDate(c.endDate, 'endDate');
+  if (endDate < startDate) throw httpError(400, 'endDate before startDate');
   const extraPayment = clampMoney(c.extraPayment, EXTRA_PAYMENT_MAX);
   const notes = String(c.notes || '').trim().slice(0, 500);
   return {
     absenceId: absenceId, coveringWorkerId: coveringWorkerId,
-    providingHouse: c.providingHouse, extraPayment: extraPayment, notes: notes,
+    coveringHouse: c.coveringHouse, receivingHouse: c.receivingHouse,
+    startDate: startDate, endDate: endDate,
+    extraPayment: extraPayment, notes: notes,
   };
 }
 
@@ -504,10 +529,13 @@ function readCoveragesSafe() {
       id: String(r[0]),
       absenceId: String(r[1] || ''),
       coveringWorkerId: String(r[2] || ''),
-      providingHouse: String(r[3] || ''),
-      extraPayment: Number(r[4]) || 0,
-      notes: String(r[5] || ''),
-      createdAt: cellToIso(r[6]),
+      coveringHouse: String(r[3] || ''),
+      receivingHouse: String(r[4] || ''),
+      startDate: formatDateCell(r[5]),
+      endDate: formatDateCell(r[6]),
+      extraPayment: Number(r[7]) || 0,
+      notes: String(r[8] || ''),
+      createdAt: cellToIso(r[9]),
     };
   });
 }
@@ -844,19 +872,34 @@ function logAbsence(body) {
   const lock = LockService.getScriptLock();
   lock.waitLock(15000);
   try {
-    // Confirm worker exists.
-    if (findRow(sheetByName(WORKERS_TAB), 0, a.workerId) < 0) {
-      throw httpError(404, 'worker not found');
+    // Stub absence (workerId='') skips the worker FK and overlap checks
+    // entirely — multiple stubs at the same house can legitimately
+    // co-exist (one unfilled position per stub).
+    if (a.workerId) {
+      // Worker exists.
+      if (findRow(sheetByName(WORKERS_TAB), 0, a.workerId) < 0) {
+        throw httpError(404, 'worker not found');
+      }
+      // v3.1: the absent worker must have an active assignment at this
+      // house. Active = present in the assignments tab (terminated rows
+      // live in archive_v3). Hebrew error so the UI can surface it to
+      // Moran verbatim.
+      const hasAsg = readAssignmentsSafe().some(function (x) {
+        return x.workerId === a.workerId && x.house === a.house;
+      });
+      if (!hasAsg) {
+        throw httpError(409, 'העובד/ת אינו/ה משובץ/ת בבית הנבחר');
+      }
+      // Reject overlapping active absences for the same (worker, house).
+      const existing = readAbsencesSafe();
+      const conflict = existing.find(function (x) {
+        return x.workerId === a.workerId &&
+          x.house === a.house &&
+          x.status === 'active' &&
+          datesOverlap(x.startDate, x.endDate, a.startDate, a.endDate);
+      });
+      if (conflict) throw httpError(409, 'worker already has an absence in this range');
     }
-    // Reject overlapping active absences for the same (worker, house).
-    const existing = readAbsencesSafe();
-    const conflict = existing.find(function (x) {
-      return x.workerId === a.workerId &&
-        x.house === a.house &&
-        x.status === 'active' &&
-        datesOverlap(x.startDate, x.endDate, a.startDate, a.endDate);
-    });
-    if (conflict) throw httpError(409, 'worker already has an absence in this range');
 
     const today = todayLocal();
     const status = active(a.startDate, a.endDate, today) ? 'active' : 'ended';
@@ -896,10 +939,12 @@ function deleteAbsence(body) {
   const lock = LockService.getScriptLock();
   lock.waitLock(15000);
   try {
-    // Refuse if any coverage references this absence — must delete
-    // coverages first.
-    const hasCoverages = readCoveragesSafe().some(function (c) { return c.absenceId === id; });
-    if (hasCoverages) throw httpError(409, 'absence has coverage records');
+    // v3.1: coverages are independent of absences. Deleting an absence
+    // does NOT cascade to coverages, and is NOT blocked by linked
+    // coverages — the FK is reference-only. Any coverage with absenceId
+    // pointing at this row simply becomes an unlinked coverage; its
+    // dates + receivingHouse are intact, so cost attribution is
+    // unaffected.
     const sh = sheetByName(ABSENCES_TAB);
     const row = findRow(sh, 0, id);
     if (row < 0) throw httpError(404, 'absence not found');
@@ -917,18 +962,41 @@ function addCoverage(body) {
   const lock = LockService.getScriptLock();
   lock.waitLock(15000);
   try {
-    // Parent absence must exist.
-    if (findRow(sheetByName(ABSENCES_TAB), 0, c.absenceId) < 0) {
-      throw httpError(404, 'absence not found');
-    }
-    // Covering worker must exist.
+    // Covering worker must exist and have an active assignment at the
+    // coveringHouse (mirror of the absence rule on logAbsence).
     if (findRow(sheetByName(WORKERS_TAB), 0, c.coveringWorkerId) < 0) {
       throw httpError(404, 'covering worker not found');
     }
+    const hasAsg = readAssignmentsSafe().some(function (x) {
+      return x.workerId === c.coveringWorkerId && x.house === c.coveringHouse;
+    });
+    if (!hasAsg) {
+      throw httpError(409, 'המחליף/ה אינו/ה משובץ/ת בבית המקור הנבחר');
+    }
+    // v3.1: linked absence is optional. When set, enforce two consistency
+    // rules so the link is meaningful:
+    //   (1) the absence's house must match this coverage's receivingHouse
+    //       — you can't link a coverage that's helping house X to an
+    //       absence that says someone is missing FROM house Y.
+    //   (2) the coverage's date range must overlap the absence's range.
+    if (c.absenceId) {
+      const absences = readAbsencesSafe();
+      const abs = absences.find(function (x) { return x.id === c.absenceId; });
+      if (!abs) throw httpError(404, 'absence not found');
+      if (abs.house !== c.receivingHouse) {
+        throw httpError(409, 'הבית של ההיעדרות המקושרת אינו תואם את בית היעד של ההחלפה');
+      }
+      if (!datesOverlap(abs.startDate, abs.endDate, c.startDate, c.endDate)) {
+        throw httpError(409, 'תאריכי ההחלפה אינם חופפים את תאריכי ההיעדרות שנבחרה');
+      }
+    }
+
     const id = newId('c');
     const createdAt = new Date().toISOString();
     sheetByName(COVERAGES_TAB).appendRow([
-      id, c.absenceId, c.coveringWorkerId, c.providingHouse,
+      id, c.absenceId, c.coveringWorkerId,
+      c.coveringHouse, c.receivingHouse,
+      c.startDate, c.endDate,
       c.extraPayment, c.notes, createdAt,
     ]);
     return { ok: true, coverage: Object.assign({ id: id, createdAt: createdAt }, c) };
@@ -1024,19 +1092,26 @@ function mapLegacyEventToAbsenceCoverage_(ev) {
     ? ev.reasonType : 'אחר';
   const hasAbsentee = !!String(ev.coversEmployeeId || '').trim();
   const status = String(ev.status) === 'active' ? 'active' : 'ended';
+  const startDate = String(ev.startDate || '');
+  const endDate = String(ev.endDate || '');
+  const hostHouse = String(ev.hostHouse || '');
   return {
     absence: {
       workerId: hasAbsentee ? String(ev.coversEmployeeId) : '',
-      house: String(ev.hostHouse || ''),
-      startDate: String(ev.startDate || ''), endDate: String(ev.endDate || ''),
+      house: hostHouse,
+      startDate: startDate, endDate: endDate,
       reasonType: reasonType, reasonDetail: String(ev.reasonDetail || ''),
       notes: hasAbsentee ? '' : MIGRATION_NOTE_NO_ABSENTEE,
       status: status,
     },
+    // v3.1 coverage shape: carries its own dates + houses, independent
+    // of the linked absence.
     coverage: {
       absenceId: '',
       coveringWorkerId: String(ev.employeeId || ''),
-      providingHouse: String(ev.homeHouse || ''),
+      coveringHouse: String(ev.homeHouse || ''),
+      receivingHouse: hostHouse,
+      startDate: startDate, endDate: endDate,
       extraPayment: Math.max(0, Math.round(Number(ev.bonusAmount) || 0)),
       notes: MIGRATION_NOTE_COVERAGE,
     },
@@ -1171,7 +1246,8 @@ function migrateToV3() {
     });
 
     // Absences + paired coverages. Write absence first, capture its id,
-    // then write the coverage with absence_id filled in.
+    // then write the coverage with absence_id filled in. v3.1 coverage
+    // shape: carries its own dates + houses (covering vs receiving).
     const absh = sheetByName(ABSENCES_TAB);
     const csh = sheetByName(COVERAGES_TAB);
     built.absencePairs.forEach(function (pair) {
@@ -1185,8 +1261,9 @@ function migrateToV3() {
       const covId = newId('c');
       csh.appendRow([
         covId, absId, pair.coverage.coveringWorkerId,
-        pair.coverage.providingHouse, pair.coverage.extraPayment,
-        pair.coverage.notes, now,
+        pair.coverage.coveringHouse, pair.coverage.receivingHouse,
+        pair.coverage.startDate, pair.coverage.endDate,
+        pair.coverage.extraPayment, pair.coverage.notes, now,
       ]);
     });
 
@@ -1230,8 +1307,109 @@ function rollbackV3() {
         const sh = book.getSheetByName(n);
         if (sh) book.deleteSheet(sh);
       });
-    PropertiesService.getScriptProperties().deleteProperty('V3_MIGRATION_DONE');
-    return 'rollbackV3 ok — v3 tabs deleted, flag cleared, legacy tabs intact';
+    const p = PropertiesService.getScriptProperties();
+    p.deleteProperty('V3_MIGRATION_DONE');
+    p.deleteProperty('V3_1_MIGRATION_DONE');
+    return 'rollbackV3 ok — v3 tabs deleted, flags cleared, legacy tabs intact';
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// v3.1 schema patch. In-place ALTER of the coverages tab: the column
+// formerly known as `providing_house` becomes `covering_house`, and three
+// new columns are added — `receiving_house`, `start_date`, `end_date`.
+// Existing rows are backfilled from the linked absence: receiving_house
+// gets the absence's house; start_date/end_date get the absence's date
+// range. Coverages without a linked absence (orphans / migration stubs)
+// get receiving_house='' and inherit no dates — cost accrues nowhere for
+// those until Moran fills them in via the UI.
+//
+// Idempotent. Sets V3_1_MIGRATION_DONE script property; subsequent runs
+// are no-ops. Pre-flight refuses if V3_MIGRATION_DONE is not yet set —
+// the v3.0 schema must exist before this patch can apply.
+//
+// Pre-production: this is an in-place patch, not a separate v3.1
+// install. There is no rollback path; if you need to revert, restore
+// the Sheet from the manual copy taken before migration.
+function migrateCoveragesToV3_1() {
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty('V3_1_MIGRATION_DONE') === 'true') {
+    return 'migrateCoveragesToV3_1: already done (V3_1_MIGRATION_DONE set) — no-op';
+  }
+  if (props.getProperty('V3_MIGRATION_DONE') !== 'true') {
+    throw httpError(409,
+      'migrateToV3 has not been run — the v3.0 schema must exist before the v3.1 patch can apply');
+  }
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(60000);
+  try {
+    const sh = sheetByName(COVERAGES_TAB);
+    const values = sh.getDataRange().getValues();
+    if (values.length < 1) {
+      // Empty tab — just rewrite the header row to the v3.1 shape and
+      // mark done.
+      sh.clear();
+      sh.getRange(1, 1, 1, HEADERS_COVERAGES.length).setValues([HEADERS_COVERAGES]);
+      sh.setFrozenRows(1);
+      props.setProperty('V3_1_MIGRATION_DONE', 'true');
+      return 'migrateCoveragesToV3_1 ok: 0 rows migrated';
+    }
+
+    // Build absence-id → absence lookup for backfilling receiving_house
+    // and dates.
+    const absences = readAbsencesSafe();
+    const absById = Object.create(null);
+    absences.forEach(function (a) { absById[a.id] = a; });
+
+    // Read existing rows in the OLD layout:
+    //   [id, absence_id, covering_worker_id, providing_house,
+    //    extra_payment, notes, created_at]
+    const oldRows = values.slice(1).filter(function (r) {
+      return String(r[0] || '').trim() !== '';
+    });
+    const newRows = oldRows.map(function (r) {
+      const id = String(r[0]);
+      const absenceId = String(r[1] || '');
+      const coveringWorkerId = String(r[2] || '');
+      const coveringHouse = String(r[3] || '');  // was providing_house
+      const extraPayment = Number(r[4]) || 0;
+      const notes = String(r[5] || '');
+      const createdAt = r[6];
+
+      // Backfill receivingHouse + dates from the linked absence when it
+      // exists. Orphans (no linked absence, or pointing to a deleted
+      // absence) get receivingHouse='' + empty dates.
+      const abs = absById[absenceId];
+      const receivingHouse = abs ? abs.house : '';
+      const startDate = abs ? abs.startDate : '';
+      const endDate = abs ? abs.endDate : '';
+
+      // v3.1 layout:
+      //   [id, absence_id, covering_worker_id, covering_house,
+      //    receiving_house, start_date, end_date,
+      //    extra_payment, notes, created_at]
+      return [
+        id, absenceId, coveringWorkerId,
+        coveringHouse, receivingHouse, startDate, endDate,
+        extraPayment, notes, createdAt,
+      ];
+    });
+
+    // Rewrite the tab: clear + write headers + write data. setValues is
+    // atomic within the LockService lock; no partial-write window.
+    sh.clear();
+    sh.getRange(1, 1, 1, HEADERS_COVERAGES.length).setValues([HEADERS_COVERAGES]);
+    sh.setFrozenRows(1);
+    if (newRows.length) {
+      sh.getRange(2, 1, newRows.length, HEADERS_COVERAGES.length).setValues(newRows);
+    }
+
+    props.setProperty('V3_1_MIGRATION_DONE', 'true');
+    const summary = 'migrateCoveragesToV3_1 ok: ' + newRows.length + ' rows migrated';
+    Logger.log(summary);
+    return summary;
   } finally {
     lock.releaseLock();
   }

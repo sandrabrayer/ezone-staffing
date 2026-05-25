@@ -131,17 +131,22 @@ test('mapLegacyEventToAbsenceCoverage: with covers_employee_id', () => {
   assert.equal(absence.reasonDetail, 'חופשה שנתית');
   assert.equal(absence.notes, '');   // not a stub — real absentee
   assert.equal(absence.status, 'active');
-  // Coverage: e1 from ramot is helping.
+  // Coverage: e1 from ramot is helping asher. v3.1 shape — coveringHouse,
+  // receivingHouse, dates, all first-class.
   assert.equal(coverage.coveringWorkerId, 'e1');
-  assert.equal(coverage.providingHouse, 'ramot');
+  assert.equal(coverage.coveringHouse, 'ramot');
+  assert.equal(coverage.receivingHouse, 'asher');
+  assert.equal(coverage.startDate, '2026-05-01');
+  assert.equal(coverage.endDate, '2026-05-15');
   assert.equal(coverage.extraPayment, 2000);
   assert.equal(coverage.notes, MIGRATION_NOTE_COVERAGE);
   assert.equal(coverage.absenceId, ''); // filled by writer
 });
 
 test('mapLegacyEventToAbsenceCoverage: without covers_employee_id → stub absence', () => {
-  // Legacy event that didn't record who was being covered for. We still
-  // create the absence so the coverage FK stays valid, but mark it.
+  // Legacy event that didn't record who was being covered for. The
+  // coverage still carries receivingHouse + dates directly (v3.1), so
+  // it remains valid on its own even without the FK pairing.
   const ev = {
     id: 'ev2', employeeId: 'e1',
     homeHouse: 'ramot', hostHouse: 'asher',
@@ -155,9 +160,13 @@ test('mapLegacyEventToAbsenceCoverage: without covers_employee_id → stub absen
   assert.equal(absence.house, 'asher');
   assert.equal(absence.notes, MIGRATION_NOTE_NO_ABSENTEE);
   assert.equal(absence.status, 'ended');
-  // Coverage still carries the extra_payment cost record.
+  // Coverage carries the extra_payment cost record + the receivingHouse
+  // / dates needed to attribute it.
   assert.equal(coverage.coveringWorkerId, 'e1');
-  assert.equal(coverage.providingHouse, 'ramot');
+  assert.equal(coverage.coveringHouse, 'ramot');
+  assert.equal(coverage.receivingHouse, 'asher');
+  assert.equal(coverage.startDate, '2026-05-01');
+  assert.equal(coverage.endDate, '2026-05-15');
   assert.equal(coverage.extraPayment, 1500);
 });
 

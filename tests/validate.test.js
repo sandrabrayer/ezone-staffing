@@ -344,17 +344,32 @@ test('validateAbsence: accepts new אישי reason', () => {
 });
 
 test('validateAbsence: rejects bad fields', () => {
+  // workerId is intentionally NOT in this list — v3.1 allows '' for stub
+  // absences (unfilled position, no identified absentee). Covered by the
+  // dedicated "accepts empty workerId" test below.
   const base = {
     workerId: 'w1', house: 'ramot',
     startDate: '2026-05-20', endDate: '2026-05-30',
     reasonType: 'מחלה',
   };
-  assert.throws(() => validateAbsence({ ...base, workerId: '' }), /workerId required/);
   assert.throws(() => validateAbsence({ ...base, house: 'bogus' }), /unknown house/);
   assert.throws(() => validateAbsence({ ...base, reasonType: 'אקראי' }), /bad reasonType/);
   assert.throws(() => validateAbsence({ ...base, startDate: '20/5/26' }), /bad startDate/);
   assert.throws(() => validateAbsence({ ...base, endDate: '' }), /missing endDate/);
   assert.throws(() => validateAbsence({ ...base, endDate: '2026-05-10' }), /endDate before startDate/);
+});
+
+test('validateAbsence: accepts empty workerId (stub absence)', () => {
+  // v3.1: an absence row with workerId='' is a stub — known unfilled
+  // position, no identified absentee. Migration from v2 events without
+  // covers_employee_id produces these; Moran can also create them
+  // explicitly in the UI when the unfilled position is what matters.
+  const a = validateAbsence({
+    workerId: '', house: 'ramot',
+    startDate: '2026-05-20', endDate: '2026-05-30',
+    reasonType: 'מחלה',
+  });
+  assert.equal(a.workerId, '');
 });
 
 test('validateAbsence: caps long free text', () => {
@@ -369,44 +384,62 @@ test('validateAbsence: caps long free text', () => {
 
 // ---------- validateCoverage ----------
 
+const COV_BASE = {
+  absenceId: 'ab1', coveringWorkerId: 'w2',
+  coveringHouse: 'asher', receivingHouse: 'ramot',
+  startDate: '2026-05-20', endDate: '2026-05-25',
+};
+
 test('validateCoverage: happy path', () => {
   const c = validateCoverage({
-    absenceId: 'ab1', coveringWorkerId: 'w2',
-    providingHouse: 'asher', extraPayment: 1500, notes: 'עזר במשמרת',
+    ...COV_BASE, extraPayment: 1500, notes: 'עזר במשמרת',
   });
   assert.equal(c.absenceId, 'ab1');
   assert.equal(c.coveringWorkerId, 'w2');
-  assert.equal(c.providingHouse, 'asher');
+  assert.equal(c.coveringHouse, 'asher');
+  assert.equal(c.receivingHouse, 'ramot');
+  assert.equal(c.startDate, '2026-05-20');
+  assert.equal(c.endDate, '2026-05-25');
   assert.equal(c.extraPayment, 1500);
   assert.equal(c.notes, 'עזר במשמרת');
 });
 
+test('validateCoverage: accepts empty absenceId (unlinked coverage)', () => {
+  // v3.1: a coverage may be logged without a linked absence (ad-hoc
+  // coverage not tied to a recorded absentee). absenceId remains in the
+  // returned object so the server can persist whatever empty string the
+  // client sent.
+  const c = validateCoverage({ ...COV_BASE, absenceId: '' });
+  assert.equal(c.absenceId, '');
+});
+
 test('validateCoverage: rejects bad fields', () => {
-  const base = { absenceId: 'ab1', coveringWorkerId: 'w2', providingHouse: 'asher' };
-  assert.throws(() => validateCoverage({ ...base, absenceId: '' }), /absenceId required/);
-  assert.throws(() => validateCoverage({ ...base, coveringWorkerId: '' }), /coveringWorkerId required/);
-  assert.throws(() => validateCoverage({ ...base, providingHouse: 'bogus' }), /unknown providingHouse/);
+  assert.throws(() => validateCoverage({ ...COV_BASE, coveringWorkerId: '' }), /coveringWorkerId required/);
+  assert.throws(() => validateCoverage({ ...COV_BASE, coveringHouse: 'bogus' }), /unknown coveringHouse/);
+  assert.throws(() => validateCoverage({ ...COV_BASE, receivingHouse: 'bogus' }), /unknown receivingHouse/);
+  assert.throws(() => validateCoverage({ ...COV_BASE, startDate: '20/5/26' }), /bad startDate/);
+  assert.throws(() => validateCoverage({ ...COV_BASE, endDate: '' }), /missing endDate/);
+  assert.throws(() => validateCoverage({ ...COV_BASE, endDate: '2026-05-10' }), /endDate before startDate/);
+});
+
+test('validateCoverage: rejects receivingHouse === coveringHouse', () => {
+  // The whole point of a coverage is that one house is helping another;
+  // covering=receiving is meaningless and almost certainly a UI bug.
+  assert.throws(() => validateCoverage({
+    ...COV_BASE, coveringHouse: 'ramot', receivingHouse: 'ramot',
+  }), /receivingHouse must differ from coveringHouse/);
 });
 
 test('validateCoverage: clamps extraPayment', () => {
-  const c = validateCoverage({
-    absenceId: 'ab1', coveringWorkerId: 'w2',
-    providingHouse: 'asher', extraPayment: EXTRA_PAYMENT_MAX * 5,
-  });
+  const c = validateCoverage({ ...COV_BASE, extraPayment: EXTRA_PAYMENT_MAX * 5 });
   assert.equal(c.extraPayment, EXTRA_PAYMENT_MAX);
 
-  const c2 = validateCoverage({
-    absenceId: 'ab1', coveringWorkerId: 'w2',
-    providingHouse: 'asher', extraPayment: -500,
-  });
+  const c2 = validateCoverage({ ...COV_BASE, extraPayment: -500 });
   assert.equal(c2.extraPayment, 0);
 });
 
 test('validateCoverage: caps long notes', () => {
-  const c = validateCoverage({
-    absenceId: 'ab1', coveringWorkerId: 'w2',
-    providingHouse: 'asher', notes: 'x'.repeat(800),
-  });
+  const c = validateCoverage({ ...COV_BASE, notes: 'x'.repeat(800) });
   assert.equal(c.notes.length, 500);
 });
 
@@ -510,11 +543,15 @@ test('validateAction: addCoverage', () => {
     action: 'addCoverage',
     coverage: {
       absenceId: 'ab1', coveringWorkerId: 'w2',
-      providingHouse: 'asher', extraPayment: 1200,
+      coveringHouse: 'asher', receivingHouse: 'ramot',
+      startDate: '2026-05-20', endDate: '2026-05-25',
+      extraPayment: 1200,
     },
   });
   assert.equal(p.action, 'addCoverage');
   assert.equal(p.coverage.absenceId, 'ab1');
+  assert.equal(p.coverage.coveringHouse, 'asher');
+  assert.equal(p.coverage.receivingHouse, 'ramot');
 });
 
 test('validateAction: legacy v2 actions are no longer recognized', () => {
