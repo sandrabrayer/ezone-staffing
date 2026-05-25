@@ -380,7 +380,14 @@ test('tampered token is rejected', async () => {
   const { srv, base } = await listen();
   try {
     const token = await login(base);
-    const tampered = token.slice(0, -2) + 'aa';
+    // Deterministically mutate the last char to a guaranteed-different
+    // value. The previous "+ 'aa'" trick was a no-op when the token's
+    // real last two chars were already 'aa' (~1/65536 of the time),
+    // flaking the test. Picking 'a' or 'b' based on the existing char
+    // can never produce the original.
+    const last = token.slice(-1);
+    const tampered = token.slice(0, -1) + (last === 'a' ? 'b' : 'a');
+    assert.notEqual(tampered, token, 'tamper must actually change the token');
     const r = await req(base, '/api/data', {
       headers: { 'Authorization': 'Bearer ' + tampered },
     });
