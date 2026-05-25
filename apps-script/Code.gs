@@ -131,6 +131,24 @@ const EMPLOYMENT_TYPES = [
   'full_time', 'part_time', 'hourly', 'per_session', 'fixed_retainer',
 ];
 
+// Mirror of TYPE_COST_FIELDS / ALL_COST_FIELDS in lib/validate.js.
+// Defense in depth: the Express proxy validates first, but Apps Script
+// re-validates so the Sheet can never be written to with an inconsistent
+// (type, cost-fields) combo even if someone calls /exec directly.
+const TYPE_COST_FIELDS = {
+  full_time:      ['salary'],
+  part_time:      ['salary', 'pct'],
+  hourly:         ['hourlyRate', 'estHours'],
+  per_session:    ['sessionRate', 'estSessions'],
+  fixed_retainer: ['retainerAmount'],
+};
+const ALL_COST_FIELDS = [
+  'salary', 'pct',
+  'hourlyRate', 'estHours',
+  'sessionRate', 'estSessions',
+  'retainerAmount',
+];
+
 // Per-field caps — must mirror lib/validate.js.
 const SALARY_MAX = 1000000;
 const HOURLY_RATE_MAX = 1000;
@@ -293,6 +311,21 @@ function validateAssignment(a) {
   const employmentType = String(a.employmentType || '').trim();
   if (!isEmploymentType(employmentType)) throw httpError(400, 'bad employmentType');
   const notes = String(a.notes || '').trim().slice(0, 500);
+
+  // Mirror of lib/validate.js: reject cost fields that don't belong to
+  // the chosen type. Checks the raw input — silently zeroing would mask
+  // the inconsistency rather than surface it.
+  const allowed = TYPE_COST_FIELDS[employmentType];
+  for (let i = 0; i < ALL_COST_FIELDS.length; i++) {
+    const f = ALL_COST_FIELDS[i];
+    if (allowed.indexOf(f) >= 0) continue;
+    const raw = a[f];
+    if (raw === undefined || raw === null || raw === '') continue;
+    const v = Number(raw);
+    if (isFinite(v) && v > 0) {
+      throw httpError(400, f + ' not allowed for employmentType=' + employmentType);
+    }
+  }
 
   let salary = 0, pct = 0, hourlyRate = 0, estHours = 0;
   let sessionRate = 0, estSessions = 0, retainerAmount = 0;

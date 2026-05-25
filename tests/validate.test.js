@@ -188,21 +188,84 @@ test('validateAssignment: fixed_retainer requires amount', () => {
   }), /retainerAmount required/);
 });
 
-test('validateAssignment: zeros out fields irrelevant to the chosen type', () => {
-  // UI may submit stale values from other type pickers. validateAssignment
-  // strips them — the stored row only carries the fields that matter.
-  const a = validateAssignment({
+test('validateAssignment: rejects positive cost fields not allowed by the chosen type', () => {
+  // The validator was previously permissive (silently zeroed foreign
+  // fields). v3 tightens it: any cost field outside the type's allowed
+  // set must be absent / null / '' / 0. A positive value is a 400.
+  // This catches inconsistent UIs and hostile clients that mix
+  // incompatible terms, e.g. type=full_time + hourlyRate=80.
+  const baseFT = {
     workerId: 'w1', house: 'ramot', role: 'אחות',
     employmentType: 'full_time', salary: 18000,
-    pct: 80, hourlyRate: 999, estHours: 100,
-    sessionRate: 500, estSessions: 10, retainerAmount: 9999,
-  });
-  assert.equal(a.pct, 0);
-  assert.equal(a.hourlyRate, 0);
-  assert.equal(a.estHours, 0);
-  assert.equal(a.sessionRate, 0);
-  assert.equal(a.estSessions, 0);
-  assert.equal(a.retainerAmount, 0);
+  };
+  assert.throws(() => validateAssignment({ ...baseFT, pct: 80 }),
+    /pct not allowed for employmentType=full_time/);
+  assert.throws(() => validateAssignment({ ...baseFT, hourlyRate: 80 }),
+    /hourlyRate not allowed for employmentType=full_time/);
+  assert.throws(() => validateAssignment({ ...baseFT, retainerAmount: 5000 }),
+    /retainerAmount not allowed for employmentType=full_time/);
+
+  const basePT = { ...baseFT, employmentType: 'part_time', pct: 80 };
+  assert.throws(() => validateAssignment({ ...basePT, hourlyRate: 80 }),
+    /hourlyRate not allowed for employmentType=part_time/);
+
+  const baseH = {
+    workerId: 'w1', house: 'ramot', role: 'אחות',
+    employmentType: 'hourly', hourlyRate: 80, estHours: 120,
+  };
+  assert.throws(() => validateAssignment({ ...baseH, salary: 18000 }),
+    /salary not allowed for employmentType=hourly/);
+  assert.throws(() => validateAssignment({ ...baseH, sessionRate: 200 }),
+    /sessionRate not allowed for employmentType=hourly/);
+
+  const baseS = {
+    workerId: 'w1', house: 'ramot', role: 'מטפל/ת', roleDetail: 'אמנות',
+    employmentType: 'per_session', sessionRate: 280, estSessions: 16,
+  };
+  assert.throws(() => validateAssignment({ ...baseS, salary: 5000 }),
+    /salary not allowed for employmentType=per_session/);
+  assert.throws(() => validateAssignment({ ...baseS, hourlyRate: 80 }),
+    /hourlyRate not allowed for employmentType=per_session/);
+  assert.throws(() => validateAssignment({ ...baseS, retainerAmount: 1000 }),
+    /retainerAmount not allowed for employmentType=per_session/);
+
+  const baseR = {
+    workerId: 'w1', house: 'ramot', role: 'פסיכיאטר/ית',
+    employmentType: 'fixed_retainer', retainerAmount: 8000,
+  };
+  assert.throws(() => validateAssignment({ ...baseR, salary: 5000 }),
+    /salary not allowed for employmentType=fixed_retainer/);
+  assert.throws(() => validateAssignment({ ...baseR, sessionRate: 200 }),
+    /sessionRate not allowed for employmentType=fixed_retainer/);
+});
+
+test('validateAssignment: 0 / null / undefined / "" for foreign fields is fine', () => {
+  // Migration mappers (lib/migrate.js) emit assignments with every
+  // non-applicable cost field set to 0. The strict guard must let
+  // those through — only positive values are rejected.
+  const passes = [
+    { hourlyRate: 0,          estHours: 0,         sessionRate: 0,         estSessions: 0,        retainerAmount: 0,         pct: 0 },
+    { hourlyRate: null,       estHours: undefined, sessionRate: '',        estSessions: 0,        retainerAmount: undefined, pct: null },
+    { /* no foreign fields at all */ },
+  ];
+  for (const extra of passes) {
+    const v = validateAssignment({
+      workerId: 'w1', house: 'ramot', role: 'אחות',
+      employmentType: 'full_time', salary: 18000,
+      ...extra,
+    });
+    assert.equal(v.employmentType, 'full_time');
+    assert.equal(v.salary, 18000);
+    // The validator still clears every non-relevant field on the way
+    // out — strictness is about REJECTING positives, not about
+    // accepting "weird-but-zero" through unchanged.
+    assert.equal(v.pct, 0);
+    assert.equal(v.hourlyRate, 0);
+    assert.equal(v.estHours, 0);
+    assert.equal(v.sessionRate, 0);
+    assert.equal(v.estSessions, 0);
+    assert.equal(v.retainerAmount, 0);
+  }
 });
 
 test('validateAssignment: bad employmentType / role / house', () => {

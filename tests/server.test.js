@@ -318,12 +318,20 @@ async function createWorker(base, token, name, notes) {
 }
 
 async function addAssignment(base, token, overrides) {
+  // Defaults are full_time-shaped. If the caller switches employmentType
+  // we drop the `salary` default — otherwise the strict validator would
+  // (correctly) reject `{employmentType: 'hourly', salary: 18000, ...}`
+  // as having a cost field foreign to the chosen type.
+  const defaults = {
+    workerId: '', house: 'ramot', role: 'אחות', roleDetail: '',
+    employmentType: 'full_time', salary: 18000,
+  };
+  if (overrides && overrides.employmentType && overrides.employmentType !== 'full_time') {
+    delete defaults.salary;
+  }
   const r = await post(base, token, {
     action: 'addAssignment',
-    assignment: Object.assign({
-      workerId: '', house: 'ramot', role: 'אחות', roleDetail: '',
-      employmentType: 'full_time', salary: 18000,
-    }, overrides),
+    assignment: Object.assign(defaults, overrides),
   });
   return r;
 }
@@ -583,6 +591,25 @@ test('addAssignment: role=אחר requires roleDetail', async () => {
       employmentType: 'full_time', salary: 10000,
     });
     assert.equal(r.status, 400);
+  } finally { await close(srv); }
+});
+
+test('addAssignment: rejects positive cost field incompatible with employment type (strict)', async () => {
+  // Defense in depth: the validator's per-type strict guard should
+  // surface as a 400 over HTTP without ever hitting the fake upstream.
+  // (Hostile / buggy clients can't smuggle e.g. hourlyRate into a
+  // full_time row.)
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    const workerId = await createWorker(base, token, 'X');
+    const r = await addAssignment(base, token, {
+      workerId, house: 'ramot', role: 'אחות',
+      employmentType: 'full_time', salary: 18000,
+      hourlyRate: 80,  // foreign to full_time → reject
+    });
+    assert.equal(r.status, 400);
+    assert.match(r.json.error, /hourlyRate not allowed/);
   } finally { await close(srv); }
 });
 

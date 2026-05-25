@@ -7,6 +7,7 @@ All notable changes to this project are documented here. Format inspired by [Kee
 > The full v3 entry will be written when v3 ships; this section is a running journal of v3-only changes that haven't been folded into a release entry yet.
 
 - **Houses expanded from 4 to 7.** Added `pardes` (איזון רעננה - פרדס), `sde_eliezer` (שדה אליעזר), and `hq` (מטה — a pseudo-house for HQ / admin staff who don't belong to a physical house). The validator (`lib/validate.js` and its mirror in `apps-script/Code.gs`) now accepts all seven codes. The v3 Sheet schema is unchanged — rosters live in the unified `assignments` table, so no per-house tabs were added. See `MIGRATION.md` "Houses" for the canonical id → Hebrew name table.
+- **Strict per-type assignment validation.** `validateAssignment` (both `lib/validate.js` and the Apps Script mirror) now **rejects** any cost field that doesn't belong to the chosen `employment_type` — e.g. `{employmentType: 'full_time', salary: 18000, hourlyRate: 80}` returns 400 with `hourlyRate not allowed for employmentType=full_time`. Previously such fields were silently zeroed out, which hid inconsistent UIs and let a hostile client smuggle stale data through. Zero / null / undefined / `""` for foreign fields is still accepted (so the migration mappers' outputs, which zero everything not relevant, still round-trip cleanly).
 
 ## [2.1.2] — 2026-05-22 — Archive on a dedicated page + Hebrew typo fix
 
