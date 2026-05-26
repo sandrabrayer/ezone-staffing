@@ -226,6 +226,136 @@ test('every view (incl. archive) is gated by the PIN — no token shows the PIN 
   assert.equal(errors.length, 0, errors.length ? JSON.stringify(errors) : '');
 });
 
+// ---------- dashboard join view ("היעדרויות פעילות ברשת") ----------
+// Pins: (1) the section renders one row per active absence; (2) linked
+// rows show the covering worker + the arrow; (3) orphan rows get the
+// .net-orphan class + the ⚠️ ללא מחליף badge; (4) sort puts orphans
+// before covered absences; (5) the stat sub-line carries the orphan
+// count.
+
+test('dashboard renders the "היעדרויות פעילות ברשת" join section', async () => {
+  const { dom, errors } = loadPage();
+  // Wide date range so isAbsenceActive(today) is true regardless of
+  // when the test runs over the next few months.
+  const wide = { startDate: '2026-05-01', endDate: '2026-07-31' };
+  await authAndBoot(dom, {
+    workers: [
+      { id: 'w1', name: 'עידו',  notes: '', createdAt: '' },
+      { id: 'w2', name: 'שחר',  notes: '', createdAt: '' },
+      { id: 'w3', name: 'דנה',  notes: '', createdAt: '' },
+    ],
+    // Assignments — give every worker a home so the FK rules in the UI's
+    // form filters wouldn't trip. The dashboard JOIN itself doesn't
+    // read assignments, but the fixture matches a realistic shape.
+    assignments: [
+      { id: 'a1', workerId: 'w1', house: 'ramot',  role: 'מטפל/ת', roleDetail: '', employmentType: 'full_time', salary: 1000, pct: 0, hourlyRate: 0, estHours: 0, sessionRate: 0, estSessions: 0, retainerAmount: 0, notes: '', createdAt: '' },
+      { id: 'a2', workerId: 'w2', house: 'asher',  role: 'מטפל/ת', roleDetail: '', employmentType: 'full_time', salary: 1000, pct: 0, hourlyRate: 0, estHours: 0, sessionRate: 0, estSessions: 0, retainerAmount: 0, notes: '', createdAt: '' },
+      { id: 'a3', workerId: 'w3', house: 'ofroni', role: 'מטפל/ת', roleDetail: '', employmentType: 'full_time', salary: 1000, pct: 0, hourlyRate: 0, estHours: 0, sessionRate: 0, estSessions: 0, retainerAmount: 0, notes: '', createdAt: '' },
+    ],
+    absences: [
+      // Covered: עידו absent at ramot, shahar covers
+      { id: 'ab1', workerId: 'w1', house: 'ramot',  ...wide, reasonType: 'חופשה', reasonDetail: '', notes: '', status: 'active', createdAt: '' },
+      // Orphan: דנה absent at ofroni, no coverage
+      { id: 'ab2', workerId: 'w3', house: 'ofroni', ...wide, reasonType: 'מחלה',  reasonDetail: '', notes: '', status: 'active', createdAt: '' },
+    ],
+    coverages: [
+      // shahar (asher) → ramot, linked to עידו's absence
+      { id: 'c1', absenceId: 'ab1', coveringWorkerId: 'w2', coveringHouse: 'asher', receivingHouse: 'ramot', ...wide, extraPayment: 1000, notes: '', createdAt: '' },
+    ],
+  });
+
+  const doc = dom.window.document;
+
+  // Section heading appears
+  const sectionHeads = [...doc.querySelectorAll('.section-head h2')].map(el => el.textContent);
+  assert.ok(sectionHeads.some(t => /היעדרויות פעילות ברשת/.test(t)),
+    'expected the "היעדרויות פעילות ברשת" section heading on the dashboard');
+
+  // Exactly 2 rows
+  const rows = [...doc.querySelectorAll('.net-absence-row')];
+  assert.equal(rows.length, 2, 'one row per active absence');
+
+  // Sort: orphan (ab2, דנה) first, then covered (ab1, עידו)
+  assert.ok(rows[0].classList.contains('net-orphan'),
+    'orphan absence should sort first');
+  assert.ok(/דנה/.test(rows[0].textContent), 'first row should be דנה (orphan)');
+  assert.ok(/⚠️ ללא מחליף/.test(rows[0].textContent),
+    'orphan row should show the "ללא מחליף" badge');
+
+  // Second row: covered → arrow + covering worker name + source house
+  assert.ok(!rows[1].classList.contains('net-orphan'));
+  assert.ok(/עידו/.test(rows[1].textContent), 'second row should be עידו (covered)');
+  assert.ok(/מחליפה:/.test(rows[1].textContent),
+    'covered row should include the מחליפה: prefix');
+  assert.ok(/שחר/.test(rows[1].textContent),
+    'covered row should name the covering worker');
+  assert.ok(rows[1].querySelector('.net-arrow'),
+    'covered row should render the arrow span');
+
+  // Stat sub-line shows orphan count
+  const absStatLabel = [...doc.querySelectorAll('.stat .lbl')]
+    .find(el => /נעדרים פעילים היום/.test(el.textContent));
+  assert.ok(absStatLabel, 'expected the "נעדרים פעילים היום" stat card');
+  const sub = absStatLabel.parentElement.querySelector('.sub');
+  assert.ok(/2 פעילות/.test(sub.textContent),
+    'stat sub-line should report total active count');
+  assert.ok(/1 ללא מחליף/.test(sub.textContent),
+    'stat sub-line should report the 1 orphan');
+
+  dom.window.close();
+  assert.equal(errors.length, 0, errors.length ? JSON.stringify(errors) : '');
+});
+
+test('dashboard join: empty state renders cleanly when no active absences', async () => {
+  const { dom, errors } = loadPage();
+  await authAndBoot(dom, {});  // all v3 tables empty
+
+  const doc = dom.window.document;
+  // The new section still renders, but with the empty-state text.
+  assert.ok(
+    [...doc.querySelectorAll('.section-head h2')]
+      .some(el => /היעדרויות פעילות ברשת/.test(el.textContent)),
+    'section heading is always present on the dashboard',
+  );
+  // No rows; the .empty placeholder takes over.
+  assert.equal(doc.querySelectorAll('.net-absence-row').length, 0);
+  const empty = [...doc.querySelectorAll('.empty')]
+    .find(el => /אין היעדרויות פעילות ברשת/.test(el.textContent));
+  assert.ok(empty, 'expected the documented empty-state copy');
+
+  // Sub-line drops the "X ללא מחליף" suffix when orphanCount=0
+  const sub = [...doc.querySelectorAll('.stat .lbl')]
+    .find(el => /נעדרים פעילים היום/.test(el.textContent))
+    .parentElement.querySelector('.sub');
+  assert.ok(/0 פעילות/.test(sub.textContent));
+  assert.ok(!/ללא מחליף/.test(sub.textContent),
+    'sub-line omits the orphan-count piece when 0');
+
+  dom.window.close();
+  assert.equal(errors.length, 0, errors.length ? JSON.stringify(errors) : '');
+});
+
+// Stub absences (workerId='') are a v3.1 first-class shape — "position
+// open, no identified absentee". The dashboard surfaces them with a
+// placeholder name so Moran sees the open slot.
+test('dashboard join: stub absence renders with "(ללא רישום נעדר/ת)" placeholder', async () => {
+  const { dom, errors } = loadPage();
+  await authAndBoot(dom, {
+    absences: [{
+      id: 'abStub', workerId: '', house: 'ramot',
+      startDate: '2026-05-01', endDate: '2026-07-31',
+      reasonType: 'מחלה', reasonDetail: '', notes: '',
+      status: 'active', createdAt: '',
+    }],
+  });
+  const doc = dom.window.document;
+  const stub = doc.querySelector('.net-absence-row .net-stub-name');
+  assert.ok(stub && /ללא רישום נעדר\/ת/.test(stub.textContent),
+    'stub absence should render the placeholder name in .net-stub-name');
+  dom.window.close();
+  assert.equal(errors.length, 0, errors.length ? JSON.stringify(errors) : '');
+});
+
 test('static audit: no calc.js global is destructured without an alias in the inline script', () => {
   // Belt-and-suspenders catch: this fires even if jsdom can't reproduce the
   // V8 early-error for some future browser-specific reason. A future

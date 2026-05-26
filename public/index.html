@@ -490,6 +490,48 @@ tbody tr:hover{
 .section-note{font-size:12px;color:var(--muted);margin-top:10px;line-height:1.5}
 .cover-meta{font-size:11px;color:var(--ink-soft);margin-right:6px;font-weight:600}
 
+/* Dashboard join rows (היעדרויות פעילות ברשת). One row per active
+   absence, with optional matching coverage. Read-only — no row actions
+   live here. Orphan variant gets the same red-dashed treatment as the
+   per-house "ללא מחליף" prompt so the visual signal is consistent. */
+.net-absence-row{
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:6px 10px;
+  padding:14px 18px;
+  border-bottom:1px solid var(--line);
+  font-size:13px;
+  color:var(--ink);
+}
+.net-absence-row:last-child{border-bottom:none}
+.net-absence-row .net-name{font-weight:600;color:var(--ink)}
+.net-absence-row .net-house{color:var(--muted);font-size:12px}
+.net-absence-row .net-sep{color:var(--muted)}
+.net-absence-row .net-reason{color:var(--ink-soft)}
+.net-absence-row .net-arrow{color:var(--accent-1);font-weight:700;padding:0 4px}
+.net-absence-row .net-cover-name{font-weight:600;color:var(--ink)}
+.net-absence-row .net-cover-house{color:var(--muted);font-size:12px}
+.net-absence-row .net-stub-name{color:var(--muted);font-style:italic;font-weight:500}
+.net-absence-row.net-orphan{
+  background:rgba(226,75,74,0.06);
+  border-bottom:1px dashed rgba(226,75,74,0.40);
+}
+.net-absence-row.net-orphan:last-child{border-bottom:1px dashed rgba(226,75,74,0.40)}
+.net-absence-row .net-no-cov{
+  margin-inline-start:auto;
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  padding:4px 10px;
+  background:rgba(226,75,74,0.10);
+  border:1px dashed rgba(226,75,74,0.40);
+  color:#FFB8B7;
+  border-radius:999px;
+  font-size:11px;
+  font-weight:700;
+}
+
 /* Archive view (dedicated page, reached via the topbar link) */
 .archive-table tbody td{font-size:13px;color:var(--ink-soft)}
 .archive-table .col-date{font-variant-numeric:tabular-nums;white-space:nowrap}
@@ -1047,6 +1089,7 @@ const {
   assignmentsForWorker: calcAssignmentsForWorker,
   workerTotalCost: calcWorkerTotalCost,
   activeAbsenceForWorker: calcActiveAbsenceForWorker,
+  networkAbsenceCoverageRows: calcNetworkAbsenceCoverageRows,
 } = window.EZONE_CALC;
 
 // ---------- state ----------
@@ -1886,6 +1929,10 @@ function centralView(){
   const today = calcTodayStr();
   const open = calcOpenAbsences(ABSENCES, today);
   const active = calcActiveAbsences(ABSENCES, today);
+  // Dashboard join: one row per active absence with its matched coverage
+  // (if any). Read-only — see the new section below the stat cards.
+  const netRows = calcNetworkAbsenceCoverageRows(ABSENCES, COVERAGES, WORKERS, ASSIGNMENTS, today);
+  const orphanCount = netRows.filter(r => !r.coverage).length;
 
   const houseBoxes = HOUSES.map(h=>{
     const roster = rosterAt(h.id);
@@ -1938,13 +1985,52 @@ function centralView(){
     <div class="stat">
       <div class="lbl">נעדרים פעילים היום</div>
       <div class="val">${active.length}</div>
-      <div class="sub">${open.length} פתוחים בסך הכל · היום ${escapeHtml(fmtDate(today))}</div>
+      <div class="sub">${active.length} פעילות${orphanCount ? ` · ${orphanCount} ללא מחליף` : ''}</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <h2>היעדרויות פעילות ברשת</h2>
+      <span class="count-pill">${active.length}</span>
+    </div>
+    <div class="tablecard accent-edge">
+      ${netRows.length
+        ? netRows.map(renderNetworkAbsenceRow).join('')
+        : `<div class="empty">אין היעדרויות פעילות ברשת</div>`}
     </div>
   </div>
 
   <div class="section">
     <div class="section-head"><h2>פירוט לפי בית</h2></div>
     <div class="house-grid">${houseBoxes}</div>
+  </div>`;
+}
+
+// One dashboard JOIN row. Read-only — no buttons, no openX() handlers.
+// Layout: "name (house) — reason, dates  →  מחליפה: name (מ-house)"
+//      or "name (house) — reason, dates                ⚠️ ללא מחליף"
+// Stub absences (workerId='') render their name as a placeholder.
+function renderNetworkAbsenceRow(row){
+  const a = row.absence;
+  const c = row.coverage;
+  const dates = `${escapeHtml(fmtDate(a.startDate))}–${escapeHtml(fmtDate(a.endDate))}`;
+  const nameHtml = a.workerId
+    ? `<span class="net-name">${escapeHtml(workerName(a.workerId))}</span>`
+    : `<span class="net-stub-name">(ללא רישום נעדר/ת)</span>`;
+  const tail = c
+    ? `<span class="net-arrow">→</span>
+       <span>מחליפה:</span>
+       <span class="net-cover-name">${escapeHtml(workerName(c.coveringWorkerId))}</span>
+       <span class="net-cover-house">(מ${escapeHtml(houseName(c.coveringHouse))})</span>`
+    : `<span class="net-no-cov">⚠️ ללא מחליף</span>`;
+  return `
+  <div class="net-absence-row${c ? '' : ' net-orphan'}">
+    ${nameHtml}
+    <span class="net-house">(${escapeHtml(houseName(a.house))})</span>
+    <span class="net-sep">—</span>
+    <span class="net-reason">${escapeHtml(a.reasonType)}, ${dates}</span>
+    ${tail}
   </div>`;
 }
 

@@ -4,6 +4,10 @@ All notable changes to this project are documented here. Format inspired by [Kee
 
 ## [Unreleased]
 
+### Added
+
+- **Dashboard "היעדרויות פעילות ברשת" section** — read-only join across all houses, surfacing every active absence with its matching coverage (if any) at a glance. Linked rows render as `[worker] ([house]) — [reason], [dates] → מחליפה: [name] (מ[source-house])`; orphan rows (no linked coverage) get a red dashed background and a `⚠️ ללא מחליף` badge, sorted to the top of the list. Stub absences (`workerId=''`) render their name as a `(ללא רישום נעדר/ת)` placeholder so the open slot is still visible. The existing absences stat card grows a `X פעילות · Y ללא מחליף` sub-line (`· Y ללא מחליף` omitted when Y=0). New pure helper `networkAbsenceCoverageRows` in `lib/calc.js` — no side effects, the dashboard never writes. Per-house views are unchanged.
+
 ### Changed
 
 - **v3.1 — absence and coverage are now INDEPENDENT events.** Previously a coverage inherited its receiving house and effective date range from its parent absence. Now every coverage carries those fields itself, and the link to an absence is optional + reference-only. This is a breaking schema + cost-contract change; a one-shot in-place migrator (`migrateCoveragesToV3_1`, idempotency flag `V3_1_MIGRATION_DONE`) rewrites existing coverage rows.

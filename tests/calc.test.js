@@ -11,6 +11,7 @@ const {
   houseTotal, networkTotal,
   assignmentsForWorker, workerTotalCost,
   activeAbsenceForWorker,
+  networkAbsenceCoverageRows,
 } = require('../lib/calc');
 
 const TODAY = '2026-05-20';
@@ -506,4 +507,102 @@ test('activeAbsenceForWorker: finds active absence for a worker', () => {
   const found = activeAbsenceForWorker(absences, 'w1', TODAY);
   assert.ok(found && found.id === 'ab2');
   assert.equal(activeAbsenceForWorker(absences, 'never', TODAY), null);
+});
+
+// ---------- networkAbsenceCoverageRows (dashboard join) ----------
+
+test('networkAbsenceCoverageRows: matches a linked coverage to its absence', () => {
+  const absences = [abs({ id: 'ab1' })];
+  const coverages = [cov({ id: 'c1', absenceId: 'ab1' })];
+  const rows = networkAbsenceCoverageRows(absences, coverages, [], [], TODAY);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].absence.id, 'ab1');
+  assert.ok(rows[0].coverage && rows[0].coverage.id === 'c1');
+});
+
+test('networkAbsenceCoverageRows: absence without coverage gets coverage=null', () => {
+  const absences = [abs({ id: 'ab1' })];
+  const coverages = [];
+  const rows = networkAbsenceCoverageRows(absences, coverages, [], [], TODAY);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].coverage, null);
+});
+
+test('networkAbsenceCoverageRows: unlinked coverage (absenceId="") does NOT attach to anything', () => {
+  // Unlinked coverages stand alone — the dashboard JOIN is by absenceId,
+  // so a coverage with absenceId='' simply has no absence partner.
+  const absences = [abs({ id: 'ab1' })];
+  const coverages = [cov({ id: 'c1', absenceId: '' })];
+  const rows = networkAbsenceCoverageRows(absences, coverages, [], [], TODAY);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].coverage, null,
+    'absence should remain orphaned in the dashboard view');
+});
+
+test('networkAbsenceCoverageRows: dangling link (no such absenceId) does NOT attach', () => {
+  // The cost contract treats danglers as unlinked. The dashboard JOIN
+  // similarly drops them — the orphan absence stays orphan.
+  const absences = [abs({ id: 'ab1' })];
+  const coverages = [cov({ id: 'c1', absenceId: 'missing' })];
+  const rows = networkAbsenceCoverageRows(absences, coverages, [], [], TODAY);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].coverage, null);
+});
+
+test('networkAbsenceCoverageRows: stub absence (workerId="") is still included', () => {
+  // v3.1 makes stub rows a first-class shape ("position open, no
+  // identified absentee"). The dashboard surfaces them so Moran can
+  // see the open slot — the UI renders the name as "(ללא רישום נעדר/ת)".
+  const absences = [abs({ id: 'ab1', workerId: '' })];
+  const rows = networkAbsenceCoverageRows(absences, [], [], [], TODAY);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].absence.workerId, '');
+});
+
+test('networkAbsenceCoverageRows: ended/past absences excluded', () => {
+  const absences = [
+    abs({ id: 'ab1' }),                                  // active
+    abs({ id: 'ab2', status: 'ended' }),                 // ended status
+    abs({ id: 'ab3', endDate: '2026-04-01' }),           // past
+  ];
+  const rows = networkAbsenceCoverageRows(absences, [], [], [], TODAY);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].absence.id, 'ab1');
+});
+
+test('networkAbsenceCoverageRows: multiple coverages on one absence — first wins (one row per absence)', () => {
+  const absences = [abs({ id: 'ab1' })];
+  const coverages = [
+    cov({ id: 'c1', absenceId: 'ab1' }),
+    cov({ id: 'c2', absenceId: 'ab1' }),  // second one ignored in the join
+  ];
+  const rows = networkAbsenceCoverageRows(absences, coverages, [], [], TODAY);
+  assert.equal(rows.length, 1, 'one row per absence regardless of coverage count');
+  assert.equal(rows[0].coverage.id, 'c1');
+});
+
+test('networkAbsenceCoverageRows: sort order — orphans first, then by startDate desc', () => {
+  // Three absences: two covered, one orphan. Expected order:
+  //   1. orphan first (regardless of its date)
+  //   2. then covered in startDate-desc order (newest first)
+  const absences = [
+    abs({ id: 'aOldCovered',  startDate: '2026-05-10', endDate: '2026-05-31' }),
+    abs({ id: 'aOrphan',      startDate: '2026-05-01', endDate: '2026-05-31' }),
+    abs({ id: 'aNewCovered',  startDate: '2026-05-19', endDate: '2026-05-31' }),
+  ];
+  const coverages = [
+    cov({ id: 'c1', absenceId: 'aOldCovered' }),
+    cov({ id: 'c2', absenceId: 'aNewCovered' }),
+    // aOrphan intentionally has no coverage
+  ];
+  const rows = networkAbsenceCoverageRows(absences, coverages, [], [], TODAY);
+  assert.deepEqual(
+    rows.map(r => r.absence.id),
+    ['aOrphan', 'aNewCovered', 'aOldCovered'],
+  );
+});
+
+test('networkAbsenceCoverageRows: empty inputs → empty array', () => {
+  assert.deepEqual(networkAbsenceCoverageRows([], [], [], [], TODAY), []);
+  assert.deepEqual(networkAbsenceCoverageRows(null, null, null, null, TODAY), []);
 });
