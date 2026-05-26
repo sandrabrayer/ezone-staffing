@@ -773,7 +773,13 @@ tbody tr:hover{
     <div class="modal-body">
       <div class="field">
         <label>שם מלא</label>
-        <input id="w_name" type="text" placeholder="שם העובד/ת" maxlength="80"/>
+        <input id="w_name" type="text" placeholder="שם העובד/ת" maxlength="80" oninput="onWorkerNameInput()"/>
+        <!-- Inline soft warning: a worker with this exact name already
+             exists. Save is still allowed (legitimate duplicates do
+             happen — same first name across families) but the hint
+             nudges Moran to double-check before creating a second row.
+             Hidden by default; toggled by onWorkerNameInput(). -->
+        <div class="hint" id="w_nameDupWarning" style="display:none;color:var(--warning)">⚠️ עובד/ת בשם זהה כבר קיים/ת — שמירה תיצור רשומה נפרדת</div>
       </div>
       <div class="field">
         <label>הערות</label>
@@ -1338,8 +1344,26 @@ function openWorker(workerId){
   }
   document.getElementById('w_name').value = editingWorker.name;
   document.getElementById('w_notes').value = editingWorker.notes;
+  // Re-evaluate the dup-name hint against the current name + WORKERS.
+  // Reset (hide) on create; on edit, surface only if a DIFFERENT worker
+  // already carries the same name.
+  onWorkerNameInput();
   document.getElementById('workerOverlay').classList.add('show');
   setTimeout(() => document.getElementById('w_name').focus(), 50);
+}
+
+// Soft duplicate-name detection. Fires on every keystroke. Compares
+// against the in-memory WORKERS cache, excluding the worker being
+// edited (so re-saving an unchanged name doesn't trigger the warning).
+// Match is exact-trim — Hebrew doesn't have case folding, and for mixed
+// English/Hebrew names the user almost always wants exact equality.
+function onWorkerNameInput(){
+  const name = document.getElementById('w_name').value.trim();
+  const warning = document.getElementById('w_nameDupWarning');
+  if (!name){ warning.style.display = 'none'; return; }
+  const editingId = editingWorker && editingWorker.id;
+  const dup = WORKERS.some(w => w.name === name && w.id !== editingId);
+  warning.style.display = dup ? '' : 'none';
 }
 function closeWorker(){
   document.getElementById('workerOverlay').classList.remove('show');
@@ -1353,6 +1377,15 @@ async function saveWorker(){
   if (!name){ toast('יש להזין שם', true); return; }
   setBusy('workerSaveBtn', true);
   const wasEdit = !!editingWorker.id;
+  // The "from inside the assignment form" sub-flow is what we'd return
+  // to after save (no render() — keep the assignment form open + just
+  // refresh its worker dropdown). Standalone creates from the new
+  // "+ עובד חדש" button take the else branch and re-render the current
+  // view in place, with the longer "אפשר להוסיף שיבוץ ידנית" hint so
+  // Moran knows the worker exists but still needs to be assigned.
+  const isAssignmentSubflow = !wasEdit
+    && document.getElementById('assignmentOverlay').classList.contains('show')
+    && editingAssignment;
   try {
     const payload = wasEdit
       ? { action: 'updateWorker', id: editingWorker.id, worker: { name, notes } }
@@ -1360,16 +1393,19 @@ async function saveWorker(){
     const result = await doAction(payload);
     await loadData();
     closeWorker();
-    // If the assignment dialog is open layered underneath, refresh its
-    // worker dropdown so the newly created worker is selectable + pre-
-    // selected. (This is the "+ צור עובד/ת חדש/ה" inline flow.)
-    if (!wasEdit && document.getElementById('assignmentOverlay').classList.contains('show') && editingAssignment){
+    if (isAssignmentSubflow){
       const newId = result && result.worker && result.worker.id;
       fillAssignmentWorkerDropdown(newId);
     } else {
       render();
     }
-    toast(wasEdit ? 'העדכון נשמר' : 'העובד/ת נוסף/ה');
+    toast(
+      wasEdit
+        ? 'העדכון נשמר'
+        : (isAssignmentSubflow
+            ? 'העובד/ת נוסף/ה'
+            : 'העובד נוסף — אפשר להוסיף שיבוץ ידנית')
+    );
   } catch (err) {
     toast(err.message || 'שגיאה בשמירה', true);
   } finally {
@@ -2306,7 +2342,14 @@ function houseView(id){
       <h2>צוות הבית</h2>
       <div style="display:flex;gap:10px;align-items:center">
         <span class="count-pill">${list.length}</span>
+        <!-- DOM order matters in RTL: count-pill renders rightmost, the
+             two buttons fill leftward. "+ שיבוץ חדש" is the primary
+             action (placed closer to the count); "+ עובד חדש" is the
+             standalone worker-create — also reachable via the assignment
+             form's "+ צור עובד/ת חדש/ה" pseudo-option but Moran asked
+             for an obvious top-level affordance. -->
         <button class="btn btn-primary" onclick="openAssignment({house:'${escapeHtml(id)}'})">+ שיבוץ חדש</button>
+        <button class="btn btn-primary" onclick="openWorker()">+ עובד חדש</button>
       </div>
     </div>
     ${subSalaried}

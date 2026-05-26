@@ -356,6 +356,167 @@ test('dashboard join: stub absence renders with "(ללא רישום נעדר/ת)
   assert.equal(errors.length, 0, errors.length ? JSON.stringify(errors) : '');
 });
 
+// ---------- per-house "+ עובד חדש" button ----------
+// Worker creation used to be reachable only through the assignment
+// form's "+ צור עובד/ת חדש/ה" pseudo-option. Moran couldn't find it
+// from the house view. This commit surfaces it as a top-level button
+// alongside "+ שיבוץ חדש".
+
+test('house view shows both "+ שיבוץ חדש" and "+ עובד חדש" buttons in the roster section', async () => {
+  const { dom, errors } = loadPage();
+  await authAndBoot(dom, {});
+  dom.window.go('ramot');
+  const doc = dom.window.document;
+
+  // Both buttons live in the same section-head as the roster count pill.
+  const rosterSection = [...doc.querySelectorAll('.section-head')]
+    .find(sh => /צוות הבית/.test(sh.textContent));
+  assert.ok(rosterSection, 'expected the "צוות הבית" roster section-head');
+
+  const btnTexts = [...rosterSection.querySelectorAll('button')].map(b => b.textContent.trim());
+  assert.ok(btnTexts.some(t => /\+ שיבוץ חדש/.test(t)),
+    'roster section should still expose the "+ שיבוץ חדש" button');
+  assert.ok(btnTexts.some(t => /\+ עובד חדש/.test(t)),
+    'roster section should expose the new "+ עובד חדש" button alongside it');
+
+  dom.window.close();
+  assert.equal(errors.length, 0, errors.length ? JSON.stringify(errors) : '');
+});
+
+test('"+ עובד חדש" opens the worker dialog in CREATE mode (no workerId)', async () => {
+  // jsdom doesn't really click — but openWorker() with no arg is the
+  // create path. The button's onclick is `openWorker()` (zero args),
+  // so calling it directly is equivalent to a click for our purposes.
+  const { dom, errors } = loadPage();
+  await authAndBoot(dom, {});
+  dom.window.go('ramot');
+
+  const doc = dom.window.document;
+  const overlay = doc.getElementById('workerOverlay');
+  assert.ok(!overlay.classList.contains('show'),
+    'worker overlay should be hidden before button click');
+
+  dom.window.openWorker();  // simulates the button's onclick handler
+
+  assert.ok(overlay.classList.contains('show'),
+    'worker overlay should be visible after open');
+  assert.equal(doc.getElementById('workerModalTitle').textContent, 'עובד/ת חדש/ה',
+    'title should read create-mode header');
+  // No worker fields beyond name + notes — confirm via the form body.
+  const body = overlay.querySelector('.modal-body');
+  const inputs = [...body.querySelectorAll('input, select, textarea')].map(el => el.id);
+  assert.deepEqual(inputs, ['w_name', 'w_notes'],
+    'create dialog should expose only the worker-level fields');
+  // Delete button hidden in create mode.
+  assert.equal(doc.getElementById('workerDeleteBtn').style.display, 'none');
+
+  dom.window.close();
+  assert.equal(errors.length, 0, errors.length ? JSON.stringify(errors) : '');
+});
+
+test('standalone create flow: fill name → save → toast + worker count increments → modal closed', async () => {
+  // Full integration through saveWorker(). Stubs fetch to handle both
+  // the POST /api/action (createWorker) and the subsequent GET /api/data
+  // refresh that saveWorker awaits before re-rendering.
+  const { dom, errors } = loadPage();
+  await authAndBoot(dom, {});
+  dom.window.go('ramot');
+
+  dom.window.openWorker();
+  dom.window.document.getElementById('w_name').value = 'דנה כהן';
+
+  const newWorker = { id: 'wNew', name: 'דנה כהן', notes: '', createdAt: '' };
+  const refreshed = {
+    workers: [newWorker], assignments: [], absences: [], coverages: [], archiveV3: [],
+    houses: { ramot: [], asher: [], ofroni: [], rehab: [], pardes: [], sde_eliezer: [], hq: [] },
+    events: [], archive: [],
+  };
+  dom.window.fetch = async (url, init) => {
+    if (init && init.method === 'POST'){
+      return {
+        ok: true, status: 200,
+        text: async () => JSON.stringify({ ok: true, worker: newWorker }),
+      };
+    }
+    return { ok: true, status: 200, text: async () => JSON.stringify(refreshed) };
+  };
+
+  await dom.window.saveWorker();
+
+  // Modal closed.
+  assert.ok(!dom.window.document.getElementById('workerOverlay').classList.contains('show'),
+    'worker overlay should close on successful save');
+
+  // Standalone toast — the longer "אפשר להוסיף שיבוץ ידנית" hint.
+  const toast = dom.window.document.getElementById('toast');
+  assert.match(toast.textContent, /העובד נוסף.*אפשר להוסיף שיבוץ ידנית/,
+    'standalone create flow should show the documented toast (different from the in-assignment-form sub-flow toast)');
+
+  // Worker count visibly incremented — the dashboard re-renders after
+  // saveWorker; navigate back to verify.
+  dom.window.go('central');
+  const workerStatVal = [...dom.window.document.querySelectorAll('.stat')]
+    .find(el => /סה״כ עובדים/.test(el.textContent))
+    .querySelector('.val');
+  assert.equal(workerStatVal.textContent.trim(), '1',
+    'central stat card should reflect the new worker count');
+
+  dom.window.close();
+  assert.equal(errors.length, 0, errors.length ? JSON.stringify(errors) : '');
+});
+
+test('worker dialog: inline dup-name warning shows when an existing name is entered (but save still allowed)', async () => {
+  const { dom, errors } = loadPage();
+  await authAndBoot(dom, {
+    workers: [{ id: 'w1', name: 'דנה', notes: '', createdAt: '' }],
+  });
+  dom.window.go('ramot');
+  dom.window.openWorker();
+
+  const doc = dom.window.document;
+  const inp = doc.getElementById('w_name');
+  const warning = doc.getElementById('w_nameDupWarning');
+
+  // Hidden by default.
+  assert.equal(warning.style.display, 'none');
+
+  // Typing a fresh name → still hidden.
+  inp.value = 'יוסי';
+  dom.window.onWorkerNameInput();
+  assert.equal(warning.style.display, 'none');
+
+  // Typing a name that already exists → warning visible (but save not blocked).
+  inp.value = 'דנה';
+  dom.window.onWorkerNameInput();
+  assert.notEqual(warning.style.display, 'none',
+    'warning should surface when the name matches an existing worker');
+  // workerSaveBtn is still enabled — the warning is soft, not a gate.
+  assert.equal(doc.getElementById('workerSaveBtn').disabled, false);
+
+  // Trim trailing whitespace works the same way (exact-trim match).
+  inp.value = '  דנה  ';
+  dom.window.onWorkerNameInput();
+  assert.notEqual(warning.style.display, 'none');
+
+  dom.window.close();
+  assert.equal(errors.length, 0, errors.length ? JSON.stringify(errors) : '');
+});
+
+test('worker dialog edit mode: editing without changing the name does NOT trigger the dup warning against itself', async () => {
+  const { dom, errors } = loadPage();
+  await authAndBoot(dom, {
+    workers: [{ id: 'w1', name: 'דנה', notes: '', createdAt: '' }],
+  });
+  dom.window.openWorker('w1');
+
+  const warning = dom.window.document.getElementById('w_nameDupWarning');
+  assert.equal(warning.style.display, 'none',
+    'opening the dialog on an existing worker must not flag the worker as a dup of itself');
+
+  dom.window.close();
+  assert.equal(errors.length, 0, errors.length ? JSON.stringify(errors) : '');
+});
+
 test('static audit: no calc.js global is destructured without an alias in the inline script', () => {
   // Belt-and-suspenders catch: this fires even if jsdom can't reproduce the
   // V8 early-error for some future browser-specific reason. A future
