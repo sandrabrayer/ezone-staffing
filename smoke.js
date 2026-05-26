@@ -1,7 +1,23 @@
 'use strict';
-// E2E smoke test: hits the local Express server, which proxies to Apps Script + Sheet.
+// v3 end-to-end smoke test. Hits the local Express server, which proxies
+// to Apps Script + Sheet. Exercises the full worker/assignment/absence/
+// coverage/archive_v3 lifecycle, including cost attribution + the
+// auto-truncate-absence side effect of terminateAssignment.
+//
+// Prerequisites:
+//   - `npm start` already running (assumes PORT from .env)
+//   - The target sheet has gone through setupSheetsV3 + migrateToV3
+//     (see MIGRATION.md). The v3 tabs must exist; legacy tabs are
+//     ignored by these flows.
+//
 // Run with: node --env-file=.env smoke.js
-// Assumes the server is already running on PORT (default 3000) with the same .env.
+//
+// Cleanup: this script restores the sheet to ALMOST baseline. The
+// terminateAssignment step writes an archive_v3 row, and that row
+// references the absentee worker via workerId — so deleteWorker on the
+// absentee returns 409 (FK guard). Smoke verifies the 409 fires and
+// then leaves the sheet at "+1 worker, +1 archive_v3 row" vs baseline,
+// matching v2 smoke's "+1 event, +1 archive" outcome.
 
 const BASE = `http://127.0.0.1:${Number(process.env.PORT) || 3000}`;
 const PIN = process.env.MORAN_PIN || '';
@@ -46,6 +62,61 @@ async function jpost(path, payload, token) {
   return { status: r.status, body };
 }
 
+// Inline per-type cost — kept independent from lib/calc.js so smoke
+// catches any divergence between the calc lib and what the server
+// stores. (If smoke ever stops agreeing with calc, one of them has
+// a bug.)
+function assignmentCostInline(a) {
+  switch (a.employmentType) {
+    case 'full_time':
+      return Math.max(0, Math.round(Number(a.salary) || 0));
+    case 'part_time': {
+      const s = Math.max(0, Number(a.salary) || 0);
+      const p = Math.max(0, Math.min(100, Number(a.pct) || 0));
+      return Math.round(s * p / 100);
+    }
+    case 'hourly':
+      return Math.round(Math.max(0, Number(a.hourlyRate) || 0) * Math.max(0, Number(a.estHours) || 0));
+    case 'per_session':
+      return Math.round(Math.max(0, Number(a.sessionRate) || 0) * Math.max(0, Number(a.estSessions) || 0));
+    case 'fixed_retainer':
+      return Math.max(0, Math.round(Number(a.retainerAmount) || 0));
+    default:
+      return 0;
+  }
+}
+function houseAssignmentsCost(assignments, house) {
+  return assignments.filter(a => a.house === house).reduce((s, a) => s + assignmentCostInline(a), 0);
+}
+function isAbsenceActive(ab, tsDate) {
+  if (!ab || String(ab.status) === 'ended') return false;
+  return ab.startDate && ab.endDate && ab.startDate <= tsDate && tsDate <= ab.endDate;
+}
+// v3.1: coverage cost accrues to receivingHouse. Linked coverages
+// (absenceId set) are gated by the linked absence being active —
+// closing the absence early stops the cost on the same day. Unlinked
+// coverages accrue on their own dates independently.
+function isCoverageActiveInline(c, tsDate, absences) {
+  if (!c) return false;
+  const s = String(c.startDate || '');
+  const e = String(c.endDate || '');
+  if (!s || !e) return false;
+  if (!(s <= tsDate && tsDate <= e)) return false;
+  const absenceId = String(c.absenceId || '');
+  if (!absenceId) return true;
+  const abs = (absences || []).find(a => a && a.id === absenceId);
+  if (!abs) return true;  // dangling — treat as unlinked
+  if (String(abs.status) === 'ended') return false;
+  return abs.startDate && abs.endDate && abs.startDate <= tsDate && tsDate <= abs.endDate;
+}
+function coverageExtraForHouse(coverages, absences, house, tsDate) {
+  return coverages.reduce((s, c) => {
+    if (c.receivingHouse !== house) return s;
+    if (!isCoverageActiveInline(c, tsDate, absences)) return s;
+    return s + (Number(c.extraPayment) || 0);
+  }, 0);
+}
+
 (async () => {
   // 1. health
   {
@@ -63,196 +134,335 @@ async function jpost(path, payload, token) {
     log('login ok', { expiresInDays: r.body.expiresInDays });
   }
 
-  // 3. baseline
+  // 3. baseline. The v3 doGet returns workers/assignments/absences/
+  //    coverages/archiveV3 plus legacy passthrough keys (houses/events/
+  //    archive) for the transition window. We only read the v3 keys.
   let baseline;
   {
     const r = await jget('/api/data', token);
     if (r.status !== 200) fail('GET /api/data baseline', r);
     baseline = r.body;
-    if (!Array.isArray(baseline.events)) fail('baseline: events missing', baseline);
-    if (!Array.isArray(baseline.archive)) fail('baseline: archive missing (Apps Script not redeployed?)', baseline);
-    const counts = Object.fromEntries(Object.entries(baseline.houses).map(([h, arr]) => [h, arr.length]));
+    for (const k of ['workers', 'assignments', 'absences', 'coverages', 'archiveV3']) {
+      if (!Array.isArray(baseline[k])) fail(`baseline: ${k} missing (Apps Script not redeployed or migrateToV3 not run?)`, baseline);
+    }
     log('baseline', {
-      houseCounts: counts,
-      events: baseline.events.length,
-      activeEvents: baseline.events.filter(e => e.status === 'active').length,
-      archive: baseline.archive.length,
+      workers: baseline.workers.length,
+      assignments: baseline.assignments.length,
+      absences: baseline.absences.length,
+      coverages: baseline.coverages.length,
+      archiveV3: baseline.archiveV3.length,
     });
   }
 
-  // 4. add employee to ramot
-  const empName = 'SMOKE-' + Date.now();
-  const empSalary = 12000;
-  const empPct = 80;
-  const expectedBase = Math.round(empSalary * empPct / 100); // 9600
-  let empId;
+  const tag = 'SMOKE-' + Date.now();
+
+  // 4. createWorker A — the absentee. Lives at ramot.
+  let workerA;
   {
     const r = await jpost('/api/action', {
-      action: 'addEmployee',
-      house: 'ramot',
-      employee: {
-        name: empName,
-        role: 'מטפל/ת',
-        roleDetail: 'אמנות',
-        salary: empSalary,
-        pct: empPct,
+      action: 'createWorker',
+      worker: { name: tag + '-A', notes: 'smoke absentee' },
+    }, token);
+    if (r.status !== 200 || !r.body.ok || !r.body.worker || !r.body.worker.id) fail('createWorker A', r);
+    workerA = r.body.worker;
+    log('createWorker A ok', { id: workerA.id, name: workerA.name });
+  }
+
+  // 5. createWorker B — the helper. Lives at asher; will cover for A.
+  let workerB;
+  {
+    const r = await jpost('/api/action', {
+      action: 'createWorker',
+      worker: { name: tag + '-B', notes: 'smoke helper' },
+    }, token);
+    if (r.status !== 200 || !r.body.ok || !r.body.worker || !r.body.worker.id) fail('createWorker B', r);
+    workerB = r.body.worker;
+    log('createWorker B ok', { id: workerB.id, name: workerB.name });
+  }
+
+  // 6. addAssignment A → ramot, part_time 12000 × 80% = 9600
+  const aSalary = 12000;
+  const aPct = 80;
+  const expectedACost = Math.round(aSalary * aPct / 100);
+  let assignmentA;
+  {
+    const r = await jpost('/api/action', {
+      action: 'addAssignment',
+      assignment: {
+        workerId: workerA.id, house: 'ramot',
+        role: 'מטפל/ת', roleDetail: 'אמנות',
+        employmentType: 'part_time', salary: aSalary, pct: aPct,
         notes: 'smoke',
       },
     }, token);
-    if (r.status !== 200 || !r.body.ok || !r.body.employee || !r.body.employee.id) fail('addEmployee', r);
-    empId = r.body.employee.id;
-    if (r.body.employee.roleDetail !== 'אמנות') fail('addEmployee: roleDetail not persisted', r.body);
-    log('addEmployee ok', { id: empId, role: r.body.employee.role, roleDetail: r.body.employee.roleDetail });
+    if (r.status !== 200 || !r.body.ok || !r.body.assignment || !r.body.assignment.id) fail('addAssignment A', r);
+    assignmentA = r.body.assignment;
+    if (assignmentA.roleDetail !== 'אמנות') fail('addAssignment A: roleDetail not persisted', assignmentA);
+    log('addAssignment A ok', { id: assignmentA.id, house: assignmentA.house, expectedCost: expectedACost });
   }
 
-  // 5. verify employee in ramot
+  // 7. addAssignment B → asher, full_time 15000
+  const bSalary = 15000;
+  let assignmentB;
+  {
+    const r = await jpost('/api/action', {
+      action: 'addAssignment',
+      assignment: {
+        workerId: workerB.id, house: 'asher',
+        role: 'אחות', roleDetail: '',
+        employmentType: 'full_time', salary: bSalary,
+        notes: 'smoke',
+      },
+    }, token);
+    if (r.status !== 200 || !r.body.ok || !r.body.assignment) fail('addAssignment B', r);
+    assignmentB = r.body.assignment;
+    log('addAssignment B ok', { id: assignmentB.id, house: assignmentB.house });
+  }
+
+  // 7a. strictness guard: adding hourlyRate to a full_time assignment
+  // must 400. This is the proof that v3 strictness landed end-to-end.
+  {
+    const r = await jpost('/api/action', {
+      action: 'addAssignment',
+      assignment: {
+        workerId: workerB.id, house: 'ofroni',
+        role: 'אחות', employmentType: 'full_time',
+        salary: 1000, hourlyRate: 80,
+      },
+    }, token);
+    if (r.status !== 400 || !/hourlyRate not allowed/.test(r.body.error || '')) {
+      fail('strictness: full_time + hourlyRate should 400', r);
+    }
+    log('strictness ok', { error: r.body.error });
+  }
+
+  // 8. cost attribution at ramot grew by exactly assignmentCost(A).
   {
     const r = await jget('/api/data', token);
     if (r.status !== 200) fail('GET /api/data after add', r);
-    const found = r.body.houses.ramot.find(e => e.id === empId);
-    if (!found) fail('verify add: not in ramot', r.body.houses.ramot);
-    if (found.role !== 'מטפל/ת') fail('verify add: role mismatch', found);
-    log('verify add ok', { id: empId });
+    const before = houseAssignmentsCost(baseline.assignments, 'ramot');
+    const after = houseAssignmentsCost(r.body.assignments, 'ramot');
+    if (after - before !== expectedACost) {
+      fail('cost attribution after addAssignment A', { before, after, expectedDelta: expectedACost });
+    }
+    log('cost: ramot grew by exact assignment cost', { delta: expectedACost });
   }
 
-  // 6. start coverage event: ramot → asher
-  const bonus = 2000;
+  // 9. logAbsence: worker A absent from ramot, today → +7, חופשה
   const startDate = today();
   const endDate = plusDays(7);
-  let eventId;
+  let absence;
   {
     const r = await jpost('/api/action', {
-      action: 'startCoverage',
-      employeeId: empId,
-      homeHouse: 'ramot',
-      hostHouse: 'asher',
-      startDate,
-      endDate,
-      reasonType: 'חופשה',
-      reasonDetail: 'smoke test coverage',
-      bonusAmount: bonus,
+      action: 'logAbsence',
+      absence: {
+        workerId: workerA.id, house: 'ramot',
+        startDate, endDate,
+        reasonType: 'חופשה', reasonDetail: 'smoke vacation',
+        notes: 'smoke',
+      },
     }, token);
-    if (r.status !== 200 || !r.body.ok || !r.body.event || !r.body.event.id) fail('startCoverage', r);
-    eventId = r.body.event.id;
-    if (r.body.event.status !== 'active') fail('startCoverage: expected active status', r.body.event);
-    log('startCoverage ok', { eventId, hostHouse: r.body.event.hostHouse, bonus: r.body.event.bonusAmount });
+    if (r.status !== 200 || !r.body.ok || !r.body.absence || !r.body.absence.id) fail('logAbsence', r);
+    absence = r.body.absence;
+    if (absence.status !== 'active') fail('logAbsence: expected active status (range covers today)', absence);
+    log('logAbsence ok', { id: absence.id, status: absence.status });
   }
 
-  // 7. verify: employee still in ramot (NOT moved), event is active in asher, bonus is set
-  {
-    const r = await jget('/api/data', token);
-    if (r.status !== 200) fail('GET /api/data after startCoverage', r);
-    const inRamot = r.body.houses.ramot.find(e => e.id === empId);
-    const inAsher = r.body.houses.asher.find(e => e.id === empId);
-    if (!inRamot) fail('verify start: employee should still be in ramot', r.body.houses.ramot);
-    if (inAsher) fail('verify start: employee should NOT be in asher (old move model)', inAsher);
-
-    const ev = r.body.events.find(e => e.id === eventId);
-    if (!ev) fail('verify start: event missing from /api/data', r.body.events);
-    if (ev.status !== 'active') fail('verify start: event not active', ev);
-    if (ev.hostHouse !== 'asher') fail('verify start: hostHouse wrong', ev);
-    if (Number(ev.bonusAmount) !== bonus) fail('verify start: bonus mismatch', ev);
-    if (ev.employeeId !== empId) fail('verify start: employeeId mismatch', ev);
-    log('verify start ok', { eventStatus: ev.status, bonus: ev.bonusAmount });
-  }
-
-  // 8. cost attribution sanity check: compute homeCost(ramot) before & after — must be unchanged.
-  //    The base salary attributes to home regardless of coverage status.
-  {
-    const r = await jget('/api/data', token);
-    const ramotRoster = r.body.houses.ramot;
-    const homeCost = ramotRoster.reduce(
-      (s, e) => s + Math.round((Number(e.salary) || 0) * (Number(e.pct) || 0) / 100),
-      0,
-    );
-    const baselineRamotCost = baseline.houses.ramot.reduce(
-      (s, e) => s + Math.round((Number(e.salary) || 0) * (Number(e.pct) || 0) / 100),
-      0,
-    );
-    if (homeCost - baselineRamotCost !== expectedBase) {
-      fail('cost attribution: ramot home cost did not grow by exactly the new employee base',
-        { baseline: baselineRamotCost, now: homeCost, expectedDelta: expectedBase });
-    }
-    log('cost attribution ok', { ramotHomeCostDelta: expectedBase });
-  }
-
-  // 9. terminate the employee today. This is also the cleanup — the
-  //    employee moves to archive and the active coverage event auto-ends.
+  // 10. addCoverage: B from asher helps ramot. v3.1 carries coveringHouse
+  //     + receivingHouse + own dates on the coverage row. We link to the
+  //     absence here to also exercise the FK-overlap check; the absence's
+  //     range covers the coverage's range so the server accepts it.
+  const extraPayment = 2000;
+  let coverage;
   {
     const r = await jpost('/api/action', {
-      action: 'terminateEmployee',
-      house: 'ramot',
-      id: empId,
-      terminationDate: today(),
-      reasonType: 'התפטרות',
-      reasonDetail: 'smoke test termination',
+      action: 'addCoverage',
+      coverage: {
+        absenceId: absence.id,
+        coveringWorkerId: workerB.id,
+        coveringHouse: 'asher',
+        receivingHouse: 'ramot',
+        startDate, endDate,   // match the absence range
+        extraPayment,
+        notes: 'smoke coverage',
+      },
     }, token);
-    if (r.status !== 200 || !r.body.ok) fail('terminateEmployee', r);
-    if (!r.body.archive || r.body.archive.employeeId !== empId) {
-      fail('terminateEmployee: archive snapshot missing or wrong id', r.body);
+    if (r.status !== 200 || !r.body.ok || !r.body.coverage || !r.body.coverage.id) fail('addCoverage', r);
+    coverage = r.body.coverage;
+    log('addCoverage ok', { id: coverage.id, extra: coverage.extraPayment });
+  }
+
+  // 10a. mismatch guard: linking a coverage whose receivingHouse doesn't
+  //      match the absence's house must 409. Proves the v3.1 FK
+  //      consistency check landed end-to-end.
+  {
+    const r = await jpost('/api/action', {
+      action: 'addCoverage',
+      coverage: {
+        absenceId: absence.id,
+        coveringWorkerId: workerB.id,
+        coveringHouse: 'asher',
+        receivingHouse: 'ofroni',  // doesn't match absence.house=ramot
+        startDate, endDate, extraPayment: 100,
+      },
+    }, token);
+    if (r.status !== 409 || !/אינו תואם/.test(r.body.error || '')) {
+      fail('linked-absence house mismatch should 409', r);
     }
-    log('terminateEmployee ok', {
-      archiveId: r.body.archive.id,
-      autoEndedEvents: r.body.autoEndedEvents,
+    log('linked-absence mismatch ok', { error: r.body.error });
+  }
+
+  // 11. cost attribution: ramot now = baseline + A's assignment +
+  //     coverage extra (accrues to receivingHouse=ramot). asher just has
+  //     B's assignment; the coverage extra goes to ramot, not asher.
+  {
+    const r = await jget('/api/data', token);
+    if (r.status !== 200) fail('GET /api/data after coverage', r);
+    const t = today();
+    const ramotAsg = houseAssignmentsCost(r.body.assignments, 'ramot');
+    const ramotExtra = coverageExtraForHouse(r.body.coverages, r.body.absences, 'ramot', t);
+    const ramotBase = houseAssignmentsCost(baseline.assignments, 'ramot');
+    if (ramotAsg - ramotBase !== expectedACost) {
+      fail('cost: ramot assignment delta wrong', { delta: ramotAsg - ramotBase, expected: expectedACost });
+    }
+    if (ramotExtra !== extraPayment) {
+      fail('cost: ramot coverage extra wrong', { actual: ramotExtra, expected: extraPayment });
+    }
+    const asherAsg = houseAssignmentsCost(r.body.assignments, 'asher');
+    const asherExtra = coverageExtraForHouse(r.body.coverages, r.body.absences, 'asher', t);
+    const asherBase = houseAssignmentsCost(baseline.assignments, 'asher');
+    if (asherAsg - asherBase !== bSalary) {
+      fail('cost: asher assignment delta wrong', { delta: asherAsg - asherBase, expected: bSalary });
+    }
+    if (asherExtra !== 0) {
+      fail('cost: asher should have zero coverage extra (extras go to receivingHouse, not coveringHouse)', { asherExtra });
+    }
+    log('cost attribution ok', {
+      ramotAsgDelta: expectedACost, ramotExtra,
+      asherAsgDelta: bSalary, asherExtra,
     });
   }
 
-  // 10. verify: employee gone from roster, present in archive, event auto-ended
+  // 12. terminateAssignment A's assignment today. Snapshots to archive_v3,
+  //     removes the assignment row, auto-truncates the active absence at
+  //     the same (worker, house) to end_date=today + status=ended.
+  {
+    const r = await jpost('/api/action', {
+      action: 'terminateAssignment',
+      id: assignmentA.id,
+      terminationDate: today(),
+      reasonType: 'התפטרות',
+      reasonDetail: 'smoke termination',
+    }, token);
+    if (r.status !== 200 || !r.body.ok) fail('terminateAssignment', r);
+    if (!r.body.archive || r.body.archive.assignmentId !== assignmentA.id) {
+      fail('terminateAssignment: archive snapshot missing or wrong assignmentId', r.body);
+    }
+    if (r.body.autoEndedAbsences !== 1) {
+      fail('terminateAssignment: expected exactly 1 auto-ended absence', r.body);
+    }
+    log('terminateAssignment ok', {
+      archiveId: r.body.archive.id,
+      autoEndedAbsences: r.body.autoEndedAbsences,
+    });
+  }
+
+  // 13. verify post-terminate
   {
     const r = await jget('/api/data', token);
     if (r.status !== 200) fail('GET /api/data after terminate', r);
-    const stillThere =
-      r.body.houses.ramot.find(e => e.id === empId) ||
-      r.body.houses.asher.find(e => e.id === empId) ||
-      r.body.houses.ofroni.find(e => e.id === empId) ||
-      r.body.houses.rehab.find(e => e.id === empId);
-    if (stillThere) fail('verify terminate: employee still in a roster', stillThere);
-    const archived = r.body.archive.find(a => a.employeeId === empId);
-    if (!archived) fail('verify terminate: not in archive', r.body.archive);
-    if (archived.terminationDate !== today()) fail('verify terminate: wrong terminationDate', archived);
-    const ev = r.body.events.find(e => e.id === eventId);
-    if (!ev) fail('verify terminate: event missing', r.body.events);
-    if (ev.endDate !== today()) fail('verify terminate: event endDate not pulled in to terminationDate', ev);
-    if (ev.status !== 'ended') fail('verify terminate: event status should be ended (terminationDate=today)', ev);
+    const stillAssigned = r.body.assignments.find(a => a.id === assignmentA.id);
+    if (stillAssigned) fail('terminate: assignment row not removed', stillAssigned);
+    const archived = r.body.archiveV3.find(a => a.assignmentId === assignmentA.id);
+    if (!archived) fail('terminate: archive_v3 row missing', r.body.archiveV3);
+    if (archived.terminationDate !== today()) fail('terminate: wrong terminationDate', archived);
+    const truncated = r.body.absences.find(a => a.id === absence.id);
+    if (!truncated) fail('terminate: parent absence missing', r.body.absences);
+    if (truncated.endDate !== today()) fail('terminate: absence endDate not pulled to today', truncated);
+    if (truncated.status !== 'ended') fail('terminate: absence status should be ended (terminationDate=today)', truncated);
     log('verify terminate ok', {
       archived: { id: archived.id, terminationDate: archived.terminationDate },
-      event: { endDate: ev.endDate, status: ev.status },
+      absence: { endDate: truncated.endDate, status: truncated.status },
     });
   }
 
-  // 11. cost attribution: terminated employee with date <= today contributes 0
-  //     to home cost. ramot home cost should be back to baseline.
+  // 14. cost attribution post-terminate: ramot back to baseline.
+  //     A's assignment is gone, and the coverage extra is 0 because its
+  //     linked absence is no longer active (terminateAssignment
+  //     auto-truncated the absence to today + status='ended'). v3.1
+  //     keeps this clamp for linked coverages — substitute pay stops
+  //     when the regular employee's absence stops.
   {
     const r = await jget('/api/data', token);
-    const ramotHomeCost = r.body.houses.ramot.reduce(
-      (s, e) => s + Math.round((Number(e.salary) || 0) * (Number(e.pct) || 0) / 100),
-      0,
-    );
-    const baselineRamotCost = baseline.houses.ramot.reduce(
-      (s, e) => s + Math.round((Number(e.salary) || 0) * (Number(e.pct) || 0) / 100),
-      0,
-    );
-    if (ramotHomeCost !== baselineRamotCost) {
-      fail('cost attribution: ramot home cost did not return to baseline after termination',
-        { baseline: baselineRamotCost, now: ramotHomeCost, expected: 0 });
+    const t = today();
+    const ramotAsg = houseAssignmentsCost(r.body.assignments, 'ramot');
+    const ramotExtra = coverageExtraForHouse(r.body.coverages, r.body.absences, 'ramot', t);
+    const ramotBase = houseAssignmentsCost(baseline.assignments, 'ramot');
+    if (ramotAsg !== ramotBase) {
+      fail('cost: ramot assignment cost did not return to baseline post-terminate',
+        { now: ramotAsg, baseline: ramotBase });
     }
-    log('cost attribution ok', { ramotHomeCostDelta: 0 });
+    if (ramotExtra !== 0) {
+      fail('cost: ramot coverage extra should be 0 after linked absence ended',
+        { actual: ramotExtra });
+    }
+    log('cost post-terminate ok', { ramotAsg, ramotExtra });
   }
 
-  // 12. final verification: houses back to baseline; events +1; archive +1.
+  // 15. v3.1: deleteAbsence no longer requires deleting coverages first.
+  //     The coverage's absenceId becomes a dangling reference but the
+  //     coverage row itself remains valid (it carries its own dates +
+  //     receivingHouse). Exercise that order on purpose, then clean up
+  //     the dangling coverage.
+  {
+    const r = await jpost('/api/action', { action: 'deleteAbsence', id: absence.id }, token);
+    if (r.status !== 200 || !r.body.ok) fail('deleteAbsence (with linked coverage still present)', r);
+    log('deleteAbsence ok (coverage left dangling per v3.1 independence)');
+  }
+  // 16. deleteCoverage — cost stops accruing now too.
+  {
+    const r = await jpost('/api/action', { action: 'deleteCoverage', id: coverage.id }, token);
+    if (r.status !== 200 || !r.body.ok) fail('deleteCoverage', r);
+    log('deleteCoverage ok');
+  }
+
+  // 17. deleteAssignment B + deleteWorker B (no FK refs).
+  {
+    let r = await jpost('/api/action', { action: 'deleteAssignment', id: assignmentB.id }, token);
+    if (r.status !== 200 || !r.body.ok) fail('deleteAssignment B', r);
+    log('deleteAssignment B ok');
+    r = await jpost('/api/action', { action: 'deleteWorker', id: workerB.id }, token);
+    if (r.status !== 200 || !r.body.ok) fail('deleteWorker B', r);
+    log('deleteWorker B ok');
+  }
+
+  // 18. deleteWorker A — EXPECTED to 409 (archive_v3 still references A).
+  //     This is also the FK-guard proof; if the guard misfires, smoke
+  //     would surface it as a 200 here.
+  {
+    const r = await jpost('/api/action', { action: 'deleteWorker', id: workerA.id }, token);
+    if (r.status !== 409) fail('deleteWorker A: expected 409 due to archive_v3 reference', r);
+    log('deleteWorker A 409 ok (expected — archive ref)', { error: r.body.error });
+  }
+
+  // 19. final state: vs baseline, +1 worker (A) and +1 archive_v3 row.
+  //     Assignments / absences / coverages all back to baseline length.
   {
     const r = await jget('/api/data', token);
     if (r.status !== 200) fail('GET /api/data final', r);
-    const counts = Object.fromEntries(Object.entries(r.body.houses).map(([h, arr]) => [h, arr.length]));
-    const baseCounts = Object.fromEntries(Object.entries(baseline.houses).map(([h, arr]) => [h, arr.length]));
-    for (const h of ['ramot', 'asher', 'ofroni', 'rehab']) {
-      if (counts[h] !== baseCounts[h]) fail(`cleanup: ${h} count drifted`, { before: baseCounts[h], after: counts[h] });
-    }
-    const eventsDelta = r.body.events.length - baseline.events.length;
-    const archiveDelta = r.body.archive.length - baseline.archive.length;
-    log('final state ok', { houseCounts: counts, eventsDelta, archiveDelta });
-    if (eventsDelta !== 1) console.warn('[warn] events delta is', eventsDelta, '— expected exactly 1');
-    if (archiveDelta !== 1) console.warn('[warn] archive delta is', archiveDelta, '— expected exactly 1');
+    const deltas = {
+      workers:     r.body.workers.length     - baseline.workers.length,
+      assignments: r.body.assignments.length - baseline.assignments.length,
+      absences:    r.body.absences.length    - baseline.absences.length,
+      coverages:   r.body.coverages.length   - baseline.coverages.length,
+      archiveV3:   r.body.archiveV3.length   - baseline.archiveV3.length,
+    };
+    log('final deltas', deltas);
+    if (deltas.workers !== 1)      fail('final: workers delta', deltas);
+    if (deltas.assignments !== 0)  fail('final: assignments delta', deltas);
+    if (deltas.absences !== 0)     fail('final: absences delta', deltas);
+    if (deltas.coverages !== 0)    fail('final: coverages delta', deltas);
+    if (deltas.archiveV3 !== 1)    fail('final: archiveV3 delta', deltas);
   }
 
   console.log('\nSMOKE TEST PASSED');

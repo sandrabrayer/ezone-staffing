@@ -2,15 +2,155 @@
 
 All notable changes to this project are documented here. Format inspired by [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+### Added
+
+- **Dashboard "היעדרויות פעילות ברשת" section** — read-only join across all houses, surfacing every active absence with its matching coverage (if any) at a glance. Linked rows render as `[worker] ([house]) — [reason], [dates] → מחליפה: [name] (מ[source-house])`; orphan rows (no linked coverage) get a red dashed background and a `⚠️ ללא מחליף` badge, sorted to the top of the list. Stub absences (`workerId=''`) render their name as a `(ללא רישום נעדר/ת)` placeholder so the open slot is still visible. The existing absences stat card grows a `X פעילות · Y ללא מחליף` sub-line (`· Y ללא מחליף` omitted when Y=0). New pure helper `networkAbsenceCoverageRows` in `lib/calc.js` — no side effects, the dashboard never writes. Per-house views are unchanged.
+- **Per-house "+ עובד חדש" button** — Moran's "I don't see a place to add a worker" feedback. The standalone worker-create dialog (name + notes) was already wired as a sub-flow inside the "+ שיבוץ חדש" form, but undiscoverable from the house view. This commit surfaces it as a top-level button alongside "+ שיבוץ חדש" in each house's roster section head; clicking opens the worker dialog directly (no assignment form first) and the user stays on the house view after save, with a different success toast (`העובד נוסף — אפשר להוסיף שיבוץ ידנית`) that hints at the next step. The existing assignment-form sub-flow's own toast is unchanged. **Soft dup-name warning** added to the dialog: typing a name that already exists on another worker surfaces an inline `⚠️ עובד/ת בשם זהה כבר קיים/ת` notice — soft only, the save proceeds (legitimate duplicates do occur). Edit mode excludes the worker being edited from the dup check, so re-saving an unchanged name never flags itself.
+
+### Changed
+
+- **v3.1 — absence and coverage are now INDEPENDENT events.** Previously a coverage inherited its receiving house and effective date range from its parent absence. Now every coverage carries those fields itself, and the link to an absence is optional + reference-only. This is a breaking schema + cost-contract change; a one-shot in-place migrator (`migrateCoveragesToV3_1`, idempotency flag `V3_1_MIGRATION_DONE`) rewrites existing coverage rows.
+  - **Schema (coverages tab).** `providing_house` → `covering_house`; new columns `receiving_house`, `start_date`, `end_date`. `absence_id` becomes optional (`''` allowed). `setupSheetsV3` produces the new shape directly for fresh installs; `migrateCoveragesToV3_1` patches existing v3.0 sheets in-place — `covering_house` carries forward the old `providing_house` value, and `receiving_house` / `start_date` / `end_date` are backfilled from the linked absence. Orphan coverages (no linked absence or pointing to a deleted absence) end up with `receiving_house=''` and empty dates; cost accrues nowhere for those until Moran fills them in via the UI.
+  - **Cost contract.** Coverage extras accrue to `receivingHouse`, not `coveringHouse`. Activeness depends on whether the coverage is linked to an absence:
+    - **Linked coverage (`absenceId` set):** active iff today ∈ [`coverage.startDate`, `coverage.endDate`] AND the linked absence is active today. Closing the absence early — `endAbsence` pulls `absence.endDate` to today and flips status to `ended` — drops the coverage extra on the same day, even if `coverage.endDate` stretches further. Matches real-world substitute-pay logic: when the regular employee returns, the substitute stops being paid. Equivalent upper bound: `min(coverage.endDate, absence.endDate)`.
+    - **Unlinked coverage (`absenceId=''`) or dangling link (the absence has been deleted):** active iff today ∈ [`coverage.startDate`, `coverage.endDate`]. No absence to tie to; the coverage row stands on its own. Same fall-through ensures `deleteAbsence` doesn't strand cost — the coverage keeps accruing on its own dates.
+  - **Validation.** `validateCoverage` rejects `receivingHouse === coveringHouse` and requires `endDate ≥ startDate`. Server-side adds two cross-entity FK rules: (1) the covering worker must have an active assignment at `coveringHouse`; (2) when `absenceId` is set, the absence's house must equal `receivingHouse` AND the coverage's date range must overlap the absence's range. Hebrew error messages so the UI can surface them verbatim. `validateAbsence` now accepts empty `workerId` for stub rows (unfilled position, no identified absentee) — same shape as v2 migration produces, also creatable from the UI.
+  - **UI.** Absence modal: dropped the "house" picker (set by opener); worker dropdown is filtered to workers with an active assignment at the house. Two-step "absence → prompt for coverage" flow is gone — `coveragePromptOverlay` and the accept/decline functions are removed. Coverage modal: rebuilt around the new independence — picks covering worker (filtered to current house), receiving house, optional linked absence (dependent dropdown that re-fetches when receiving house changes; shows only active absences at the receiving house), own start/end dates, and extraPayment. House view: separate `היעדרויות פעילות` and `החלפות פעילות` sections; coverages are no longer nested under absences; new `+ אירוע החלפה` button alongside `+ אירוע היעדרות`; the new section shows coverages where `coveringHouse === this house` (i.e. this house's workers helping elsewhere).
+  - **FK behavior.** `deleteAbsence` no longer cascades to coverages and is no longer blocked by linked coverages — the link is reference-only. A coverage whose `absenceId` points at a deleted absence simply becomes an unlinked coverage; its dates + receivingHouse are intact, so cost attribution is unaffected.
+
+### Changed (carried from earlier in [Unreleased])
+
+- v3 UX rename pass: tighter Hebrew labels (`אירוע היעדרות` / `אירוע החלפה`); the `בית מתארח` concept is no longer surfaced in the UI. Strings-only commit — no logic, schema, or data-field changes. (The coverage source-house field was relabeled `בית מקור של המחליף/ה` in that commit; this commit removes the field entirely as part of the form rebuild.)
+
+## [3.0.0] — 2026-05-25 — Workers + per-house assignments + absence/coverage split
+
+Major data-model redesign. The v2 "employee at a house" abstraction is replaced by **worker × assignment** — one worker can hold an assignment at multiple houses, each with its own role, employment type, and cost terms. The v2 coverage *event* (a single row mixing absentee + helper + bonus) is split into a normalized **absence + coverage** pair, so an absence can have zero, one, or many coverages, and coverage records survive the absence's end as audit history.
+
+### Core principle
+
+A **worker** is an identity (name + notes). What they cost and where they work lives on their **assignments** — one row per (worker × house) pair. Cost is computed per-assignment per-type, never auto-split. When an absence is logged, it carries the house the worker is absent *from*; any coverage payment accrues to that house, not to wherever the covering worker comes from.
+
+### Cost attribution contract (v3)
+
+```
+assignmentCost(a)         = per-type:
+                              full_time      → salary
+                              part_time      → salary × pct/100
+                              hourly         → hourlyRate × estHours
+                              per_session    → sessionRate × estSessions
+                              fixed_retainer → retainerAmount
+
+houseAssignmentsCost(h)   = Σ assignmentCost(a) for a where a.house = h
+coverageExtra(h, today)   = Σ c.extraPayment for c where c.absence.house = h
+                            AND c.absence is active(today)
+pendingHouseCost(h, today)= Σ frozen-cost over archive_v3 where house = h
+                            AND terminationDate > today
+houseTotal(h, today)      = houseAssignmentsCost(h)
+                          + coverageExtra(h, today)
+                          + pendingHouseCost(h, today)
+networkTotal(today)       = Σ houseAssignmentsCost over all houses
+                          + Σ coverageExtra over all active absences
+                          + Σ pendingHouseCost over all houses
+```
+
+Each per-house assignment cost counts in **exactly one** house total (the assignment's own `house`). A worker with assignments in two houses contributes a cost line in each, with no double-counting. Coverage extras stack on top of the absent worker's house — independent of where the covering worker comes from. Pending terminations continue contributing until `terminationDate` arrives; on that day the archive row stops counting, matching the v2 semantics.
+
+### Data model
+
+The Sheet now has **five new tabs**, all created idempotently by `setupSheetsV3`:
+
+- **`workers`** — `id | name | notes | created_at`. One row per person. The id is reused as `worker_id` everywhere (legacy migration reuses the v2 `employee_id` verbatim, no `w` prefix).
+- **`assignments`** — `id | worker_id | house | role | role_detail | employment_type | salary | pct | hourly_rate | est_hours | session_rate | est_sessions | retainer_amount | notes | created_at`. One row per worker × house. Each row carries its own per-type terms.
+- **`absences`** — `id | worker_id | house | start_date | end_date | reason_type | reason_detail | notes | status | created_at`. `house` is the house the worker is missing FROM (= "house needing coverage" in the UI). `status` is a hint; date math is the source of truth, and the reader lazily corrects stale `active` rows past their end date.
+- **`coverages`** — `id | absence_id | covering_worker_id | providing_house | extra_payment | notes | created_at`. Many-to-one against absences. The effective date range of a coverage is its parent absence's range.
+- **`archive_v3`** — `id | assignment_id | worker_id | name | house | role | role_detail | employment_type | salary | pct | hourly_rate | est_hours | session_rate | est_sessions | retainer_amount | notes | termination_date | reason_type | reason_detail | archived_at`. A frozen snapshot per terminated assignment, so cost reconstruction works without joining back to the live tables.
+
+Legacy tabs (`ramot`/`asher`/`ofroni`/`rehab`, `events`, `history`, `archive`) are **read but never modified** by `migrateToV3` — the cutover writes new tabs and leaves the originals as a safety net. A separate `finalizeV3` step renames them to `_legacy_*` after a confidence window. See `MIGRATION.md` for the operational playbook.
+
+### Houses
+
+Expanded from 4 to **7** codes (canonical id → Hebrew display name lives in `MIGRATION.md` "Houses"):
+
+| code | Hebrew display name |
+|---|---|
+| `ramot` | בית מאזן רמות השבים |
+| `asher` | איזון רעננה - אשר |
+| `ofroni` | קיסריה עפרוני |
+| `rehab` | קיסריה ריהאב |
+| `pardes` | איזון רעננה - פרדס *(new)* |
+| `sde_eliezer` | שדה אליעזר *(new)* |
+| `hq` | מטה *(new — pseudo-house for HQ / admin staff)* |
+
+Because v3 has no per-house Sheet tabs (rosters live in the unified `assignments` table keyed by `house`), the three new codes required **no Sheet schema change** — just an expansion of the validator's allow-list. `hq` is treated like any other house code by the data model; it's only semantically different.
+
+### API changes
+
+Action allow-list — all v2 actions are gone, all v3 actions are new. The Express proxy (`/api/action`) and the Apps Script `doPost` both enforce this surface; calling a legacy action returns 400 with `unknown action`.
+
+- **`createWorker`** / **`updateWorker`** / **`deleteWorker`** — identity only. `deleteWorker` returns 409 if any assignment / absence / coverage / archive row references the worker (preserves history).
+- **`addAssignment`** — adds a per-house row. Rejects duplicate (worker × house) with 409.
+- **`updateAssignment`** — terms only; the (worker, house) pair is immutable for an existing row.
+- **`deleteAssignment`** — removes the row without touching the worker. No FK guard (assignments are leaves).
+- **`terminateAssignment`** — snapshots the assignment into `archive_v3`, removes the assignment row, and auto-truncates any active absence at the same (worker, house) to `end_date = terminationDate` (status recomputed against today). Future termination dates are supported — cost continues counting via `pendingHouseCost` until the date arrives.
+- **`logAbsence`** — adds an absence. Rejects overlapping active absences for the same (worker, house) with 409.
+- **`endAbsence`** — sets `end_date = today` (if currently after) and `status = 'ended'`.
+- **`deleteAbsence`** — returns 409 if any coverage references the absence (must delete coverages first).
+- **`addCoverage`** / **`deleteCoverage`** — link / unlink a covering worker against an existing absence. Server has no `updateCoverage` — to edit, delete and re-add.
+
+**Strict per-type assignment validation.** `validateAssignment` (both `lib/validate.js` and the Apps Script mirror) **rejects** any cost field that doesn't belong to the chosen `employment_type` — e.g. `{employmentType: 'full_time', salary: 18000, hourlyRate: 80}` returns 400 with `hourlyRate not allowed for employmentType=full_time`. v2 silently zeroed those out; v3 surfaces the inconsistency. Zero / null / undefined / `""` for foreign fields stays accepted, so legacy → v3 migration round-trips cleanly (the mappers zero every non-applicable field).
+
+**Reason codes.** `ABSENCE_REASON_TYPES` adds `אישי` (now 8 reasons). `TERMINATION_REASONS` is unchanged from v2.
+
+`/api/data` (GET) returns both shapes during the transition: `{ workers, assignments, absences, coverages, archiveV3, houses, events, archive, _compat: true }`. The legacy passthrough keys are populated until `finalizeV3` renames the legacy tabs, after which they return empty arrays / objects.
+
+### UI changes
+
+Shipped as three reviewable commits on top of the existing dark / gold theme:
+
+- **Read-only views first** (`92defb4`). New 7-house topbar + dashboard with `סה״כ עובדים/ות` (worker count) and `נעדרים פעילים היום` stat cards. Per-house view splits the roster into **שכירים** (`full_time` / `part_time` / `hourly`) and **פרילנסרים** (`per_session` / `fixed_retainer`) sub-groups. Absences are listed under a `נעדרים פעילים` section, each with their coverage(s) nested as `מחליף/ה: NAME (מבית X) · תוספת ₪Y`. Archive view reads `archive_v3`, sorted newest-first, with the `employmentType` shown alongside the role pill.
+
+- **Worker + assignment forms** (`a6a0fb5`). Adds `+ שיבוץ חדש` and the row actions (`עריכה` / `הפסקת עבודה` / `מחיקת שיבוץ`). The assignment dialog's fields swap by `employmentType` — only the type's allowed cost fields are visible, the notes field stays visible regardless of type. Worker names in the roster are clickable links that open a worker dialog; the assignment dialog's worker dropdown includes a `+ צור עובד/ת חדש/ה` pseudo-option that layers the worker dialog above and pre-selects the new worker on return. Client-side validation mirrors the server's strictness (foreign cost fields never POSTed; per-type required fields checked before the round-trip).
+
+- **Two-step absence → coverage flow** (`4ac2768`). `+ רישום היעדרות` opens the absence dialog. On save, a small follow-up modal asks `ההיעדרות נשמרה — לרשום מחליף/ה עכשיו?` — `הוסף מחליף/ה` opens the coverage dialog with the absence prelinked, `לא` closes and leaves the absence in its `ללא מחליף` state. The `ללא מחליף` prompt's `הוסף החלפה` button (placeholder'd in commit 1) is now active. Multiple coverages per absence are supported (`+ עוד מחליף/ה`). The absentee is filtered out of the covering-worker dropdown; picking a covering worker auto-defaults the providing house to one of their existing assignments. Active absences get `סיום` and (when no coverages reference them) `מחיקה` buttons.
+
+### Tests
+
+- `lib/calc.js` rewritten for v3 — per-type `assignmentCost`, `splitByCategory`, `houseTotal`, `networkTotal`, `coverageExtra`, `pendingHouseCost`. 60+ unit tests.
+- `lib/validate.js` rewritten — `validateWorker` / `validateAssignment` (with the strict per-type rejection) / `validateAbsence` / `validateCoverage` / `validateAction` (the v3 action allow-list). Tests cover every type's required + foreign-field combinations.
+- `lib/migrate.js` — pure v2 → v3 row mappers. Round-trip assertion confirms migrated rows still pass the v3 validator (the mappers zero foreign fields, which satisfies strictness).
+- `tests/server.test.js` rebuilt against a v3 fake upstream. Worker CRUD with FK guards, assignment lifecycle including per-type validation + termination + auto-truncate-absence, absence / coverage CRUD with the 409 FK guard on `deleteAbsence-while-coverage-exists`, all removed v2 actions verified as 400.
+- `tests/page-load.test.js` updated for the v3 surface — fetch stub returns v3 keys, `arch()` factory matches `archive_v3` row shape, `EZONE_CALC.assignmentCost` (not `cost`) is asserted on the destructure.
+- `tests/spelling.test.js` retained — repo-wide guard against the historical typo.
+- `smoke.js` rewritten — end-to-end through `createWorker` → `addAssignment` → `logAbsence` → `addCoverage` → cost-attribution sanity check → `terminateAssignment` → cleanup. Also probes the strict validator end-to-end (`full_time + hourlyRate` → expected 400 with the precise error). Not auto-run; manual invocation during release qualification (requires a real Apps Script test sheet).
+
+158/158 unit + integration tests pass.
+
+### Migration / rollout
+
+See **`MIGRATION.md`** for the full playbook. Summary:
+
+1. **Phase 1 — test on a copy.** Make a copy of the production Sheet, bind a separate Apps Script project to it, paste the v3 `Code.gs`, set the test `SHEET_ID` + `SHARED_SECRET` script properties, deploy a test Web App, run `setupSheetsV3` → `dryRunMigrateToV3` → `migrateToV3`. Verify against the v3 UI locally pointed at the test Web App. `rollbackV3` is supported and idempotent.
+2. **Phase 2 — production cutover.** Paste `Code.gs` into the production Apps Script project, deploy a new Web App version (URL unchanged), run `setupSheetsV3` → `dryRunMigrateToV3` → `migrateToV3`. Push the v3 branch to Railway; reload.
+3. **Finalize after stable operation.** `finalizeV3` renames the legacy tabs to `_legacy_*`. The v3 UI is unaffected (it only reads the v3 tabs). After finalize, the legacy passthrough keys in `/api/data` return empty.
+
+Rollback is safe at every stage. Pre-`finalizeV3`: redeploy the v2 `Code.gs` from the deployment dropdown, run `rollbackV3` to drop the v3 tabs. Post-`finalizeV3`: redeploy v2, rename `_legacy_*` back, run `rollbackV3`. Worst case: restore from the manual production-Sheet copy made in the pre-flight step.
+
+### Removed
+
+- **All v2 actions.** `addEmployee` / `updateEmployee` / `deleteEmployee` / `moveEmployee` / `startCoverage` / `endCoverage` / `terminateEmployee` are gone. Calling them returns 400. The v2 client cannot operate against the v3 server; the deploy order matters (Apps Script first, then Railway picks up the new UI).
+- **Per-house Sheet tabs** as the source of truth for who works where. They're still read for the migration's input, and they survive under `_legacy_*` after `finalizeV3` as an audit trail — but no new code writes to them.
+
 ## [2.1.2] — 2026-05-22 — Archive on a dedicated page + Hebrew typo fix
 
-- **Spelling**: section header was `אורכיב עובדים` — the correct Hebrew is `ארכיב` (without the ו). Fixed every occurrence in `public/index.html` and `CHANGELOG.md`. New `tests/spelling.test.js` walks the whole repo on every test run and asserts `אורכיב` never appears again, plus asserts the dashboard nav uses the correctly-spelled `ארכיב עובדים`.
+- **Spelling**: section header had the wrong Hebrew — an extra ו between the leading א and the ר (the typo can't be written literally here because `tests/spelling.test.js` would catch it). The correct Hebrew is `ארכיב` (no ו after the א). Fixed every occurrence in `public/index.html` and `CHANGELOG.md`. New `tests/spelling.test.js` walks the whole repo on every test run and asserts the typo never appears again, plus asserts the dashboard nav uses the correctly-spelled `ארכיב עובדים`.
 - **Archive moved off the dashboard**: the collapsed `ארכיב עובדים` section is gone from `centralView`. The archive now lives on its own SPA view, reached via a small `ארכיב עובדים` link in the topbar (right of the house tabs, before `יציאה`). Same dark-navy + gold theme; the view has its own page title, a single accent stat card showing the total, and the full table sorted newest-first.
 - **Auth gating unchanged but pinned**: the archive view is part of the same SPA, gated by the existing PIN flow — `boot()` only renders any view (including archive) after `loadData()` succeeds against the auth-required `/api/data` endpoint. A new page-load test asserts this explicitly: with no token, the PIN overlay shows, the app container stays hidden, and no `.archive-table` ever reaches the DOM.
 - **No Apps Script changes** — the data contract (`{ houses, events, archive }`) is unchanged. Railway picks this up on push; no manual redeploy needed.
 
 ### Tests added
-- `tests/spelling.test.js`: repo-wide grep for `אורכיב`, plus the dashboard's `ארכיב עובדים` correctness check.
+- `tests/spelling.test.js`: repo-wide grep for the wrong spelling (extra ו), plus the dashboard's `ארכיב עובדים` correctness check.
 - `tests/page-load.test.js`: dashboard view does NOT contain `.archive-table`; archive view renders archive rows sorted newest-first; PIN gate shows when there's no token (and no archive content leaks into the hidden app container). A new `authAndBoot()` helper seeds a session token via `localStorage`, stubs `fetch`, and awaits `boot()` so tests can drive the post-auth state deterministically.
 
 ## [2.1.0] — 2026-05-21 — Termination flow + archive + dashboard tweaks
