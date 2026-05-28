@@ -490,6 +490,34 @@ tbody tr:hover{
 .section-note{font-size:12px;color:var(--muted);margin-top:10px;line-height:1.5}
 .cover-meta{font-size:11px;color:var(--ink-soft);margin-right:6px;font-weight:600}
 
+/* Per-house roster search. Sits between the roster section-head and the
+   שכירים/פרילנסרים subgroups. A search-glyph prefix sits inside the
+   field via background-image (RTL: positioned right). The input reuses
+   the dark .field input styling but is standalone (not inside a .field
+   block) so it gets explicit padding here. */
+.roster-search{margin:4px 0 18px}
+.roster-search input{
+  width:100%;
+  max-width:380px;
+  font-family:inherit;
+  font-size:14px;
+  padding:11px 42px 11px 14px;
+  border:1px solid var(--line-strong);
+  border-radius:10px;
+  background:var(--bg-elevated);
+  color:var(--ink);
+  outline:none;
+  transition:border-color .15s, box-shadow .15s;
+  background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%238A8FA3' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='8'/%3E%3Cpath d='m21 21-4.3-4.3'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;
+  background-position:right 14px center;
+}
+.roster-search input:focus{
+  border-color:var(--accent-2);
+  box-shadow:0 0 0 3px rgba(239,159,39,0.18);
+}
+.roster-search input::placeholder{color:var(--muted)}
+
 /* Dashboard join rows (היעדרויות פעילות ברשת). One row per active
    absence, with optional matching coverage. Read-only — no row actions
    live here. Orphan variant gets the same red-dashed treatment as the
@@ -789,9 +817,19 @@ tbody tr:hover{
     <div class="modal-foot">
       <button class="btn btn-primary" id="workerSaveBtn" onclick="saveWorker()">שמירה</button>
       <button class="btn btn-ghost" onclick="closeWorker()">ביטול</button>
-      <!-- Delete is only enabled when no FK refs (server rejects with 409
-           otherwise). The button is hidden by JS in that case. -->
+      <!-- Two delete paths, mutually exclusive (openWorker shows exactly
+           one). Both push leftward via margin-inline-start:auto so the
+           destructive action sits at the far edge, away from שמירה.
+           - workerDeleteBtn: plain delete. Shown only when the worker has
+             NO refs at all — server's deleteWorker accepts it directly.
+           - workerDeleteCascadeBtn: delete worker + all their assignments
+             in one go. Shown when the only refs are assignments (no
+             absence/coverage/archive history). deleteWorkerCascade()
+             removes each assignment first, then the worker. Blocked when
+             real history exists — those records are worth preserving and
+             the server would 409 anyway. -->
       <button class="btn btn-danger-hover" id="workerDeleteBtn" onclick="deleteWorker()" style="margin-inline-start:auto;display:none">מחיקה</button>
+      <button class="btn btn-danger-hover" id="workerDeleteCascadeBtn" onclick="deleteWorkerCascade()" style="margin-inline-start:auto;display:none">מחיקת עובד/ת + כל השיבוצים</button>
     </div>
   </div>
 </div>
@@ -1105,6 +1143,12 @@ let ABSENCES = [];
 let COVERAGES = [];
 let ARCHIVE_V3 = [];
 let view = 'central';
+// Per-house roster search term. Filters the roster tables (שכירים +
+// פרילנסרים) by worker name within a single house view. Lives in module
+// state — not the DOM — so a re-render (e.g. after an edit) keeps the
+// active filter. Reset to '' whenever we navigate to a different view
+// (see go()), so switching houses always starts unfiltered.
+let rosterFilter = '';
 
 /* ---------- API layer ---------- */
 
@@ -1324,6 +1368,20 @@ function workerHasReferences(workerId){
   return null;
 }
 
+// True when the worker's ONLY references are assignments — no absence,
+// coverage, or archive history. This is the case the cascade-delete
+// button handles: assignments can be safely removed (they carry no
+// independent history once the worker is going away), but absence /
+// coverage / archive rows are real events we refuse to cascade-delete.
+function workerHasOnlyAssignmentRefs(workerId){
+  const hasAssignments = ASSIGNMENTS.some(a => a.workerId === workerId);
+  if (!hasAssignments) return false;
+  if (ABSENCES.some(a => a.workerId === workerId)) return false;
+  if (COVERAGES.some(c => c.coveringWorkerId === workerId)) return false;
+  if (ARCHIVE_V3.some(a => a.workerId === workerId)) return false;
+  return true;
+}
+
 function openWorker(workerId){
   const w = workerId ? workerById(workerId) : null;
   editingWorker = w
@@ -1332,15 +1390,34 @@ function openWorker(workerId){
   document.getElementById('workerModalTitle').textContent = w ? 'עריכת עובד/ת' : 'עובד/ת חדש/ה';
   const sub = document.getElementById('workerModalSub');
   const delBtn = document.getElementById('workerDeleteBtn');
+  const delCascadeBtn = document.getElementById('workerDeleteCascadeBtn');
+  // Three delete states, decided here so only one button ever shows:
+  //   1. no refs at all      → plain מחיקה (server accepts as-is)
+  //   2. ONLY assignments    → cascade button (delete assignments + worker)
+  //   3. absence/coverage/   → neither button; deletion is blocked because
+  //      archive history        those records are worth preserving (and the
+  //                             server would 409 regardless).
   if (w){
-    const ref = workerHasReferences(w.id);
-    sub.textContent = ref
-      ? 'שינוי שם / הערות. מחיקה לא אפשרית — קיימות רשומות תלויות.'
-      : 'שינוי שם / הערות.';
-    delBtn.style.display = ref ? 'none' : '';
+    const onlyAssignments = workerHasOnlyAssignmentRefs(w.id);
+    const anyRef = workerHasReferences(w.id);
+    const asgCount = ASSIGNMENTS.filter(a => a.workerId === w.id).length;
+    if (!anyRef){
+      sub.textContent = 'שינוי שם / הערות.';
+      delBtn.style.display = '';
+      delCascadeBtn.style.display = 'none';
+    } else if (onlyAssignments){
+      sub.textContent = 'שינוי שם / הערות. מחיקה תסיר את העובד/ת ואת ' + asgCount + ' השיבוצים שלו/ה.';
+      delBtn.style.display = 'none';
+      delCascadeBtn.style.display = '';
+    } else {
+      sub.textContent = 'שינוי שם / הערות. מחיקה לא אפשרית — קיימות רשומות היעדרות/החלפה/ארכיב.';
+      delBtn.style.display = 'none';
+      delCascadeBtn.style.display = 'none';
+    }
   } else {
     sub.textContent = '';
     delBtn.style.display = 'none';
+    delCascadeBtn.style.display = 'none';
   }
   document.getElementById('w_name').value = editingWorker.name;
   document.getElementById('w_notes').value = editingWorker.notes;
@@ -1424,6 +1501,54 @@ async function deleteWorker(){
     toast('העובד/ת נמחק/ה');
   } catch (err) {
     toast(err.message || 'שגיאה במחיקה', true);
+  }
+}
+
+// Cascade delete: remove all of the worker's assignments, then the
+// worker. Used for cleanup of test rows that already picked up
+// assignments. Guarded the same way the button visibility is — refuses
+// if the worker has absence/coverage/archive history (those are real
+// records; the server would 409 on the final deleteWorker anyway).
+//
+// The server has no cascade endpoint, so this is N deleteAssignment
+// calls followed by one deleteWorker. Not transactional: if a mid-loop
+// call fails we stop, reload, and report — leaving the worker in place
+// with however many assignments remain, so Moran can retry or inspect.
+// loadData() is called once at the end (not per-iteration) to keep it
+// quick; on error we reload before surfacing so the UI reflects reality.
+async function deleteWorkerCascade(){
+  if (!editingWorker || !editingWorker.id) return;
+  const wid = editingWorker.id;
+  const wname = editingWorker.name;
+
+  // Re-check guards against the live cache — defends against a stale
+  // modal (e.g. data refreshed underneath since openWorker ran).
+  if (!workerHasOnlyAssignmentRefs(wid)){
+    toast('מחיקה לא אפשרית — קיימות רשומות היעדרות/החלפה/ארכיב', true);
+    return;
+  }
+
+  const asgs = ASSIGNMENTS.filter(a => a.workerId === wid);
+  if (!confirm('למחוק את ' + wname + ' ואת ' + asgs.length + ' השיבוצים שלו/ה? פעולה זו אינה הפיכה.')) return;
+
+  setBusy('workerDeleteCascadeBtn', true, 'מוחק…');
+  try {
+    // Delete assignments first — server's deleteWorker refuses while any
+    // assignment still references the worker.
+    for (let i = 0; i < asgs.length; i++){
+      await doAction({ action: 'deleteAssignment', id: asgs[i].id });
+    }
+    await doAction({ action: 'deleteWorker', id: wid });
+    await loadData();
+    closeWorker();
+    render();
+    toast('העובד/ת וכל השיבוצים נמחקו');
+  } catch (err) {
+    // Partial failure: reload so the UI shows what actually remains.
+    try { await loadData(); render(); } catch (_e) {}
+    toast(err.message || 'שגיאה במחיקה', true);
+  } finally {
+    setBusy('workerDeleteCascadeBtn', false);
   }
 }
 
@@ -1950,7 +2075,7 @@ function renderSwitch(){
   html += `<button class="logout" onclick="logout()">יציאה</button>`;
   el.innerHTML=html;
 }
-function go(v){ view=v; render(); window.scrollTo(0,0); }
+function go(v){ view=v; rosterFilter=''; render(); window.scrollTo(0,0); }
 function logout(){ clearToken(); showPinGate(); }
 
 function render(){
@@ -2143,7 +2268,11 @@ function rosterRow(a){
   </tr>`;
 }
 
-function rosterTable(rows){
+// rosterTableInner renders just the scrollable table (no wrapper id).
+// Split out from rosterTable so onRosterFilterInput() can swap the table
+// body in place (into #rosterSalaried / #rosterFreelancer) without
+// rebuilding the search input and losing focus.
+function rosterTableInner(rows){
   const body = rows.length
     ? rows.map(rosterRow).join('')
     : `<tr><td colspan="6"><div class="empty-soft">אין שיבוצים בקטגוריה זו</div></td></tr>`;
@@ -2157,6 +2286,10 @@ function rosterTable(rows){
       <tbody>${body}</tbody>
     </table>
   </div>`;
+}
+
+function rosterTable(rows){
+  return rosterTableInner(rows);
 }
 
 // v3.1: absence row is self-contained. Coverages live in their own
@@ -2230,10 +2363,50 @@ function renderCoverageRow(coverage){
   </div>`;
 }
 
+// Roster search. onRosterFilterInput() is wired to the per-house search
+// box's oninput. It updates module state, then re-renders ONLY the two
+// roster tables in place (not the whole view) so the input keeps focus
+// and the caret position while typing — a full render() would rebuild
+// the input element and drop focus after each keystroke.
+function onRosterFilterInput(value){
+  rosterFilter = String(value || '');
+  const id = view;  // house views set view to the house id
+  const list = rosterAt(id);
+  const filtered = filterRoster(list, rosterFilter);
+  const split = calcSplitByCategory(filtered);
+  const salariedWrap = document.getElementById('rosterSalaried');
+  const freelancerWrap = document.getElementById('rosterFreelancer');
+  if (salariedWrap) salariedWrap.innerHTML = rosterTableInner(split.salaried);
+  if (freelancerWrap) freelancerWrap.innerHTML = rosterTableInner(split.freelancer);
+  // Keep the live count pills in sync with what's shown.
+  const sCount = document.getElementById('rosterSalariedCount');
+  const fCount = document.getElementById('rosterFreelancerCount');
+  if (sCount) sCount.textContent = split.salaried.length;
+  if (fCount) fCount.textContent = split.freelancer.length;
+}
+
+// Filters a list of assignments to those whose worker's name contains
+// the term (case-insensitive, trimmed). Empty term → unchanged list.
+// Matches on worker NAME, which is what Moran searches by; the roster
+// rows are assignments, so we resolve each row's workerId → name.
+function filterRoster(list, term){
+  const t = String(term || '').trim().toLowerCase();
+  if (!t) return list;
+  return list.filter(a => {
+    const n = (workerName(a.workerId) || '').toLowerCase();
+    return n.indexOf(t) >= 0;
+  });
+}
+
 function houseView(id){
   const today = calcTodayStr();
   const list = rosterAt(id);
-  const split = calcSplitByCategory(list);
+  // Apply the active search filter (if any) before splitting into
+  // salaried / freelancer. The unfiltered `list` is still used for the
+  // stat cards + house totals — search narrows only the roster tables,
+  // not the headline numbers.
+  const filtered = filterRoster(list, rosterFilter);
+  const split = calcSplitByCategory(filtered);
   const houseT = calcHouseTotal(ASSIGNMENTS, COVERAGES, ABSENCES, ARCHIVE_V3, id, today);
   const extra = calcCoverageExtra(COVERAGES, ABSENCES, id, today);
   const pending = calcPendingHouseCost(ARCHIVE_V3, id, today);
@@ -2246,15 +2419,18 @@ function houseView(id){
     c.coveringHouse === id && calcIsCoverageActive(c, today, ABSENCES)
   );
 
+  // Subgroup wrappers carry ids so onRosterFilterInput() can swap their
+  // inner tables in place while typing (keeps the search box focused).
+  // The count pills get ids too so they track the filtered counts live.
   const subSalaried = `
   <div class="subgroup">
-    <h3 class="subgroup-head">שכירים <span class="count-pill">${split.salaried.length}</span></h3>
-    ${rosterTable(split.salaried)}
+    <h3 class="subgroup-head">שכירים <span class="count-pill" id="rosterSalariedCount">${split.salaried.length}</span></h3>
+    <div id="rosterSalaried">${rosterTableInner(split.salaried)}</div>
   </div>`;
   const subFreelancer = `
   <div class="subgroup">
-    <h3 class="subgroup-head">פרילנסרים <span class="count-pill">${split.freelancer.length}</span></h3>
-    ${rosterTable(split.freelancer)}
+    <h3 class="subgroup-head">פרילנסרים <span class="count-pill" id="rosterFreelancerCount">${split.freelancer.length}</span></h3>
+    <div id="rosterFreelancer">${rosterTableInner(split.freelancer)}</div>
   </div>`;
 
   const absencesSection = `
@@ -2351,6 +2527,19 @@ function houseView(id){
         <button class="btn btn-primary" onclick="openAssignment({house:'${escapeHtml(id)}'})">+ שיבוץ חדש</button>
         <button class="btn btn-primary" onclick="openWorker()">+ עובד חדש</button>
       </div>
+    </div>
+    <!-- Per-house roster search. value is bound to module state so it
+         survives re-renders; oninput updates the two tables in place
+         (see onRosterFilterInput) to keep focus while typing. -->
+    <div class="roster-search">
+      <input
+        type="text"
+        id="rosterSearch"
+        placeholder="חיפוש עובד/ת לפי שם…"
+        value="${escapeHtml(rosterFilter)}"
+        oninput="onRosterFilterInput(this.value)"
+        autocomplete="off"
+      />
     </div>
     ${subSalaried}
     ${subFreelancer}
