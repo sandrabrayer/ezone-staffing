@@ -790,8 +790,12 @@ tbody tr:hover{
 
 <div class="wrap" id="app" style="display:none"></div>
 
-<!-- Worker modal: identity only (name + notes). No house, no terms —
-     those live on assignments, one per worker × house pair. -->
+<!-- Worker modal (combined). Creates/edits a worker's identity (name +
+     notes) AND their assignment at the current house in one form. The
+     house is fixed by the opener (always a house tab), shown in the
+     sub-header rather than a picker. Per-type cost fields toggle via
+     data-wcost-field, mirroring the assignment modal. On edit, the
+     worker's assignment at this house (if any) prefills the terms. -->
 <div class="overlay" id="workerOverlay">
   <div class="modal">
     <div class="modal-head">
@@ -802,13 +806,66 @@ tbody tr:hover{
       <div class="field">
         <label>שם מלא</label>
         <input id="w_name" type="text" placeholder="שם העובד/ת" maxlength="80" oninput="onWorkerNameInput()"/>
-        <!-- Inline soft warning: a worker with this exact name already
-             exists. Save is still allowed (legitimate duplicates do
-             happen — same first name across families) but the hint
-             nudges Moran to double-check before creating a second row.
-             Hidden by default; toggled by onWorkerNameInput(). -->
         <div class="hint" id="w_nameDupWarning" style="display:none;color:var(--warning)">⚠️ עובד/ת בשם זהה כבר קיים/ת — שמירה תיצור רשומה נפרדת</div>
       </div>
+
+      <!-- Assignment terms. Shown only when the form operates on a single
+           house (the normal add / single-house edit case). Hidden for the
+           rare "edit a worker who has assignments at several houses" case,
+           where per-house terms must be edited from the roster row. -->
+      <div id="w_terms">
+        <div class="field">
+          <label>תפקיד</label>
+          <select id="w_role" onchange="onWorkerRoleChange()"></select>
+        </div>
+        <div class="field hidden" id="w_roleDetail_wrap">
+          <label id="w_roleDetail_label">פירוט תפקיד</label>
+          <input id="w_roleDetail" type="text" maxlength="80"/>
+        </div>
+        <div class="field">
+          <label>סוג העסקה</label>
+          <select id="w_type" onchange="onWorkerTypeChange()"></select>
+        </div>
+        <div class="field" data-wcost-field="salary">
+          <label>שכר ברוטו חודשי (₪)</label>
+          <input id="w_salary" type="number" min="0" step="100" placeholder="0"/>
+        </div>
+        <div class="field" data-wcost-field="pct">
+          <label>חלקיות משרה (%)</label>
+          <input id="w_pct" type="number" min="1" max="100" placeholder="100"/>
+          <div class="hint">העלות בפועל = שכר × חלקיות / 100</div>
+        </div>
+        <div class="field" data-wcost-field="hourlyRate">
+          <label>תעריף שעה (₪)</label>
+          <input id="w_hourlyRate" type="number" min="0" step="1" placeholder="0"/>
+        </div>
+        <div class="field" data-wcost-field="estHours">
+          <label>שעות בחודש (הערכה)</label>
+          <input id="w_estHours" type="number" min="0" step="1" placeholder="0"/>
+        </div>
+        <div class="field" data-wcost-field="sessionRate">
+          <label>תעריף למפגש (₪)</label>
+          <input id="w_sessionRate" type="number" min="0" step="10" placeholder="0"/>
+        </div>
+        <div class="field" data-wcost-field="estSessions">
+          <label>מפגשים בחודש (הערכה)</label>
+          <input id="w_estSessions" type="number" min="0" step="1" placeholder="0"/>
+        </div>
+        <div class="field" data-wcost-field="retainerAmount">
+          <label>ריטיינר חודשי (₪)</label>
+          <input id="w_retainerAmount" type="number" min="0" step="100" placeholder="0"/>
+        </div>
+        <!-- Allowance: applies to every employment type. -->
+        <div class="field">
+          <label>רכב / דלק</label>
+          <select id="w_allowance">
+            <option value="0">ללא</option>
+            <option value="2000">דלק בלבד – 2,000 ₪</option>
+            <option value="6000">רכב + דלק – 6,000 ₪</option>
+          </select>
+        </div>
+      </div>
+
       <div class="field">
         <label>הערות</label>
         <textarea id="w_notes" placeholder="הערות פנימיות" maxlength="500"></textarea>
@@ -817,17 +874,6 @@ tbody tr:hover{
     <div class="modal-foot">
       <button class="btn btn-primary" id="workerSaveBtn" onclick="saveWorker()">שמירה</button>
       <button class="btn btn-ghost" onclick="closeWorker()">ביטול</button>
-      <!-- Two delete paths, mutually exclusive (openWorker shows exactly
-           one). Both push leftward via margin-inline-start:auto so the
-           destructive action sits at the far edge, away from שמירה.
-           - workerDeleteBtn: plain delete. Shown only when the worker has
-             NO refs at all — server's deleteWorker accepts it directly.
-           - workerDeleteCascadeBtn: delete worker + all their assignments
-             in one go. Shown when the only refs are assignments (no
-             absence/coverage/archive history). deleteWorkerCascade()
-             removes each assignment first, then the worker. Blocked when
-             real history exists — those records are worth preserving and
-             the server would 409 anyway. -->
       <button class="btn btn-danger-hover" id="workerDeleteBtn" onclick="deleteWorker()" style="margin-inline-start:auto;display:none">מחיקה</button>
       <button class="btn btn-danger-hover" id="workerDeleteCascadeBtn" onclick="deleteWorkerCascade()" style="margin-inline-start:auto;display:none">מחיקת עובד/ת + כל השיבוצים</button>
     </div>
@@ -1422,51 +1468,131 @@ function workerHasOnlyAssignmentRefs(workerId){
   return true;
 }
 
-function openWorker(workerId){
+// Opens the combined worker form. `house` fixes which house the terms
+// apply to (always supplied from a house tab). On edit, prefills the
+// worker's assignment AT THAT HOUSE if one exists.
+//
+// editingWorker now also carries the assignment context:
+//   { id?, name, notes, house, assignmentId? }
+// assignmentId set → we're editing an existing assignment's terms;
+// unset → saving will CREATE an assignment at `house`.
+function openWorker(workerId, house){
   const w = workerId ? workerById(workerId) : null;
-  editingWorker = w
-    ? { id: w.id, name: w.name, notes: w.notes || '' }
-    : { name: '', notes: '' };
+  const targetHouse = house || (HOUSES[0] && HOUSES[0].id);
+
+  // The worker's assignment at the target house (if any). For a brand-new
+  // worker, or a worker with no assignment here, this is null → create.
+  const asg = w
+    ? ASSIGNMENTS.find(a => a.workerId === w.id && a.house === targetHouse)
+    : null;
+
+  // Multi-house guard: if the worker has assignments at OTHER houses too,
+  // editing all their terms from one house form would be misleading. We
+  // still let them edit name/notes + this house's terms, but note it.
+  const otherHouseAsgs = w
+    ? ASSIGNMENTS.filter(a => a.workerId === w.id && a.house !== targetHouse)
+    : [];
+
+  editingWorker = {
+    id: w ? w.id : undefined,
+    name: w ? w.name : '',
+    notes: w ? (w.notes || '') : '',
+    house: targetHouse,
+    assignmentId: asg ? asg.id : undefined,
+  };
+
   document.getElementById('workerModalTitle').textContent = w ? 'עריכת עובד/ת' : 'עובד/ת חדש/ה';
+
   const sub = document.getElementById('workerModalSub');
+  let subText = 'בית ' + houseName(targetHouse);
+  if (otherHouseAsgs.length){
+    subText += ' · לעובד/ת שיבוצים גם בבתים אחרים — כאן נערכים תנאי בית זה בלבד';
+  }
+  sub.textContent = subText;
+
+  // Delete buttons: same three-state logic as before (name/notes identity
+  // level). Only meaningful on edit.
   const delBtn = document.getElementById('workerDeleteBtn');
   const delCascadeBtn = document.getElementById('workerDeleteCascadeBtn');
-  // Three delete states, decided here so only one button ever shows:
-  //   1. no refs at all      → plain מחיקה (server accepts as-is)
-  //   2. ONLY assignments    → cascade button (delete assignments + worker)
-  //   3. absence/coverage/   → neither button; deletion is blocked because
-  //      archive history        those records are worth preserving (and the
-  //                             server would 409 regardless).
   if (w){
     const onlyAssignments = workerHasOnlyAssignmentRefs(w.id);
     const anyRef = workerHasReferences(w.id);
-    const asgCount = ASSIGNMENTS.filter(a => a.workerId === w.id).length;
     if (!anyRef){
-      sub.textContent = 'שינוי שם / הערות.';
-      delBtn.style.display = '';
-      delCascadeBtn.style.display = 'none';
+      delBtn.style.display = ''; delCascadeBtn.style.display = 'none';
     } else if (onlyAssignments){
-      sub.textContent = 'שינוי שם / הערות. מחיקה תסיר את העובד/ת ואת ' + asgCount + ' השיבוצים שלו/ה.';
-      delBtn.style.display = 'none';
-      delCascadeBtn.style.display = '';
+      delBtn.style.display = 'none'; delCascadeBtn.style.display = '';
     } else {
-      sub.textContent = 'שינוי שם / הערות. מחיקה לא אפשרית — קיימות רשומות היעדרות/החלפה/ארכיב.';
-      delBtn.style.display = 'none';
-      delCascadeBtn.style.display = 'none';
+      delBtn.style.display = 'none'; delCascadeBtn.style.display = 'none';
     }
   } else {
-    sub.textContent = '';
     delBtn.style.display = 'none';
     delCascadeBtn.style.display = 'none';
   }
+
+  // Identity fields.
   document.getElementById('w_name').value = editingWorker.name;
   document.getElementById('w_notes').value = editingWorker.notes;
-  // Re-evaluate the dup-name hint against the current name + WORKERS.
-  // Reset (hide) on create; on edit, surface only if a DIFFERENT worker
-  // already carries the same name.
+
+  // Terms: prefill from the existing assignment at this house, else blank.
+  fillWorkerRoleDropdown(asg ? asg.role : ROLE_OPTIONS[0]);
+  fillWorkerTypeDropdown(asg ? asg.employmentType : 'full_time');
+  document.getElementById('w_roleDetail').value = asg ? (asg.roleDetail || '') : '';
+  ALL_COST_FIELDS.forEach(f => {
+    const el = document.getElementById('w_' + f);
+    if (el) el.value = asg && asg[f] ? asg[f] : '';
+  });
+  const allowanceVal = asg && [2000, 6000].indexOf(Number(asg.allowance)) >= 0 ? String(Number(asg.allowance)) : '0';
+  document.getElementById('w_allowance').value = allowanceVal;
+
+  onWorkerRoleChange();
+  onWorkerTypeChange();
   onWorkerNameInput();
   document.getElementById('workerOverlay').classList.add('show');
   setTimeout(() => document.getElementById('w_name').focus(), 50);
+}
+
+// Role/type dropdown fillers + change handlers for the worker form —
+// w_-prefixed twins of the assignment form's, so the two forms don't
+// share element ids.
+function fillWorkerRoleDropdown(selectedRole){
+  const sel = document.getElementById('w_role');
+  const effective = ROLE_OPTIONS.indexOf(selectedRole) >= 0 ? selectedRole : (selectedRole ? 'אחר' : ROLE_OPTIONS[0]);
+  sel.innerHTML = ROLE_OPTIONS.map(r =>
+    `<option value="${escapeHtml(r)}"${r===effective?' selected':''}>${escapeHtml(r)}</option>`
+  ).join('');
+}
+function fillWorkerTypeDropdown(selectedType){
+  const sel = document.getElementById('w_type');
+  sel.innerHTML = Object.keys(EMPLOYMENT_TYPE_LABELS).map(k =>
+    `<option value="${k}"${k===selectedType?' selected':''}>${escapeHtml(EMPLOYMENT_TYPE_LABELS[k])}</option>`
+  ).join('');
+}
+function onWorkerRoleChange(){
+  const role = document.getElementById('w_role').value;
+  const wrap = document.getElementById('w_roleDetail_wrap');
+  const lbl  = document.getElementById('w_roleDetail_label');
+  const inp  = document.getElementById('w_roleDetail');
+  if (role === 'מטפל/ת'){
+    wrap.classList.remove('hidden');
+    lbl.textContent = 'התמחות / סוג טיפול';
+    inp.placeholder = 'לדוגמה: אמנות, קבוצות, CBT';
+  } else if (role === 'אחר'){
+    wrap.classList.remove('hidden');
+    lbl.textContent = 'פירוט תפקיד';
+    inp.placeholder = 'תפקיד חופשי';
+  } else {
+    wrap.classList.add('hidden');
+    inp.value = '';
+  }
+}
+function onWorkerTypeChange(){
+  const t = document.getElementById('w_type').value;
+  const allowed = TYPE_COST_FIELDS[t] || [];
+  document.querySelectorAll('[data-wcost-field]').forEach(el => {
+    const f = el.dataset.wcostField;
+    if (allowed.indexOf(f) >= 0) el.classList.remove('hidden');
+    else el.classList.add('hidden');
+  });
 }
 
 // Soft duplicate-name detection. Fires on every keystroke. Compares
@@ -1492,43 +1618,72 @@ async function saveWorker(){
   const name = document.getElementById('w_name').value.trim();
   const notes = document.getElementById('w_notes').value.trim();
   if (!name){ toast('יש להזין שם', true); return; }
-  setBusy('workerSaveBtn', true);
+
+  // Collect the assignment terms from the form.
+  const house = editingWorker.house;
+  const role = document.getElementById('w_role').value;
+  const roleDetail = document.getElementById('w_roleDetail').value.trim();
+  const employmentType = document.getElementById('w_type').value;
+  if (!role){ toast('יש לבחור תפקיד', true); return; }
+  if (role === 'אחר' && !roleDetail){ toast('בתפקיד "אחר" יש לפרט', true); return; }
+
+  // Only the type's allowed cost fields, each required + positive.
+  const allowed = TYPE_COST_FIELDS[employmentType] || [];
+  const costFields = {};
+  for (let i = 0; i < allowed.length; i++){
+    const f = allowed[i];
+    const v = Number(document.getElementById('w_' + f).value);
+    if (!Number.isFinite(v) || v <= 0){
+      toast('יש להזין ' + labelForCostField(f) + ' חיובי לסוג העסקה ' + EMPLOYMENT_TYPE_LABELS[employmentType], true);
+      return;
+    }
+    costFields[f] = v;
+  }
+  const allowanceRaw = Number(document.getElementById('w_allowance').value);
+  const allowance = [0, 2000, 6000].indexOf(allowanceRaw) >= 0 ? allowanceRaw : 0;
+
   const wasEdit = !!editingWorker.id;
-  // The "from inside the assignment form" sub-flow is what we'd return
-  // to after save (no render() — keep the assignment form open + just
-  // refresh its worker dropdown). Standalone creates from the new
-  // "+ עובד חדש" button take the else branch and re-render the current
-  // view in place, with the longer "אפשר להוסיף שיבוץ ידנית" hint so
-  // Moran knows the worker exists but still needs to be assigned.
-  const isAssignmentSubflow = !wasEdit
-    && document.getElementById('assignmentOverlay').classList.contains('show')
-    && editingAssignment;
+  const assignmentId = editingWorker.assignmentId;
+
+  setBusy('workerSaveBtn', true);
   try {
-    const payload = wasEdit
-      ? { action: 'updateWorker', id: editingWorker.id, worker: { name, notes } }
+    // 1) Worker identity (create or update).
+    let workerId = editingWorker.id;
+    const workerPayload = wasEdit
+      ? { action: 'updateWorker', id: workerId, worker: { name, notes } }
       : { action: 'createWorker', worker: { name, notes } };
-    const result = await doAction(payload);
-    // Patch the in-memory cache from the returned worker — no full refetch.
-    if (result && result.worker && result.worker.id){
-      upsertById(WORKERS, result.worker);
+    const wRes = await doAction(workerPayload);
+    if (wRes && wRes.worker && wRes.worker.id){
+      upsertById(WORKERS, wRes.worker);
+      workerId = wRes.worker.id;
+    } else if (!wasEdit){
+      // Couldn't determine the new id — fall back to a reconcile and stop.
+      await reconcile(); closeWorker(); render();
+      toast('העובד/ת נשמר/ה'); return;
+    }
+
+    // 2) Assignment terms at this house (create or update).
+    const assignment = Object.assign(
+      { workerId, house, role, roleDetail, employmentType, notes: '', allowance },
+      costFields,
+    );
+    const asgPayload = assignmentId
+      ? { action: 'updateAssignment', id: assignmentId, assignment }
+      : { action: 'addAssignment', assignment };
+    const aRes = await doAction(asgPayload);
+    if (aRes && aRes.assignment && aRes.assignment.id){
+      upsertById(ASSIGNMENTS, aRes.assignment);
     } else {
       await reconcile();
     }
+
     closeWorker();
-    if (isAssignmentSubflow){
-      const newId = result && result.worker && result.worker.id;
-      fillAssignmentWorkerDropdown(newId);
-    } else {
-      render();
-    }
-    toast(
-      wasEdit
-        ? 'העדכון נשמר'
-        : (isAssignmentSubflow
-            ? 'העובד/ת נוסף/ה'
-            : 'העובד נוסף — אפשר להוסיף שיבוץ ידנית')
-    );
+    render();
+    toast(wasEdit ? 'העדכון נשמר' : 'העובד/ת נוסף/ה');
   } catch (err) {
+    // If the worker was created but the assignment failed, reconcile so
+    // the UI shows the true state (worker exists, terms may be missing).
+    await reconcile(); render();
     toast(err.message || 'שגיאה בשמירה', true);
   } finally {
     setBusy('workerSaveBtn', false);
@@ -2323,10 +2478,11 @@ function archiveView(){
 function rosterRow(a){
   const wId = escapeHtml(a.workerId);
   const aId = escapeHtml(a.id);
+  const hId = escapeHtml(a.house);
   return `
   <tr>
     <td>
-      <button class="link-name" onclick="openWorker('${wId}')">${escapeHtml(workerName(a.workerId))}</button>
+      <button class="link-name" onclick="openWorker('${wId}', '${hId}')">${escapeHtml(workerName(a.workerId))}</button>
     </td>
     <td>
       <span class="role-tag">${roleLabel(a)}</span>
@@ -2337,7 +2493,7 @@ function rosterRow(a){
     <td class="note-cell">${a.notes?escapeHtml(a.notes):'<span style="color:#B6B0A0">—</span>'}</td>
     <td>
       <div class="row-actions">
-        <button class="btn btn-sm btn-accent-hover" onclick="openAssignment({assignmentId:'${aId}'})">עריכה</button>
+        <button class="btn btn-sm btn-accent-hover" onclick="openWorker('${wId}', '${hId}')">עריכה</button>
         <button class="btn btn-sm btn-danger-hover" onclick="openTerminate('${aId}')">הפסקת עבודה</button>
         <button class="btn btn-sm btn-danger-hover" onclick="deleteAssignment('${aId}')">מחיקת שיבוץ</button>
       </div>
@@ -2595,12 +2751,11 @@ function houseView(id){
       <h2>צוות הבית</h2>
       <div style="display:flex;gap:10px;align-items:center">
         <span class="count-pill">${list.length}</span>
-        <!-- "+ עובד חדש" adds a worker. Editing an existing worker is
-             reached via the עריכה button on each roster row (openWorker
-             with the worker id). The separate "+ שיבוץ חדש" button was
-             removed at Moran's request; assignments are still created
-             from within the worker/roster flow. -->
-        <button class="btn btn-primary" onclick="openWorker()">+ עובד חדש</button>
+        <!-- "+ עובד חדש" opens the combined worker form for THIS house
+             (name + notes + role + terms + car/gas). Editing an existing
+             worker's terms is reached via the name link / עריכה on each
+             roster row. -->
+        <button class="btn btn-primary" onclick="openWorker(null, '${escapeHtml(id)}')">+ עובד חדש</button>
       </div>
     </div>
     <!-- Per-house roster search. value is bound to module state so it
