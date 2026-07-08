@@ -898,6 +898,18 @@ tbody tr:hover{
         <label>ריטיינר חודשי (₪)</label>
         <input id="asg_retainerAmount" type="number" min="0" step="100" placeholder="0"/>
       </div>
+      <!-- Allowance: applies to every employment type (not gated by
+           data-cost-field). Whitelisted values only — mirrors
+           ALLOWANCE_VALUES in lib/calc.js / lib/validate.js. Added on top
+           of the base cost in the monthly total. -->
+      <div class="field">
+        <label>רכב / דלק</label>
+        <select id="asg_allowance">
+          <option value="0">ללא</option>
+          <option value="2000">דלק בלבד – 2,000 ₪</option>
+          <option value="6000">רכב + דלק – 6,000 ₪</option>
+        </select>
+      </div>
       <div class="field">
         <label>הערות</label>
         <textarea id="asg_notes" placeholder="הערות פנימיות (תנאים מיוחדים, ימי עבודה וכו')" maxlength="500"></textarea>
@@ -1180,6 +1192,34 @@ async function loadData(){
   ABSENCES    = Array.isArray(d.absences)    ? d.absences    : [];
   COVERAGES   = Array.isArray(d.coverages)   ? d.coverages   : [];
   ARCHIVE_V3  = Array.isArray(d.archiveV3)   ? d.archiveV3   : [];
+}
+
+/* ---------- local cache mutation (perf) ----------
+   Every write action used to be followed by a full loadData() — a second
+   round-trip that re-reads ALL tabs from the Sheet through Apps Script,
+   which is the slow part of every save. The server already returns the
+   created/updated entity, so instead we patch the in-memory arrays in
+   place and re-render immediately. loadData() is kept only for the
+   initial boot and as an occasional reconcile (see reconcile()). These
+   helpers upsert/remove by id so a create and an update share one path. */
+function upsertById(arr, entity){
+  if (!entity || !entity.id) return arr;
+  const i = arr.findIndex(x => x.id === entity.id);
+  if (i >= 0) arr[i] = Object.assign({}, arr[i], entity);
+  else arr.push(entity);
+  return arr;
+}
+function removeById(arr, id){
+  const i = arr.findIndex(x => x.id === id);
+  if (i >= 0) arr.splice(i, 1);
+  return arr;
+}
+
+// Occasional full reconcile with the server (e.g. after a cascade or a
+// multi-step op where local patching would be error-prone). Kept async
+// and awaited only where correctness matters more than the extra latency.
+async function reconcile(){
+  try { await loadData(); } catch(_e){ /* keep last-known state */ }
 }
 
 /* ---------- PIN gate ---------- */
@@ -1468,7 +1508,12 @@ async function saveWorker(){
       ? { action: 'updateWorker', id: editingWorker.id, worker: { name, notes } }
       : { action: 'createWorker', worker: { name, notes } };
     const result = await doAction(payload);
-    await loadData();
+    // Patch the in-memory cache from the returned worker — no full refetch.
+    if (result && result.worker && result.worker.id){
+      upsertById(WORKERS, result.worker);
+    } else {
+      await reconcile();
+    }
     closeWorker();
     if (isAssignmentSubflow){
       const newId = result && result.worker && result.worker.id;
@@ -1495,7 +1540,7 @@ async function deleteWorker(){
   if (!confirm('למחוק את ' + editingWorker.name + ' מהמערכת?')) return;
   try {
     await doAction({ action: 'deleteWorker', id: editingWorker.id });
-    await loadData();
+    removeById(WORKERS, editingWorker.id);
     closeWorker();
     render();
     toast('העובד/ת נמחק/ה');
@@ -1539,13 +1584,15 @@ async function deleteWorkerCascade(){
       await doAction({ action: 'deleteAssignment', id: asgs[i].id });
     }
     await doAction({ action: 'deleteWorker', id: wid });
-    await loadData();
+    // Local removal: drop the worker's assignments and the worker itself.
+    asgs.forEach(a => removeById(ASSIGNMENTS, a.id));
+    removeById(WORKERS, wid);
     closeWorker();
     render();
     toast('העובד/ת וכל השיבוצים נמחקו');
   } catch (err) {
-    // Partial failure: reload so the UI shows what actually remains.
-    try { await loadData(); render(); } catch (_e) {}
+    // Partial failure: reconcile so the UI shows what actually remains.
+    await reconcile(); render();
     toast(err.message || 'שגיאה במחיקה', true);
   } finally {
     setBusy('workerDeleteCascadeBtn', false);
@@ -1674,6 +1721,10 @@ function openAssignment(opts){
   });
   document.getElementById('asg_roleDetail').value = a ? (a.roleDetail || '') : '';
   document.getElementById('asg_notes').value = a ? (a.notes || '') : '';
+  // Allowance: prefill on edit, default to none on create. Coerce to a
+  // whitelisted string so the <select> matches an existing <option>.
+  const allowanceVal = a && [2000, 6000].indexOf(Number(a.allowance)) >= 0 ? String(Number(a.allowance)) : '0';
+  document.getElementById('asg_allowance').value = allowanceVal;
 
   onAssignmentRoleChange();
   onAssignmentTypeChange();
@@ -1718,8 +1769,12 @@ async function saveAssignment(){
     costFields[f] = v;
   }
 
+  // Allowance (₪): whitelisted enum, applies to all employment types.
+  const allowanceRaw = Number(document.getElementById('asg_allowance').value);
+  const allowance = [0, 2000, 6000].indexOf(allowanceRaw) >= 0 ? allowanceRaw : 0;
+
   const assignment = Object.assign(
-    { workerId, house, role, roleDetail, employmentType, notes },
+    { workerId, house, role, roleDetail, employmentType, notes, allowance },
     costFields,
   );
 
@@ -1728,8 +1783,15 @@ async function saveAssignment(){
     const payload = isEdit
       ? { action: 'updateAssignment', id: editingAssignment.id, assignment }
       : { action: 'addAssignment', assignment };
-    await doAction(payload);
-    await loadData();
+    const result = await doAction(payload);
+    // Patch the in-memory cache from the server's echoed entity — no
+    // second full-tab refetch. Falls back to a reconcile if the server
+    // didn't return the assignment for some reason.
+    if (result && result.assignment && result.assignment.id){
+      upsertById(ASSIGNMENTS, result.assignment);
+    } else {
+      await reconcile();
+    }
     closeAssignment();
     render();
     toast(isEdit ? 'העדכון נשמר' : 'השיבוץ נוסף');
@@ -1748,7 +1810,7 @@ async function deleteAssignment(assignmentId){
   if (!confirm('למחוק את השיבוץ של ' + wName + ' בבית ' + hName + '?\n(העובד/ת לא יימחק/תימחק.)')) return;
   try {
     await doAction({ action: 'deleteAssignment', id: assignmentId });
-    await loadData();
+    removeById(ASSIGNMENTS, assignmentId);
     render();
     toast('השיבוץ נמחק');
   } catch (err) {
@@ -1798,7 +1860,9 @@ async function saveTerminate(){
       id: editingTerm.assignmentId,
       terminationDate, reasonType, reasonDetail,
     });
-    await loadData();
+    // Terminate touches multiple tabs (removes the assignment, writes an
+    // archive row, may truncate an absence) — reconcile fully.
+    await reconcile();
     closeTerminate();
     render();
     toast('השיבוץ הופסק');
@@ -1879,11 +1943,15 @@ async function saveAbsence(){
 
   setBusy('absenceSaveBtn', true);
   try {
-    await doAction({
+    const result = await doAction({
       action: 'logAbsence',
       absence: { workerId, house, startDate, endDate, reasonType, reasonDetail, notes },
     });
-    await loadData();
+    if (result && result.absence && result.absence.id){
+      upsertById(ABSENCES, result.absence);
+    } else {
+      await reconcile();
+    }
     closeAbsence();
     render();
     toast('ההיעדרות נשמרה');
@@ -1901,8 +1969,13 @@ async function endAbsence(absenceId){
   if (!ab) return;
   if (!confirm('לסיים את ההיעדרות של ' + (workerName(ab.workerId) || 'משבצת לא מאוישת') + '?\n(תאריך הסיום יעודכן להיום אם הוא בעתיד.)')) return;
   try {
-    await doAction({ action: 'endAbsence', id: absenceId });
-    await loadData();
+    const result = await doAction({ action: 'endAbsence', id: absenceId });
+    // Server returns {id, endDate, status}; patch that row in place.
+    if (result && result.id){
+      upsertById(ABSENCES, { id: result.id, endDate: result.endDate, status: result.status });
+    } else {
+      await reconcile();
+    }
     render();
     toast('ההיעדרות נסגרה');
   } catch (err) {
@@ -1917,7 +1990,7 @@ async function deleteAbsence(absenceId){
   if (!confirm('למחוק את רישום ההיעדרות של ' + who + '?')) return;
   try {
     await doAction({ action: 'deleteAbsence', id: absenceId });
-    await loadData();
+    removeById(ABSENCES, absenceId);
     render();
     toast('ההיעדרות נמחקה');
   } catch (err) {
@@ -2030,7 +2103,7 @@ async function saveCoverage(){
 
   setBusy('coverageSaveBtn', true);
   try {
-    await doAction({
+    const result = await doAction({
       action: 'addCoverage',
       coverage: {
         absenceId, coveringWorkerId,
@@ -2038,7 +2111,11 @@ async function saveCoverage(){
         startDate, endDate, extraPayment, notes,
       },
     });
-    await loadData();
+    if (result && result.coverage && result.coverage.id){
+      upsertById(COVERAGES, result.coverage);
+    } else {
+      await reconcile();
+    }
     closeCoverage();
     render();
     toast('ההחלפה נרשמה');
@@ -2055,7 +2132,7 @@ async function deleteCoverage(coverageId){
   if (!confirm('למחוק את רישום ההחלפה של ' + workerName(c.coveringWorkerId) + '?')) return;
   try {
     await doAction({ action: 'deleteCoverage', id: coverageId });
-    await loadData();
+    removeById(COVERAGES, coverageId);
     render();
     toast('ההחלפה נמחקה');
   } catch (err) {
@@ -2518,13 +2595,11 @@ function houseView(id){
       <h2>צוות הבית</h2>
       <div style="display:flex;gap:10px;align-items:center">
         <span class="count-pill">${list.length}</span>
-        <!-- DOM order matters in RTL: count-pill renders rightmost, the
-             two buttons fill leftward. "+ שיבוץ חדש" is the primary
-             action (placed closer to the count); "+ עובד חדש" is the
-             standalone worker-create — also reachable via the assignment
-             form's "+ צור עובד/ת חדש/ה" pseudo-option but Moran asked
-             for an obvious top-level affordance. -->
-        <button class="btn btn-primary" onclick="openAssignment({house:'${escapeHtml(id)}'})">+ שיבוץ חדש</button>
+        <!-- "+ עובד חדש" adds a worker. Editing an existing worker is
+             reached via the עריכה button on each roster row (openWorker
+             with the worker id). The separate "+ שיבוץ חדש" button was
+             removed at Moran's request; assignments are still created
+             from within the worker/roster flow. -->
         <button class="btn btn-primary" onclick="openWorker()">+ עובד חדש</button>
       </div>
     </div>
