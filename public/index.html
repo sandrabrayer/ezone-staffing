@@ -833,7 +833,7 @@ tbody tr:hover{
         <div class="field" data-wcost-field="pct">
           <label>חלקיות משרה (%)</label>
           <input id="w_pct" type="number" min="1" max="100" placeholder="100"/>
-          <div class="hint">העלות בפועל = שכר × חלקיות / 100</div>
+          <div class="hint">לידיעה בלבד — הסכום למעלה הוא העלות בפועל</div>
         </div>
         <div class="field" data-wcost-field="hourlyRate">
           <label>תעריף שעה (₪)</label>
@@ -863,6 +863,21 @@ tbody tr:hover{
             <option value="2000">דלק בלבד – 2,000 ₪</option>
             <option value="6000">רכב + דלק – 6,000 ₪</option>
           </select>
+        </div>
+      </div>
+
+      <!-- House actions (edit mode only). Lets Moran move this worker's
+           assignment to another house, or add a SECOND house (a separate
+           assignment with its own terms). Hidden on create — a new
+           worker's house is fixed by the tab they were added from.
+           Populated + toggled in openWorker(). -->
+      <div id="w_houseActions" class="field" style="display:none;border-top:1px solid var(--line);padding-top:12px;margin-top:4px">
+        <label>בית נוסף / מעבר בית</label>
+        <select id="w_targetHouse"></select>
+        <div class="hint" id="w_houseActionsHint">בחר/י בית יעד ואז "מעבר" או "הוספה". בהוספת בית תזין/י שכר נפרד לאותו בית.</div>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button type="button" class="btn btn-sm btn-accent-hover" onclick="moveWorkerHouse()">מעבר לבית זה</button>
+          <button type="button" class="btn btn-sm btn-accent-hover" onclick="addWorkerHouse()">הוספת בית זה</button>
         </div>
       </div>
 
@@ -922,7 +937,7 @@ tbody tr:hover{
       <div class="field" data-cost-field="pct">
         <label>חלקיות משרה (%)</label>
         <input id="asg_pct" type="number" min="1" max="100" placeholder="100"/>
-        <div class="hint">העלות בפועל = שכר × חלקיות / 100</div>
+        <div class="hint">לידיעה בלבד — הסכום למעלה הוא העלות בפועל</div>
       </div>
       <div class="field" data-cost-field="hourlyRate">
         <label>תעריף שעה (₪)</label>
@@ -1366,7 +1381,8 @@ function termsHtml(a){
     case 'full_time':
       return `<div class="money">${fmt(a.salary)}</div>`;
     case 'part_time':
-      return `<div class="money">${fmt(a.salary)} × ${Number(a.pct)||0}%</div>`;
+      // Salary is the actual cost; pct is an informational label only.
+      return `<div class="money">${fmt(a.salary)} <span style="color:#B6B0A0">(${Number(a.pct)||0}% משרה)</span></div>`;
     case 'hourly':
       return `<div class="money">${fmt(a.hourlyRate)}/שעה × ${Number(a.estHours)||0} ש'</div>`;
     case 'per_session':
@@ -1544,6 +1560,26 @@ function openWorker(workerId, house){
   const allowanceVal = asg && [2000, 6000].indexOf(Number(asg.allowance)) >= 0 ? String(Number(asg.allowance)) : '0';
   document.getElementById('w_allowance').value = allowanceVal;
 
+  // House actions: only when editing an existing worker who has an
+  // assignment at this house (so there's something to move/add from).
+  // The target dropdown lists every house EXCEPT the current one; houses
+  // the worker already occupies are marked so "add" won't duplicate.
+  const houseActions = document.getElementById('w_houseActions');
+  if (w && asg){
+    const occupied = new Set(ASSIGNMENTS.filter(a => a.workerId === w.id).map(a => a.house));
+    const targetSel = document.getElementById('w_targetHouse');
+    targetSel.innerHTML = HOUSES
+      .filter(h => h.id !== targetHouse)
+      .map(h => {
+        const already = occupied.has(h.id);
+        const label = escapeHtml(h.name) + (already ? ' (כבר משובץ/ת)' : '');
+        return `<option value="${escapeHtml(h.id)}"${already ? ' data-already="1"' : ''}>${label}</option>`;
+      }).join('');
+    houseActions.style.display = '';
+  } else {
+    houseActions.style.display = 'none';
+  }
+
   onWorkerRoleChange();
   onWorkerTypeChange();
   onWorkerNameInput();
@@ -1688,6 +1724,77 @@ async function saveWorker(){
   } finally {
     setBusy('workerSaveBtn', false);
   }
+}
+
+// Move this worker's CURRENT-house assignment to the selected target
+// house. The assignment (with its terms) leaves the old house entirely.
+// Guard: refuse if the worker already has an assignment at the target
+// (that would collide — she should edit that one instead).
+async function moveWorkerHouse(){
+  if (!editingWorker || !editingWorker.id || !editingWorker.assignmentId){
+    toast('אין שיבוץ להעברה', true); return;
+  }
+  const targetSel = document.getElementById('w_targetHouse');
+  const target = targetSel.value;
+  const opt = targetSel.options[targetSel.selectedIndex];
+  if (!target){ toast('יש לבחור בית יעד', true); return; }
+  if (opt && opt.dataset.already){
+    toast('העובד/ת כבר משובץ/ת בבית זה — יש לערוך את השיבוץ הקיים', true); return;
+  }
+  const asg = ASSIGNMENTS.find(a => a.id === editingWorker.assignmentId);
+  if (!asg){ toast('שגיאה: שיבוץ לא נמצא', true); return; }
+  if (!confirm('להעביר את ' + editingWorker.name + ' לבית ' + houseName(target) + '? השיבוץ הנוכחי יעבור לשם.')) return;
+
+  // Re-send the assignment unchanged except for the house.
+  const assignment = {
+    workerId: asg.workerId, house: target,
+    role: asg.role, roleDetail: asg.roleDetail || '',
+    employmentType: asg.employmentType,
+    salary: asg.salary || 0, pct: asg.pct || 0,
+    hourlyRate: asg.hourlyRate || 0, estHours: asg.estHours || 0,
+    sessionRate: asg.sessionRate || 0, estSessions: asg.estSessions || 0,
+    retainerAmount: asg.retainerAmount || 0,
+    allowance: asg.allowance || 0, notes: asg.notes || '',
+  };
+  setBusy('workerSaveBtn', true);
+  try {
+    const res = await doAction({ action: 'updateAssignment', id: asg.id, assignment });
+    if (res && res.assignment && res.assignment.id){
+      upsertById(ASSIGNMENTS, res.assignment);
+    } else {
+      await reconcile();
+    }
+    closeWorker();
+    render();
+    toast('העובד/ת הועבר/ה לבית ' + houseName(target));
+  } catch (err) {
+    await reconcile(); render();
+    toast(err.message || 'שגיאה בהעברה', true);
+  } finally {
+    setBusy('workerSaveBtn', false);
+  }
+}
+
+// Add a SECOND house for this worker: opens the combined form again on
+// the target house with BLANK terms, so Moran enters that house's own
+// salary (she splits multi-house pay herself). The current house's
+// assignment is untouched.
+function addWorkerHouse(){
+  if (!editingWorker || !editingWorker.id){ toast('יש לשמור קודם את העובד/ת', true); return; }
+  const targetSel = document.getElementById('w_targetHouse');
+  const target = targetSel.value;
+  const opt = targetSel.options[targetSel.selectedIndex];
+  if (!target){ toast('יש לבחור בית יעד', true); return; }
+  if (opt && opt.dataset.already){
+    toast('העובד/ת כבר משובץ/ת בבית זה', true); return;
+  }
+  const workerId = editingWorker.id;
+  closeWorker();
+  // Re-open on the target house. Since the worker has no assignment there
+  // yet, openWorker() prefills blank terms → saving creates a new
+  // assignment at that house, keeping the original.
+  openWorker(workerId, target);
+  toast('הוספת בית ' + houseName(target) + ' — הזן/י שכר לבית זה ושמור/י');
 }
 
 async function deleteWorker(){
