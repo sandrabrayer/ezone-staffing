@@ -1745,24 +1745,15 @@ async function moveWorkerHouse(){
   if (!asg){ toast('שגיאה: שיבוץ לא נמצא', true); return; }
   if (!confirm('להעביר את ' + editingWorker.name + ' לבית ' + houseName(target) + '? השיבוץ הנוכחי יעבור לשם.')) return;
 
-  // Re-send the assignment unchanged except for the house.
-  const assignment = {
-    workerId: asg.workerId, house: target,
-    role: asg.role, roleDetail: asg.roleDetail || '',
-    employmentType: asg.employmentType,
-    salary: asg.salary || 0, pct: asg.pct || 0,
-    hourlyRate: asg.hourlyRate || 0, estHours: asg.estHours || 0,
-    sessionRate: asg.sessionRate || 0, estSessions: asg.estSessions || 0,
-    retainerAmount: asg.retainerAmount || 0,
-    allowance: asg.allowance || 0, notes: asg.notes || '',
-  };
   setBusy('workerSaveBtn', true);
   try {
-    const res = await doAction({ action: 'updateAssignment', id: asg.id, assignment });
+    // Dedicated move action — changes only the house, keeps all terms.
+    const res = await doAction({ action: 'moveAssignment', id: asg.id, house: target });
     if (res && res.assignment && res.assignment.id){
       upsertById(ASSIGNMENTS, res.assignment);
     } else {
-      await reconcile();
+      // Fallback: patch locally so the UI reflects the move.
+      upsertById(ASSIGNMENTS, Object.assign({}, asg, { house: target }));
     }
     closeWorker();
     render();
