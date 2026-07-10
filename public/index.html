@@ -864,6 +864,21 @@ tbody tr:hover{
             <option value="6000">רכב + דלק – 6,000 ₪</option>
           </select>
         </div>
+        <!-- Worker status. חל"ד / חל"ט are unpaid — the salary stops
+             counting while on leave. A start date is required for those. -->
+        <div class="field">
+          <label>סטטוס</label>
+          <select id="w_status" onchange="onWorkerStatusChange()">
+            <option value="active">פעיל/ה</option>
+            <option value="chld">חל"ד</option>
+            <option value="chlt">חל"ט</option>
+          </select>
+        </div>
+        <div class="field hidden" id="w_statusDate_wrap">
+          <label>תאריך תחילת החופשה</label>
+          <input id="w_statusDate" type="date"/>
+          <div class="hint">בזמן חל"ד/חל"ט השכר אינו נספר בעלויות</div>
+        </div>
       </div>
 
       <!-- House actions (edit mode only). Lets Moran move this worker's
@@ -1188,6 +1203,7 @@ const TOKEN_KEY = 'ezone_staff_token_v1';
 const {
   assignmentCategory: calcAssignmentCategory,
   assignmentCost: calcAssignmentCost,
+  isOnLeave: calcIsOnLeave,
   assignmentsByHouse: calcAssignmentsByHouse,
   houseAssignmentsCost: calcHouseAssignmentsCost,
   splitByCategory: calcSplitByCategory,
@@ -1372,6 +1388,16 @@ function roleLabel(a){
 }
 function typeLabelShort(employmentType){
   return EMPLOYMENT_TYPE_LABELS_SHORT[employmentType] || employmentType || '—';
+}
+
+// Small badge shown next to a worker's name when on חל"ד / חל"ט. Includes
+// the start date. Empty string for active workers.
+const STATUS_LABELS = { chld: 'חל"ד', chlt: 'חל"ט' };
+function leaveBadge(a){
+  if (!calcIsOnLeave(a)) return '';
+  const label = STATUS_LABELS[String(a.status)] || 'חופשה';
+  const since = a.statusDate ? ' מ־' + escapeHtml(fmtDate(a.statusDate)) : '';
+  return ` <span class="type-tag" style="background:var(--warning);color:#1a1200">${label}${since}</span>`;
 }
 
 // Per-assignment terms display: chooses the appropriate string per type
@@ -1560,6 +1586,12 @@ function openWorker(workerId, house){
   const allowanceVal = asg && [2000, 6000].indexOf(Number(asg.allowance)) >= 0 ? String(Number(asg.allowance)) : '0';
   document.getElementById('w_allowance').value = allowanceVal;
 
+  // Status + leave start date.
+  const statusVal = asg && ['chld', 'chlt'].indexOf(String(asg.status)) >= 0 ? String(asg.status) : 'active';
+  document.getElementById('w_status').value = statusVal;
+  document.getElementById('w_statusDate').value = asg && asg.statusDate ? asg.statusDate : '';
+  onWorkerStatusChange();
+
   // House actions: only when editing an existing worker who has an
   // assignment at this house (so there's something to move/add from).
   // The target dropdown lists every house EXCEPT the current one; houses
@@ -1630,6 +1662,13 @@ function onWorkerTypeChange(){
     else el.classList.add('hidden');
   });
 }
+// Show the start-date field only for leave statuses (חל"ד / חל"ט).
+function onWorkerStatusChange(){
+  const s = document.getElementById('w_status').value;
+  const wrap = document.getElementById('w_statusDate_wrap');
+  if (s === 'chld' || s === 'chlt') wrap.classList.remove('hidden');
+  else { wrap.classList.add('hidden'); document.getElementById('w_statusDate').value = ''; }
+}
 
 // Soft duplicate-name detection. Fires on every keystroke. Compares
 // against the in-memory WORKERS cache, excluding the worker being
@@ -1678,6 +1717,14 @@ async function saveWorker(){
   const allowanceRaw = Number(document.getElementById('w_allowance').value);
   const allowance = [0, 2000, 6000].indexOf(allowanceRaw) >= 0 ? allowanceRaw : 0;
 
+  // Status + leave start date. חל"ד/חל"ט require a start date.
+  const status = document.getElementById('w_status').value;
+  let statusDate = '';
+  if (status === 'chld' || status === 'chlt'){
+    statusDate = document.getElementById('w_statusDate').value;
+    if (!statusDate){ toast('בחל"ד/חל"ט יש להזין תאריך תחילה', true); return; }
+  }
+
   const wasEdit = !!editingWorker.id;
   const assignmentId = editingWorker.assignmentId;
 
@@ -1700,7 +1747,7 @@ async function saveWorker(){
 
     // 2) Assignment terms at this house (create or update).
     const assignment = Object.assign(
-      { workerId, house, role, roleDetail, employmentType, notes: '', allowance },
+      { workerId, house, role, roleDetail, employmentType, notes: '', allowance, status, statusDate },
       costFields,
     );
     const asgPayload = assignmentId
@@ -2578,9 +2625,10 @@ function rosterRow(a){
   const aId = escapeHtml(a.id);
   const hId = escapeHtml(a.house);
   return `
-  <tr>
+  <tr${calcIsOnLeave(a) ? ' style="opacity:.72"' : ''}>
     <td>
       <button class="link-name" onclick="openWorker('${wId}', '${hId}')">${escapeHtml(workerName(a.workerId))}</button>
+      ${leaveBadge(a)}
     </td>
     <td>
       <span class="role-tag">${roleLabel(a)}</span>
