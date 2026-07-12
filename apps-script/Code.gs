@@ -81,6 +81,10 @@ const ARCHIVE_V3_TAB = 'archive_v3';
 // replacing the one-time estimate for hourly / per_session cost. Append-only
 // columns; one row per (assignment, month), updated in place on re-upsert.
 const MONTHLY_ACTUALS_TAB = 'monthly_actuals';
+// Per-house monthly salary budgets. One row per (house, month) where month
+// is 'YYYY-MM' or the sentinel 'default' (fallback for any month without a
+// specific override). Append-only; upserted in place per (house, month).
+const BUDGETS_TAB = 'budgets';
 
 // Legacy tabs (read-only during transition; renamed by finalizeV3).
 const HISTORY_TAB = 'history';
@@ -121,6 +125,9 @@ const HEADERS_ARCHIVE_V3 = [
 const HEADERS_MONTHLY_ACTUALS = [
   'id', 'assignment_id', 'month', 'actual_hours', 'actual_sessions',
   'note', 'created_at', 'updated_at',
+];
+const HEADERS_BUDGETS = [
+  'id', 'house', 'month', 'amount', 'created_at', 'updated_at',
 ];
 
 // Legacy headers (only used by setupSheetsV3 to repair partial legacy state
@@ -180,6 +187,7 @@ const EXTRA_PAYMENT_MAX = 100000;
 const ACTUAL_HOURS_MAX = EST_HOURS_MAX;
 const ACTUAL_SESSIONS_MAX = EST_SESSIONS_MAX;
 const MONTHLY_ACTUALS_MAX_ITEMS = 1000;
+const BUDGET_MAX = 100000000;
 
 // Migration markers — mirror lib/migrate.js.
 const MIGRATION_NOTE_NO_ABSENTEE = 'יובא ממודל ישן ללא רישום נעדר';
@@ -199,6 +207,7 @@ function doGet(e) {
       coverages: readCoveragesSafe(),
       archiveV3: readArchiveV3Safe(),
       monthlyActuals: readMonthlyActualsSafe(),
+      budgets: readBudgetsSafe(),
       // legacy passthrough — empty arrays/objects when tabs are missing
       // (e.g. after finalizeV3 or on a fresh v3-only install).
       houses: houses,
@@ -227,6 +236,8 @@ function doPost(e) {
       case 'deleteCoverage':       return deleteCoverage(body);
       case 'upsertMonthlyActuals': return upsertMonthlyActuals(body);
       case 'getMonthlyActuals':    return getMonthlyActuals(body);
+      case 'setBudget':            return setBudget(body);
+      case 'getBudgets':           return getBudgets(body);
       default: throw httpError(400, 'unknown action');
     }
   });
@@ -516,6 +527,21 @@ function validateMonthlyActuals(items) {
   });
 }
 
+// Budget month: 'YYYY-MM' or the sentinel 'default'. Mirror of lib/validate.js.
+function validateBudgetMonth(m) {
+  const s = String(m || '').trim();
+  if (s === 'default') return 'default';
+  return validateMonth(s, 'month');
+}
+
+function validateBudget(b) {
+  if (!b || typeof b !== 'object') throw httpError(400, 'budget required');
+  if (!isHouse(b.house)) throw httpError(400, 'unknown house');
+  const month = validateBudgetMonth(b.month);
+  const amount = validateNonNegative(b.amount, 'amount', BUDGET_MAX, 0);
+  return { house: b.house, month: month, amount: amount };
+}
+
 // ---------- v3 readers ----------
 
 function rowsOf(sheet) {
@@ -663,6 +689,20 @@ function readMonthlyActualsSafe() {
       note: String(r[5] || ''),
       createdAt: cellToIso(r[6]),
       updatedAt: cellToIso(r[7]),
+    };
+  });
+}
+
+function readBudgetsSafe() {
+  const sh = sheetByNameOrNull(BUDGETS_TAB);
+  return rowsOf(sh).map(function (r) {
+    return {
+      id: String(r[0]),
+      house: String(r[1] || ''),
+      month: formatBudgetMonthCell(r[2]),
+      amount: Number(r[3]) || 0,
+      createdAt: cellToIso(r[4]),
+      updatedAt: cellToIso(r[5]),
     };
   });
 }
@@ -1204,6 +1244,49 @@ function getMonthlyActuals(body) {
   return { ok: true, month: month, actuals: rows };
 }
 
+// ---------- budget actions ----------
+
+// Upsert a single per-house budget. One row per (house, month): updated in
+// place if the pair exists (amount + updated_at), otherwise appended.
+function setBudget(body) {
+  const b = validateBudget(body.budget || {});
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const sh = sheetByName(BUDGETS_TAB);
+    const values = sh.getDataRange().getValues();
+    let row = -1;
+    for (let i = 1; i < values.length; i++) {
+      const r = values[i];
+      if (String(r[0] || '').trim() === '') continue;
+      if (String(r[1]) === b.house && formatBudgetMonthCell(r[2]) === b.month) {
+        row = i + 1;
+        break;
+      }
+    }
+    const now = new Date().toISOString();
+    if (row > 0) {
+      const id = String(sh.getRange(row, 1).getValue());
+      const createdAt = cellToIso(sh.getRange(row, 5).getValue()) || now;
+      sh.getRange(row, 1, 1, HEADERS_BUDGETS.length).setValues([[
+        id, b.house, b.month, b.amount, createdAt, now,
+      ]]);
+      return { ok: true, budget: { id: id, house: b.house, month: b.month,
+        amount: b.amount, createdAt: createdAt, updatedAt: now }, updated: true };
+    }
+    const id = newId('bud');
+    sh.appendRow([id, b.house, b.month, b.amount, now, now]);
+    return { ok: true, budget: { id: id, house: b.house, month: b.month,
+      amount: b.amount, createdAt: now, updatedAt: now }, updated: false };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function getBudgets() {
+  return { ok: true, budgets: readBudgetsSafe() };
+}
+
 // ---------- setup / migration / rollback / finalize ----------
 
 // Idempotent — safe to re-run. Creates v3 tabs with the right headers,
@@ -1217,6 +1300,7 @@ function setupSheetsV3() {
     { name: COVERAGES_TAB, headers: HEADERS_COVERAGES },
     { name: ARCHIVE_V3_TAB, headers: HEADERS_ARCHIVE_V3 },
     { name: MONTHLY_ACTUALS_TAB, headers: HEADERS_MONTHLY_ACTUALS },
+    { name: BUDGETS_TAB, headers: HEADERS_BUDGETS },
   ];
   wanted.forEach(function (w) {
     let sh = book.getSheetByName(w.name);
@@ -1664,6 +1748,13 @@ function formatMonthCell(cell) {
   const s = String(cell || '').trim();
   const m = /^(\d{4}-\d{2})/.exec(s);
   return m ? m[1] : s;
+}
+
+// Budget month cell → 'YYYY-MM' or the literal 'default'. Same coercion
+// handling as formatMonthCell, plus the sentinel passthrough.
+function formatBudgetMonthCell(cell) {
+  if (String(cell || '').trim() === 'default') return 'default';
+  return formatMonthCell(cell);
 }
 
 function active(startDate, endDate, today) {

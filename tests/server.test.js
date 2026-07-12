@@ -26,6 +26,7 @@ function makeFakeUpstream() {
     coverages: [],
     archiveV3: [],
     monthlyActuals: [],
+    budgets: [],
   };
   let idCtr = 0;
   const newId = (p) => p + (++idCtr);
@@ -50,6 +51,7 @@ function makeFakeUpstream() {
         coverages: state.coverages,
         archiveV3: state.archiveV3,
         monthlyActuals: state.monthlyActuals,
+        budgets: state.budgets,
         // legacy passthrough — empty in a v3-only world
         houses: { ramot: [], asher: [], ofroni: [], rehab: [] },
         events: [],
@@ -291,6 +293,26 @@ function makeFakeUpstream() {
       case 'getMonthlyActuals': {
         const rows = state.monthlyActuals.filter(x => x.month === b.month);
         return { status: 200, json: { _status: 200, ok: true, month: b.month, actuals: rows } };
+      }
+
+      // ---------- budgets ----------
+      case 'setBudget': {
+        const existing = state.budgets.find(
+          x => x.house === b.budget.house && x.month === b.budget.month);
+        if (existing) {
+          existing.amount = b.budget.amount;
+          existing.updatedAt = nowIso();
+          return { status: 200, json: { _status: 200, ok: true, budget: existing, updated: true } };
+        }
+        const row = {
+          id: newId('bud'), house: b.budget.house, month: b.budget.month,
+          amount: b.budget.amount, createdAt: nowIso(), updatedAt: nowIso(),
+        };
+        state.budgets.push(row);
+        return { status: 200, json: { _status: 200, ok: true, budget: row, updated: false } };
+      }
+      case 'getBudgets': {
+        return { status: 200, json: { _status: 200, ok: true, budgets: state.budgets } };
       }
 
       default:
@@ -1337,5 +1359,69 @@ test('getMonthlyActuals: returns only the requested month', async () => {
     assert.equal(r.status, 200);
     assert.equal(r.json.actuals.length, 1);
     assert.equal(r.json.actuals[0].month, '2026-07');
+  } finally { await close(srv); }
+});
+
+// ----- budgets -----
+
+test('setBudget: inserts, then GET /api/data returns it', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    const r = await post(base, token, {
+      action: 'setBudget', budget: { house: 'ramot', month: '2026-07', amount: 120000 },
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.updated, false);
+    assert.equal(r.json.budget.amount, 120000);
+
+    const data = await get(base, token);
+    assert.ok(Array.isArray(data.json.budgets));
+    assert.equal(data.json.budgets.length, 1);
+    assert.equal(data.json.budgets[0].house, 'ramot');
+  } finally { await close(srv); }
+});
+
+test('setBudget: second set for same (house, month) UPDATES in place', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    await post(base, token, { action: 'setBudget', budget: { house: 'ramot', month: '2026-07', amount: 120000 } });
+    const r2 = await post(base, token, { action: 'setBudget', budget: { house: 'ramot', month: '2026-07', amount: 90000 } });
+    assert.equal(r2.status, 200);
+    assert.equal(r2.json.updated, true);
+    assert.equal(r2.json.budget.amount, 90000);
+
+    const data = await get(base, token);
+    assert.equal(data.json.budgets.length, 1, 'still one row for the pair');
+    assert.equal(data.json.budgets[0].amount, 90000);
+  } finally { await close(srv); }
+});
+
+test('setBudget: default and a month-specific row coexist', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    await post(base, token, { action: 'setBudget', budget: { house: 'ramot', month: 'default', amount: 100000 } });
+    await post(base, token, { action: 'setBudget', budget: { house: 'ramot', month: '2026-07', amount: 120000 } });
+    const g = await post(base, token, { action: 'getBudgets' });
+    assert.equal(g.status, 200);
+    assert.equal(g.json.budgets.length, 2);
+  } finally { await close(srv); }
+});
+
+test('setBudget: bad house / month / negative amount are 400', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    const bads = [
+      { house: 'nope', month: 'default', amount: 1 },
+      { house: 'ramot', month: '2026-13', amount: 1 },
+      { house: 'ramot', month: 'default', amount: -5 },
+    ];
+    for (const budget of bads) {
+      const r = await post(base, token, { action: 'setBudget', budget });
+      assert.equal(r.status, 400, 'expected 400 for ' + JSON.stringify(budget));
+    }
   } finally { await close(srv); }
 });

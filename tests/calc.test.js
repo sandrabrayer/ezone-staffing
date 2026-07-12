@@ -11,6 +11,7 @@ const {
   coveragesForAbsence, isCoverageActive, activeCoveragesByHouse, coverageExtra,
   pendingTerminations, pendingHouseCost,
   houseTotal, networkTotal,
+  budgetForHouse, budgetVariance,
   assignmentsForWorker, workerTotalCost,
   activeAbsenceForWorker,
   networkAbsenceCoverageRows,
@@ -749,4 +750,58 @@ test('networkMonthlyTotal: sums month assignment costs across houses + one cover
   assert.equal(
     networkMonthlyTotal(assignments, coverages, absences, [], idx, HOUSES, MONTH, t),
     5520 + 4800 + 800);
+});
+
+// ---------- budgets ----------
+
+test('budgetForHouse: month-specific overrides default; null when none', () => {
+  const budgets = [
+    { id: 'b1', house: 'ramot', month: 'default', amount: 100000 },
+    { id: 'b2', house: 'ramot', month: '2026-07', amount: 120000 },
+    { id: 'b3', house: 'asher', month: 'default', amount: 80000 },
+  ];
+  assert.equal(budgetForHouse(budgets, 'ramot', '2026-07'), 120000); // specific
+  assert.equal(budgetForHouse(budgets, 'ramot', '2026-08'), 100000); // falls to default
+  assert.equal(budgetForHouse(budgets, 'asher', '2026-07'), 80000);  // only default
+  assert.equal(budgetForHouse(budgets, 'ofroni', '2026-07'), null);  // none set
+  assert.equal(budgetForHouse([], 'ramot', '2026-07'), null);
+});
+
+test('budgetVariance: none when no budget', () => {
+  const v = budgetVariance(null, 5000);
+  assert.deepEqual(v, { budget: null, cost: 5000, variance: null, pct: null, status: 'none' });
+});
+
+test('budgetVariance: green at or under budget', () => {
+  const v = budgetVariance(100000, 90000);
+  assert.equal(v.status, 'ok');
+  assert.equal(v.variance, 10000);   // headroom
+  assert.equal(v.pct, 90);
+  const exact = budgetVariance(100000, 100000);
+  assert.equal(exact.status, 'ok');
+  assert.equal(exact.variance, 0);
+  assert.equal(exact.pct, 100);
+});
+
+test('budgetVariance: amber when over by up to 10%', () => {
+  const v = budgetVariance(100000, 105000);
+  assert.equal(v.status, 'warn');
+  assert.equal(v.variance, -5000);   // over
+  assert.equal(v.pct, 105);
+  const edge = budgetVariance(100000, 110000);   // exactly +10% → still amber
+  assert.equal(edge.status, 'warn');
+});
+
+test('budgetVariance: red when over by more than 10%', () => {
+  const v = budgetVariance(100000, 130000);
+  assert.equal(v.status, 'over');
+  assert.equal(v.variance, -30000);
+  assert.equal(v.pct, 130);
+});
+
+test('budgetVariance: zero budget is ok at 0 cost, over when cost > 0', () => {
+  assert.equal(budgetVariance(0, 0).status, 'ok');
+  const over = budgetVariance(0, 5000);
+  assert.equal(over.status, 'over');
+  assert.equal(over.pct, Infinity);
 });
