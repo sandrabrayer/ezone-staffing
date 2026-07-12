@@ -95,10 +95,10 @@ function loadPage() {
 // the DOM.
 async function authAndBoot(dom, {
   workers = [], assignments = [], absences = [], coverages = [], archiveV3 = [],
-  monthlyActuals = [],
+  monthlyActuals = [], budgets = [],
 } = {}) {
   const data = {
-    workers, assignments, absences, coverages, archiveV3, monthlyActuals,
+    workers, assignments, absences, coverages, archiveV3, monthlyActuals, budgets,
     // legacy passthrough — empty in v3-only state
     houses: { ramot: [], asher: [], ofroni: [], rehab: [], pardes: [], sde_eliezer: [], hq: [] },
     events: [], archive: [],
@@ -669,5 +669,134 @@ test('month view: fixed-salary cost is unchanged and never badged', async () => 
   assert.equal(doc.querySelector('.est-badge'), null, 'full_time is never an estimate');
   const moneyCells = [...doc.querySelectorAll('#rosterSalaried td.money')];
   assert.ok(moneyCells.some(td => /18,?000/.test(td.textContent)), 'full_time salary shown as-is');
+  dom.window.close();
+});
+
+// ---------- budgets (Part 4) ----------
+// Central view: a "תקציב מול עלות" section with one row per house
+// (budget/cost/variance/status) + a combined summary row. House view: a
+// budget line + edit control. Colors: green within, amber over ≤10%,
+// red over >10%.
+
+function budgetRow(over) {
+  return Object.assign({
+    id: 'bud1', house: 'ramot', month: '', amount: 0, createdAt: '', updatedAt: '',
+  }, over);
+}
+
+test('budgets: central view renders a budget-vs-cost summary table with a combined row', async () => {
+  const { dom, errors } = loadPage();
+  const month = dom.window.EZONE_CALC.currentMonth();
+  await authAndBoot(dom, {
+    workers: [wk()],
+    assignments: [hourlyAsg()],                        // estimate 6000 at ramot
+    budgets: [budgetRow({ house: 'ramot', month, amount: 100000 })],
+  });
+  const doc = dom.window.document;
+  const table = doc.querySelector('.budget-table');
+  assert.ok(table, 'expected a .budget-table in the central view');
+  const summary = table.querySelector('.bud-summary');
+  assert.ok(summary, 'expected a combined summary row');
+  dom.window.close();
+  assert.equal(errors.length, 0, 'no script errors');
+});
+
+test('budgets: cost within budget shows the green (bud-ok) status', async () => {
+  const { dom } = loadPage();
+  const month = dom.window.EZONE_CALC.currentMonth();
+  await authAndBoot(dom, {
+    workers: [wk()],
+    assignments: [hourlyAsg()],                        // 6000 estimate
+    budgets: [budgetRow({ house: 'ramot', month, amount: 100000 })],
+  });
+  const doc = dom.window.document;
+  const ramotRow = [...doc.querySelectorAll('.budget-table tbody tr')]
+    .find(tr => /רמות/.test(tr.textContent));
+  assert.ok(ramotRow, 'expected a ramot budget row');
+  assert.ok(ramotRow.className.includes('bud-ok-row') || ramotRow.querySelector('.bud-ok'),
+    'ramot within budget should read as green/ok');
+  dom.window.close();
+});
+
+test('budgets: cost over budget by >10% shows the red (bud-over) status', async () => {
+  const { dom } = loadPage();
+  const month = dom.window.EZONE_CALC.currentMonth();
+  await authAndBoot(dom, {
+    workers: [wk()],
+    assignments: [hourlyAsg()],                        // 6000 estimate
+    budgets: [budgetRow({ house: 'ramot', month, amount: 5000 })],  // over by 20%
+  });
+  const doc = dom.window.document;
+  const ramotRow = [...doc.querySelectorAll('.budget-table tbody tr')]
+    .find(tr => /רמות/.test(tr.textContent));
+  assert.ok(ramotRow.querySelector('.bud-over'), 'over budget by >10% should read as red/over');
+  dom.window.close();
+});
+
+test('budgets: house view shows a budget line + edit control', async () => {
+  const { dom } = loadPage();
+  const month = dom.window.EZONE_CALC.currentMonth();
+  await authAndBoot(dom, {
+    workers: [wk()],
+    assignments: [hourlyAsg()],
+    budgets: [budgetRow({ house: 'ramot', month, amount: 100000 })],
+  });
+  dom.window.go('ramot');
+  const doc = dom.window.document;
+  assert.ok(doc.querySelector('.house-budget .bud-line'), 'house view budget line');
+  const editBtn = [...doc.querySelectorAll('.house-budget button')]
+    .find(b => /תקציב/.test(b.textContent));
+  assert.ok(editBtn, 'house view budget edit control');
+  dom.window.close();
+});
+
+test('budgets: openBudget → saveBudget posts setBudget and updates the view', async () => {
+  const { dom } = loadPage();
+  await authAndBoot(dom, { workers: [wk()], assignments: [hourlyAsg()] });
+  dom.window.go('ramot');
+
+  // Capture the setBudget POST and echo back a budget row (as the server does).
+  let posted = null;
+  const month = dom.window.EZONE_CALC.currentMonth();
+  dom.window.fetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    posted = body;
+    const budget = Object.assign({ id: 'budX', createdAt: '', updatedAt: '' }, body.budget);
+    return { ok: true, status: 200,
+      text: async () => JSON.stringify({ ok: true, budget }),
+      json: async () => ({ ok: true, budget }) };
+  };
+
+  dom.window.openBudget('ramot');
+  dom.window.document.getElementById('bg_amount').value = '95000';
+  await dom.window.saveBudget();
+
+  assert.ok(posted, 'a POST should have been made');
+  assert.equal(posted.action, 'setBudget');
+  assert.equal(posted.budget.house, 'ramot');
+  assert.equal(posted.budget.month, month, 'defaults to the selected month (not default)');
+  assert.equal(posted.budget.amount, 95000);
+  // Overlay closed after save.
+  assert.ok(!dom.window.document.getElementById('budgetOverlay').classList.contains('show'));
+  dom.window.close();
+});
+
+test('budgets: "כברירת מחדל" checkbox posts month=default', async () => {
+  const { dom } = loadPage();
+  await authAndBoot(dom, { workers: [wk()], assignments: [hourlyAsg()] });
+  dom.window.go('ramot');
+  let posted = null;
+  dom.window.fetch = async (url, init) => {
+    posted = JSON.parse(init.body);
+    const budget = Object.assign({ id: 'budX' }, posted.budget);
+    return { ok: true, status: 200,
+      text: async () => JSON.stringify({ ok: true, budget }),
+      json: async () => ({ ok: true, budget }) };
+  };
+  dom.window.openBudget('ramot');
+  dom.window.document.getElementById('bg_amount').value = '80000';
+  dom.window.document.getElementById('bg_default').checked = true;
+  await dom.window.saveBudget();
+  assert.equal(posted.budget.month, 'default');
   dom.window.close();
 });

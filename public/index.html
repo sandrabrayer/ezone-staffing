@@ -553,6 +553,36 @@ tbody tr:hover{
   margin-inline-start:6px;
 }
 
+/* ----- budget vs cost ----- */
+/* Status colors: green (within), amber (over ≤10%), red (over >10%). */
+.bud-ok{color:#3FB463}
+.bud-warn{color:#EF9F27}
+.bud-over{color:#E0533D}
+.bud-none{color:var(--muted)}
+/* Compact read-only budget line on house cards / house view. */
+.bud-line{font-size:11px;font-weight:700;margin-top:6px}
+.house-budget{
+  display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:14px;
+}
+.house-budget .bud-line{margin-top:0;font-size:13px}
+/* Status dot in the summary table. */
+.bud-dot{
+  display:inline-block;width:9px;height:9px;border-radius:50%;
+  margin-inline-end:6px;vertical-align:middle;background:currentColor;
+}
+.budget-table{width:100%;border-collapse:collapse}
+.budget-table th,.budget-table td{
+  padding:10px 12px;text-align:right;border-bottom:1px solid var(--line);
+  font-size:13px;white-space:nowrap;
+}
+.budget-table thead th{color:var(--muted);font-weight:600}
+.budget-table .bud-house{font-weight:700}
+.budget-table .bud-summary td{border-top:2px solid var(--line-strong);font-weight:700}
+.budget-table .bud-none-txt{color:var(--muted)}
+/* Checkbox line in the budget editor. */
+.checkline{display:flex;align-items:center;gap:8px;font-weight:600;cursor:pointer}
+.checkline input{width:auto;margin:0}
+
 /* Dashboard join rows (היעדרויות פעילות ברשת). One row per active
    absence, with optional matching coverage. Read-only — no row actions
    live here. Orphan variant gets the same red-dashed treatment as the
@@ -1066,6 +1096,34 @@ tbody tr:hover{
   </div>
 </div>
 
+<!-- Budget editor. Sets a per-house monthly salary budget for the selected
+     month (or the 'default' fallback when the "כברירת מחדל" box is ticked). -->
+<div class="overlay" id="budgetOverlay">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>תקציב שכר חודשי</h3>
+      <p id="budgetModalSub"></p>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>סכום התקציב (₪)</label>
+        <input id="bg_amount" type="number" min="0" step="100" inputmode="numeric" placeholder="לדוגמה 120000"/>
+      </div>
+      <div class="field">
+        <label class="checkline">
+          <input id="bg_default" type="checkbox"/>
+          קבע/י כברירת מחדל לכל החודשים (ולא רק לחודש הנבחר)
+        </label>
+        <div class="hint">תקציב לחודש ספציפי גובר על ברירת המחדל.</div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-primary" id="budgetSaveBtn" onclick="saveBudget()">שמירת תקציב</button>
+      <button class="btn btn-ghost" onclick="closeBudget()">ביטול</button>
+    </div>
+  </div>
+</div>
+
 <!-- Absence modal: log an absence AT a house for a date range. v3.1 made
      this strictly a single event — the "log absence → prompt for
      coverage" two-step flow is gone, and the absence form no longer
@@ -1248,6 +1306,8 @@ const {
   monthlyAssignmentCost: calcMonthlyAssignmentCost,
   houseMonthlyTotal: calcHouseMonthlyTotal,
   networkMonthlyTotal: calcNetworkMonthlyTotal,
+  budgetForHouse: calcBudgetForHouse,
+  budgetVariance: calcBudgetVariance,
   todayStr: calcTodayStr,
   isAbsenceActive: calcIsAbsenceActive,
   activeAbsences: calcActiveAbsences,
@@ -1273,6 +1333,7 @@ let ABSENCES = [];
 let COVERAGES = [];
 let ARCHIVE_V3 = [];
 let MONTHLY_ACTUALS = [];
+let BUDGETS = [];
 let view = 'central';
 // Selected month (YYYY-MM) for the cost view. Hourly / per_session costs
 // reflect this month's actuals (falling back to the estimate + an "אומדן"
@@ -1321,6 +1382,7 @@ async function loadData(){
   COVERAGES   = Array.isArray(d.coverages)   ? d.coverages   : [];
   ARCHIVE_V3  = Array.isArray(d.archiveV3)   ? d.archiveV3   : [];
   MONTHLY_ACTUALS = Array.isArray(d.monthlyActuals) ? d.monthlyActuals : [];
+  BUDGETS = Array.isArray(d.budgets) ? d.budgets : [];
 }
 
 /* ---------- local cache mutation (perf) ----------
@@ -1505,6 +1567,149 @@ function totalCostMonth(today){
   const houseIds = HOUSES.map(h => h.id);
   return calcNetworkMonthlyTotal(ASSIGNMENTS, COVERAGES, ABSENCES, ARCHIVE_V3,
     ACTUALS_INDEX, houseIds, ensureMonth(), today);
+}
+
+// ---------- budget view helpers ----------
+
+const BUDGET_STATUS = {
+  ok:   { cls: 'bud-ok',   label: 'בתקציב' },
+  warn: { cls: 'bud-warn', label: 'חריגה קלה' },
+  over: { cls: 'bud-over', label: 'חריגה' },
+  none: { cls: 'bud-none', label: 'ללא תקציב' },
+};
+
+// Utilization percent as text ('∞' when a 0 budget carries positive cost).
+function pctText(pct){
+  if (pct === null || pct === undefined) return '—';
+  return Number.isFinite(pct) ? `${pct}%` : '∞';
+}
+// Variance ₪ as "יתרה X" (headroom) / "חריגה X" (over) / "—" (no budget).
+function varianceText(v){
+  if (v.variance === null) return '—';
+  return v.variance >= 0 ? `יתרה ${fmt(v.variance)}` : `חריגה ${fmt(-v.variance)}`;
+}
+
+// Compact read-only budget line for a house card / house view. `cost` is
+// the already-computed month total for the house.
+function budgetLineHtml(houseId, cost){
+  const budget = calcBudgetForHouse(BUDGETS, houseId, ensureMonth());
+  const v = calcBudgetVariance(budget, cost);
+  const meta = BUDGET_STATUS[v.status];
+  if (v.status === 'none'){
+    return `<div class="bud-line ${meta.cls}">תקציב: לא הוגדר</div>`;
+  }
+  return `<div class="bud-line ${meta.cls}">תקציב ${fmt(v.budget)} · ${varianceText(v)} · ${pctText(v.pct)}</div>`;
+}
+
+// Central "תקציב מול עלות" section: one row per house (budget, cost,
+// variance ₪, utilization %, status) with a per-house edit control, plus a
+// combined summary row across houses that have a budget set.
+function budgetSummarySection(today){
+  const month = ensureMonth();
+  let sumBudget = 0, sumCostBudgeted = 0, anyBudget = false;
+  const rows = HOUSES.map(h => {
+    const cost = houseMonthTotal(h.id, today);
+    const budget = calcBudgetForHouse(BUDGETS, h.id, month);
+    const v = calcBudgetVariance(budget, cost);
+    const meta = BUDGET_STATUS[v.status];
+    if (budget !== null){ anyBudget = true; sumBudget += v.budget; sumCostBudgeted += cost; }
+    return `
+    <tr class="${meta.cls}-row">
+      <td class="bud-house">${escapeHtml(h.name)}</td>
+      <td class="money">${budget === null ? '<span class="bud-none-txt">—</span>' : fmt(v.budget)}</td>
+      <td class="money">${fmt(cost)}</td>
+      <td class="money ${meta.cls}">${varianceText(v)}</td>
+      <td class="money ${meta.cls}">${pctText(v.pct)}</td>
+      <td><span class="bud-dot ${meta.cls}" title="${escapeHtml(meta.label)}"></span>${escapeHtml(meta.label)}</td>
+      <td><button class="btn btn-sm btn-accent-hover" onclick="openBudget('${escapeHtml(h.id)}')">עריכת תקציב</button></td>
+    </tr>`;
+  }).join('');
+
+  const cv = calcBudgetVariance(anyBudget ? sumBudget : null, sumCostBudgeted);
+  const cvMeta = BUDGET_STATUS[cv.status];
+  const summaryRow = `
+    <tr class="bud-summary">
+      <td class="bud-house">סה״כ (בתים עם תקציב)</td>
+      <td class="money">${anyBudget ? fmt(cv.budget) : '—'}</td>
+      <td class="money">${anyBudget ? fmt(cv.cost) : '—'}</td>
+      <td class="money ${cvMeta.cls}">${anyBudget ? varianceText(cv) : '—'}</td>
+      <td class="money ${cvMeta.cls}">${anyBudget ? pctText(cv.pct) : '—'}</td>
+      <td>${anyBudget ? `<span class="bud-dot ${cvMeta.cls}"></span>${escapeHtml(cvMeta.label)}` : '—'}</td>
+      <td></td>
+    </tr>`;
+
+  return `
+  <div class="section">
+    <div class="section-head">
+      <h2>תקציב מול עלות — ${escapeHtml(fmtMonth(month))}</h2>
+    </div>
+    <div class="tablecard">
+      <div class="table-scroll">
+        <table class="budget-table">
+          <thead><tr>
+            <th>בית</th><th>תקציב</th><th>עלות</th>
+            <th>יתרה / חריגה</th><th>ניצול</th><th>סטטוס</th><th>פעולה</th>
+          </tr></thead>
+          <tbody>${rows}${summaryRow}</tbody>
+        </table>
+      </div>
+    </div>
+  </div>`;
+}
+
+// House-view budget control: the read-only line + an edit button.
+function houseBudgetControlHtml(houseId, cost){
+  return `
+  <div class="house-budget">
+    ${budgetLineHtml(houseId, cost)}
+    <button class="btn btn-sm btn-accent-hover" onclick="openBudget('${escapeHtml(houseId)}')">עריכת תקציב</button>
+  </div>`;
+}
+
+// ---------- budget editor modal ----------
+
+let editingBudget = null;   // { house }
+
+function openBudget(houseId){
+  editingBudget = { house: houseId };
+  const month = ensureMonth();
+  document.getElementById('budgetModalSub').textContent =
+    houseName(houseId) + ' · ' + fmtMonth(month);
+  // Prefill with the current effective amount (month-specific, else default).
+  const specific = BUDGETS.find(b => b.house === houseId && b.month === month);
+  const def = BUDGETS.find(b => b.house === houseId && b.month === 'default');
+  const cur = specific || def || null;
+  document.getElementById('bg_amount').value = cur ? cur.amount : '';
+  document.getElementById('bg_default').checked = false;
+  document.getElementById('budgetOverlay').classList.add('show');
+  const inp = document.getElementById('bg_amount');
+  if (inp && inp.focus) inp.focus();
+}
+function closeBudget(){
+  document.getElementById('budgetOverlay').classList.remove('show');
+  editingBudget = null;
+}
+async function saveBudget(){
+  if (!editingBudget) return;
+  const amount = Number(document.getElementById('bg_amount').value);
+  if (!Number.isFinite(amount) || amount < 0){ toast('יש להזין סכום תקין', true); return; }
+  const asDefault = document.getElementById('bg_default').checked;
+  const month = asDefault ? 'default' : ensureMonth();
+  setBusy('budgetSaveBtn', true, 'שומר…');
+  try {
+    const res = await doAction({
+      action: 'setBudget',
+      budget: { house: editingBudget.house, month, amount: Math.round(amount) },
+    });
+    if (res && res.budget) upsertById(BUDGETS, res.budget);
+    closeBudget();
+    render();
+    toast('התקציב נשמר');
+  } catch (err) {
+    toast(err.message || 'שגיאה בשמירה', true);
+  } finally {
+    setBusy('budgetSaveBtn', false);
+  }
 }
 
 function roleLabel(a){
@@ -2623,6 +2828,7 @@ function centralView(){
           <div class="t">עלות חודשית</div>
           ${extra ? `<div class="bonus-line">כולל תוספות מחליפים ${fmt(extra)}</div>` : ''}
           ${pending ? `<div class="bonus-line">כולל בתקופת הודעה ${fmt(pending)}</div>` : ''}
+          ${budgetLineHtml(h.id, houseT)}
         </div>
       </div>
     </div>`;
@@ -2673,7 +2879,9 @@ function centralView(){
   <div class="section">
     <div class="section-head"><h2>פירוט לפי בית</h2></div>
     <div class="house-grid">${houseBoxes}</div>
-  </div>`;
+  </div>
+
+  ${budgetSummarySection(today)}`;
 }
 
 // One dashboard JOIN row. Read-only — no buttons, no openX() handlers.
@@ -2994,6 +3202,7 @@ function houseView(id){
     <p>צוות הבית, נעדרים והחלפות פעילות</p>
     ${mgrPill}
     ${monthPickerHtml()}
+    ${houseBudgetControlHtml(id, houseT)}
   </div>
 
   <div class="stats">
