@@ -25,6 +25,7 @@ function makeFakeUpstream() {
     absences: [],
     coverages: [],
     archiveV3: [],
+    monthlyActuals: [],
   };
   let idCtr = 0;
   const newId = (p) => p + (++idCtr);
@@ -48,6 +49,7 @@ function makeFakeUpstream() {
         absences: state.absences,
         coverages: state.coverages,
         archiveV3: state.archiveV3,
+        monthlyActuals: state.monthlyActuals,
         // legacy passthrough — empty in a v3-only world
         houses: { ramot: [], asher: [], ofroni: [], rehab: [] },
         events: [],
@@ -256,6 +258,39 @@ function makeFakeUpstream() {
         if (i < 0) return { status: 200, json: { _status: 404, error: 'coverage not found' } };
         state.coverages.splice(i, 1);
         return { status: 200, json: { _status: 200, ok: true } };
+      }
+
+      // ---------- monthly actuals ----------
+      case 'upsertMonthlyActuals': {
+        // FK check first — mirror the real Code.gs (no partial writes).
+        for (const it of b.items) {
+          if (!state.assignments.some(a => a.id === it.assignmentId)) {
+            return { status: 200, json: { _status: 404, error: 'assignment not found: ' + it.assignmentId } };
+          }
+        }
+        const out = b.items.map(it => {
+          const existing = state.monthlyActuals.find(
+            x => x.assignmentId === it.assignmentId && x.month === it.month);
+          if (existing) {
+            existing.actualHours = it.actualHours;
+            existing.actualSessions = it.actualSessions;
+            existing.note = it.note;
+            existing.updatedAt = nowIso();
+            return Object.assign({ updated: true }, existing);
+          }
+          const row = {
+            id: newId('ma'), assignmentId: it.assignmentId, month: it.month,
+            actualHours: it.actualHours, actualSessions: it.actualSessions,
+            note: it.note, createdAt: nowIso(), updatedAt: nowIso(),
+          };
+          state.monthlyActuals.push(row);
+          return Object.assign({ updated: false }, row);
+        });
+        return { status: 200, json: { _status: 200, ok: true, count: out.length, actuals: out } };
+      }
+      case 'getMonthlyActuals': {
+        const rows = state.monthlyActuals.filter(x => x.month === b.month);
+        return { status: 200, json: { _status: 200, ok: true, month: b.month, actuals: rows } };
       }
 
       default:
@@ -1170,5 +1205,137 @@ test('validateAction: rejects empty / missing body', async () => {
     const token = await login(base);
     const r = await post(base, token, {});
     assert.equal(r.status, 400);
+  } finally { await close(srv); }
+});
+
+// ----- monthly actuals -----
+
+async function addHourly(base, token, house) {
+  const wId = await createWorker(base, token, 'מדריך ' + Math.random().toString(36).slice(2, 6));
+  const r = await addAssignment(base, token, {
+    workerId: wId, house: house || 'ramot', role: 'מדריך/ה',
+    employmentType: 'hourly', hourlyRate: 60, estHours: 100,
+  });
+  assert.equal(r.status, 200, 'hourly assignment should be created');
+  return r.json.assignment.id;
+}
+
+test('upsertMonthlyActuals: inserts new rows, then GET /api/data returns them', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    const aId = await addHourly(base, token);
+    const r = await post(base, token, {
+      action: 'upsertMonthlyActuals',
+      items: [{ assignmentId: aId, month: '2026-07', actualHours: 92 }],
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.count, 1);
+    assert.equal(r.json.actuals[0].updated, false);
+    assert.equal(r.json.actuals[0].actualHours, 92);
+
+    const data = await get(base, token);
+    assert.equal(data.status, 200);
+    assert.ok(Array.isArray(data.json.monthlyActuals));
+    assert.equal(data.json.monthlyActuals.length, 1);
+    assert.equal(data.json.monthlyActuals[0].assignmentId, aId);
+  } finally { await close(srv); }
+});
+
+test('upsertMonthlyActuals: second upsert for same (assignment, month) UPDATES in place', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    const aId = await addHourly(base, token);
+    await post(base, token, {
+      action: 'upsertMonthlyActuals',
+      items: [{ assignmentId: aId, month: '2026-07', actualHours: 92 }],
+    });
+    const r2 = await post(base, token, {
+      action: 'upsertMonthlyActuals',
+      items: [{ assignmentId: aId, month: '2026-07', actualHours: 105 }],
+    });
+    assert.equal(r2.status, 200);
+    assert.equal(r2.json.actuals[0].updated, true, 'should be an update, not an insert');
+    assert.equal(r2.json.actuals[0].actualHours, 105);
+
+    const data = await get(base, token);
+    assert.equal(data.json.monthlyActuals.length, 1, 'still exactly one row for the pair');
+    assert.equal(data.json.monthlyActuals[0].actualHours, 105);
+  } finally { await close(srv); }
+});
+
+test('upsertMonthlyActuals: distinct months for one assignment are separate rows', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    const aId = await addHourly(base, token);
+    const r = await post(base, token, {
+      action: 'upsertMonthlyActuals',
+      items: [
+        { assignmentId: aId, month: '2026-07', actualHours: 92 },
+        { assignmentId: aId, month: '2026-08', actualHours: 40 },
+      ],
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.count, 2);
+    const data = await get(base, token);
+    assert.equal(data.json.monthlyActuals.length, 2);
+  } finally { await close(srv); }
+});
+
+test('upsertMonthlyActuals: unknown assignmentId is rejected 404 with no partial write', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    const aId = await addHourly(base, token);
+    const r = await post(base, token, {
+      action: 'upsertMonthlyActuals',
+      items: [
+        { assignmentId: aId, month: '2026-07', actualHours: 92 },
+        { assignmentId: 'nope', month: '2026-07', actualHours: 10 },
+      ],
+    });
+    assert.equal(r.status, 404);
+    const data = await get(base, token);
+    assert.equal(data.json.monthlyActuals.length, 0, 'no rows written when any item is invalid');
+  } finally { await close(srv); }
+});
+
+test('upsertMonthlyActuals: bad month / negative hours / unknown field are 400', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    const aId = await addHourly(base, token);
+    const bads = [
+      { assignmentId: aId, month: '2026-13', actualHours: 10 },     // bad month
+      { assignmentId: aId, month: '2026-7', actualHours: 10 },      // unpadded month
+      { assignmentId: aId, month: '2026-07', actualHours: -1 },     // negative
+      { assignmentId: aId, month: '2026-07', bogus: 1 },            // unknown field
+      { assignmentId: aId, month: '2026-07' },                      // no value at all
+    ];
+    for (const item of bads) {
+      const r = await post(base, token, { action: 'upsertMonthlyActuals', items: [item] });
+      assert.equal(r.status, 400, 'expected 400 for ' + JSON.stringify(item));
+    }
+  } finally { await close(srv); }
+});
+
+test('getMonthlyActuals: returns only the requested month', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    const aId = await addHourly(base, token);
+    await post(base, token, {
+      action: 'upsertMonthlyActuals',
+      items: [
+        { assignmentId: aId, month: '2026-07', actualHours: 92 },
+        { assignmentId: aId, month: '2026-08', actualHours: 40 },
+      ],
+    });
+    const r = await post(base, token, { action: 'getMonthlyActuals', month: '2026-07' });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.actuals.length, 1);
+    assert.equal(r.json.actuals[0].month, '2026-07');
   } finally { await close(srv); }
 });

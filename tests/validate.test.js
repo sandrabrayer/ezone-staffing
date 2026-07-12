@@ -9,6 +9,9 @@ const {
   isHouse, isRole, isEmploymentType,
   clampPct, clampMoney, clampInt,
   validateWorker, validateAssignment, validateAbsence, validateCoverage,
+  validateMonth, validateMonthlyActualsItem, validateMonthlyActuals,
+  validateBudget,
+  ACTUAL_HOURS_MAX, ACTUAL_SESSIONS_MAX, MONTHLY_ACTUALS_MAX_ITEMS, BUDGET_MAX,
   validateAction,
 } = require('../lib/validate');
 
@@ -565,4 +568,118 @@ test('validateAction: legacy v2 actions are no longer recognized', () => {
 test('validateAction: rejects empty / missing body', () => {
   assert.throws(() => validateAction(null), /body required/);
   assert.throws(() => validateAction({}), /unknown action/);
+});
+
+// ---------- monthly actuals ----------
+
+test('validateMonth: accepts YYYY-MM with a real month, rejects the rest', () => {
+  assert.equal(validateMonth('2026-07', 'month'), '2026-07');
+  assert.equal(validateMonth('2026-01', 'month'), '2026-01');
+  assert.equal(validateMonth('2026-12', 'month'), '2026-12');
+  assert.throws(() => validateMonth('2026-13', 'month'), /bad month/);
+  assert.throws(() => validateMonth('2026-00', 'month'), /bad month/);
+  assert.throws(() => validateMonth('2026-7', 'month'), /bad month/);   // unpadded
+  assert.throws(() => validateMonth('2026-07-01', 'month'), /bad month/); // full date
+  assert.throws(() => validateMonth('', 'month'), /missing month/);
+});
+
+test('validateMonthlyActualsItem: hours rounded to 2 decimals, capped, non-negative', () => {
+  const v = validateMonthlyActualsItem({ assignmentId: 'a1', month: '2026-07', actualHours: 92.126 });
+  assert.equal(v.assignmentId, 'a1');
+  assert.equal(v.month, '2026-07');
+  assert.equal(v.actualHours, 92.13);
+  assert.equal(v.actualSessions, undefined);
+  assert.equal(v.note, '');
+
+  // Cap at ACTUAL_HOURS_MAX.
+  const capped = validateMonthlyActualsItem({ assignmentId: 'a1', month: '2026-07', actualHours: 99999 });
+  assert.equal(capped.actualHours, ACTUAL_HOURS_MAX);
+
+  assert.throws(() => validateMonthlyActualsItem({ assignmentId: 'a1', month: '2026-07', actualHours: -1 }),
+    /non-negative/);
+  assert.throws(() => validateMonthlyActualsItem({ assignmentId: 'a1', month: '2026-07', actualHours: 'x' }),
+    /bad actualHours/);
+});
+
+test('validateMonthlyActualsItem: sessions are whole numbers, capped', () => {
+  const v = validateMonthlyActualsItem({ assignmentId: 'a1', month: '2026-07', actualSessions: 12.6 });
+  assert.equal(v.actualSessions, 13);
+  const capped = validateMonthlyActualsItem({ assignmentId: 'a1', month: '2026-07', actualSessions: 99999 });
+  assert.equal(capped.actualSessions, ACTUAL_SESSIONS_MAX);
+});
+
+test('validateMonthlyActualsItem: requires assignmentId + at least one value', () => {
+  assert.throws(() => validateMonthlyActualsItem({ month: '2026-07', actualHours: 1 }), /assignmentId required/);
+  assert.throws(() => validateMonthlyActualsItem({ assignmentId: 'a1', month: '2026-07' }),
+    /needs actualHours, actualSessions, or note/);
+  // A note-only row IS allowed (records a comment for the pair).
+  const noteOnly = validateMonthlyActualsItem({ assignmentId: 'a1', month: '2026-07', note: 'הערה' });
+  assert.equal(noteOnly.note, 'הערה');
+});
+
+test('validateMonthlyActualsItem: rejects unknown fields', () => {
+  assert.throws(() => validateMonthlyActualsItem(
+    { assignmentId: 'a1', month: '2026-07', actualHours: 1, bogus: 2 }), /unknown field: bogus/);
+});
+
+test('validateMonthlyActuals: rejects non-array, empty, and duplicate pairs', () => {
+  assert.throws(() => validateMonthlyActuals({}), /must be an array/);
+  assert.throws(() => validateMonthlyActuals([]), /items required/);
+  assert.throws(() => validateMonthlyActuals([
+    { assignmentId: 'a1', month: '2026-07', actualHours: 1 },
+    { assignmentId: 'a1', month: '2026-07', actualHours: 2 },
+  ]), /duplicate assignmentId\+month/);
+  // Different months for the same assignment are fine.
+  const ok = validateMonthlyActuals([
+    { assignmentId: 'a1', month: '2026-07', actualHours: 1 },
+    { assignmentId: 'a1', month: '2026-08', actualHours: 2 },
+  ]);
+  assert.equal(ok.length, 2);
+});
+
+test('validateMonthlyActuals: rejects a batch over the item cap', () => {
+  const big = [];
+  for (let i = 0; i <= MONTHLY_ACTUALS_MAX_ITEMS; i++) {
+    big.push({ assignmentId: 'a' + i, month: '2026-07', actualHours: 1 });
+  }
+  assert.throws(() => validateMonthlyActuals(big), /too many items/);
+});
+
+test('validateAction: upsertMonthlyActuals / getMonthlyActuals', () => {
+  const up = validateAction({
+    action: 'upsertMonthlyActuals',
+    items: [{ assignmentId: 'a1', month: '2026-07', actualHours: 90 }],
+  });
+  assert.equal(up.action, 'upsertMonthlyActuals');
+  assert.equal(up.items.length, 1);
+
+  const g = validateAction({ action: 'getMonthlyActuals', month: '2026-07' });
+  assert.equal(g.action, 'getMonthlyActuals');
+  assert.equal(g.month, '2026-07');
+  assert.throws(() => validateAction({ action: 'getMonthlyActuals', month: 'nope' }), /bad month/);
+});
+
+// ---------- budgets ----------
+
+test('validateBudget: house + month/default + non-negative amount', () => {
+  const b = validateBudget({ house: 'ramot', month: '2026-07', amount: 120000 });
+  assert.deepEqual(b, { house: 'ramot', month: '2026-07', amount: 120000 });
+
+  const def = validateBudget({ house: 'ramot', month: 'default', amount: 100000 });
+  assert.equal(def.month, 'default');
+
+  assert.equal(validateBudget({ house: 'ramot', month: 'default', amount: 5.6 }).amount, 6);
+  assert.equal(validateBudget({ house: 'ramot', month: 'default', amount: BUDGET_MAX * 10 }).amount, BUDGET_MAX);
+
+  assert.throws(() => validateBudget({ house: 'nope', month: 'default', amount: 1 }), /unknown house/);
+  assert.throws(() => validateBudget({ house: 'ramot', month: '2026-13', amount: 1 }), /bad month/);
+  assert.throws(() => validateBudget({ house: 'ramot', month: 'default', amount: -1 }), /non-negative/);
+});
+
+test('validateAction: setBudget / getBudgets', () => {
+  const s = validateAction({ action: 'setBudget', budget: { house: 'ramot', month: '2026-07', amount: 90000 } });
+  assert.equal(s.action, 'setBudget');
+  assert.equal(s.budget.amount, 90000);
+  const g = validateAction({ action: 'getBudgets' });
+  assert.equal(g.action, 'getBudgets');
 });
