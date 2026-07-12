@@ -518,6 +518,71 @@ tbody tr:hover{
 }
 .roster-search input::placeholder{color:var(--muted)}
 
+/* Month picker for the cost view. Sits in the page head; changing it
+   re-renders every cost cell + the totals for the selected month. */
+.month-picker{display:flex;align-items:center;gap:10px;margin-top:14px}
+.month-picker label{font-size:13px;color:var(--muted);font-weight:600}
+.month-picker input{
+  font-family:inherit;
+  font-size:14px;
+  padding:8px 12px;
+  border:1px solid var(--line-strong);
+  border-radius:10px;
+  background:var(--bg-elevated);
+  color:var(--ink);
+  outline:none;
+  transition:border-color .15s, box-shadow .15s;
+}
+.month-picker input:focus{
+  border-color:var(--accent-2);
+  box-shadow:0 0 0 3px rgba(239,159,39,0.18);
+}
+/* "אומדן" badge — shown on an hourly / per_session cost when no actuals
+   were recorded for the selected month (the figure is the estimate). */
+.est-badge{
+  display:inline-block;
+  font-size:10.5px;font-weight:700;
+  padding:1px 7px;border-radius:999px;
+  background:var(--warning);color:#1a1200;
+  vertical-align:middle;margin-inline-start:6px;
+}
+/* Small note showing the actual quantity used when a cost IS from actuals. */
+.actual-note{
+  display:inline-block;
+  font-size:11px;font-weight:600;color:var(--muted);
+  margin-inline-start:6px;
+}
+
+/* ----- budget vs cost ----- */
+/* Status colors: green (within), amber (over ≤10%), red (over >10%). */
+.bud-ok{color:#3FB463}
+.bud-warn{color:#EF9F27}
+.bud-over{color:#E0533D}
+.bud-none{color:var(--muted)}
+/* Compact read-only budget line on house cards / house view. */
+.bud-line{font-size:11px;font-weight:700;margin-top:6px}
+.house-budget{
+  display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:14px;
+}
+.house-budget .bud-line{margin-top:0;font-size:13px}
+/* Status dot in the summary table. */
+.bud-dot{
+  display:inline-block;width:9px;height:9px;border-radius:50%;
+  margin-inline-end:6px;vertical-align:middle;background:currentColor;
+}
+.budget-table{width:100%;border-collapse:collapse}
+.budget-table th,.budget-table td{
+  padding:10px 12px;text-align:right;border-bottom:1px solid var(--line);
+  font-size:13px;white-space:nowrap;
+}
+.budget-table thead th{color:var(--muted);font-weight:600}
+.budget-table .bud-house{font-weight:700}
+.budget-table .bud-summary td{border-top:2px solid var(--line-strong);font-weight:700}
+.budget-table .bud-none-txt{color:var(--muted)}
+/* Checkbox line in the budget editor. */
+.checkline{display:flex;align-items:center;gap:8px;font-weight:600;cursor:pointer}
+.checkline input{width:auto;margin:0}
+
 /* Dashboard join rows (היעדרויות פעילות ברשת). One row per active
    absence, with optional matching coverage. Read-only — no row actions
    live here. Orphan variant gets the same red-dashed treatment as the
@@ -1031,6 +1096,34 @@ tbody tr:hover{
   </div>
 </div>
 
+<!-- Budget editor. Sets a per-house monthly salary budget for the selected
+     month (or the 'default' fallback when the "כברירת מחדל" box is ticked). -->
+<div class="overlay" id="budgetOverlay">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>תקציב שכר חודשי</h3>
+      <p id="budgetModalSub"></p>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>סכום התקציב (₪)</label>
+        <input id="bg_amount" type="number" min="0" step="100" inputmode="numeric" placeholder="לדוגמה 120000"/>
+      </div>
+      <div class="field">
+        <label class="checkline">
+          <input id="bg_default" type="checkbox"/>
+          קבע/י כברירת מחדל לכל החודשים (ולא רק לחודש הנבחר)
+        </label>
+        <div class="hint">תקציב לחודש ספציפי גובר על ברירת המחדל.</div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-primary" id="budgetSaveBtn" onclick="saveBudget()">שמירת תקציב</button>
+      <button class="btn btn-ghost" onclick="closeBudget()">ביטול</button>
+    </div>
+  </div>
+</div>
+
 <!-- Absence modal: log an absence AT a house for a date range. v3.1 made
      this strictly a single event — the "log absence → prompt for
      coverage" two-step flow is gone, and the absence form no longer
@@ -1207,6 +1300,14 @@ const {
   assignmentsByHouse: calcAssignmentsByHouse,
   houseAssignmentsCost: calcHouseAssignmentsCost,
   splitByCategory: calcSplitByCategory,
+  currentMonth: calcCurrentMonth,
+  indexActuals: calcIndexActuals,
+  lookupActual: calcLookupActual,
+  monthlyAssignmentCost: calcMonthlyAssignmentCost,
+  houseMonthlyTotal: calcHouseMonthlyTotal,
+  networkMonthlyTotal: calcNetworkMonthlyTotal,
+  budgetForHouse: calcBudgetForHouse,
+  budgetVariance: calcBudgetVariance,
   todayStr: calcTodayStr,
   isAbsenceActive: calcIsAbsenceActive,
   activeAbsences: calcActiveAbsences,
@@ -1231,7 +1332,18 @@ let ASSIGNMENTS = [];
 let ABSENCES = [];
 let COVERAGES = [];
 let ARCHIVE_V3 = [];
+let MONTHLY_ACTUALS = [];
+let BUDGETS = [];
 let view = 'central';
+// Selected month (YYYY-MM) for the cost view. Hourly / per_session costs
+// reflect this month's actuals (falling back to the estimate + an "אומדן"
+// badge). Defaults to the current month on first render; persists across
+// house navigation (unlike rosterFilter) so switching houses keeps the
+// chosen month. ACTUALS_INDEX is rebuilt from MONTHLY_ACTUALS on every
+// render so rosterRow() (also invoked by the in-place search re-render)
+// can look up a row by assignmentId+month without recomputing.
+let selectedMonth = '';
+let ACTUALS_INDEX = Object.create(null);
 // Per-house roster search term. Filters the roster tables (שכירים +
 // פרילנסרים) by worker name within a single house view. Lives in module
 // state — not the DOM — so a re-render (e.g. after an edit) keeps the
@@ -1269,6 +1381,8 @@ async function loadData(){
   ABSENCES    = Array.isArray(d.absences)    ? d.absences    : [];
   COVERAGES   = Array.isArray(d.coverages)   ? d.coverages   : [];
   ARCHIVE_V3  = Array.isArray(d.archiveV3)   ? d.archiveV3   : [];
+  MONTHLY_ACTUALS = Array.isArray(d.monthlyActuals) ? d.monthlyActuals : [];
+  BUDGETS = Array.isArray(d.budgets) ? d.budgets : [];
 }
 
 /* ---------- local cache mutation (perf) ----------
@@ -1379,6 +1493,223 @@ function totalAssignments(){ return ASSIGNMENTS.length; }
 function totalCost(today){
   const houseIds = HOUSES.map(h => h.id);
   return calcNetworkTotal(ASSIGNMENTS, COVERAGES, ABSENCES, ARCHIVE_V3, houseIds, today);
+}
+
+// ---------- month view helpers ----------
+
+const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+
+// The active month for the cost view. Lazily initialized to the current
+// month the first time it's read.
+function ensureMonth(){
+  if (!MONTH_RE.test(selectedMonth)) selectedMonth = calcCurrentMonth();
+  return selectedMonth;
+}
+
+// Human month label 'MM/YYYY' from a 'YYYY-MM' key (parallels fmtDate).
+function fmtMonth(m){
+  const s = String(m||'').trim();
+  const x = /^(\d{4})-(\d{2})$/.exec(s);
+  return x ? `${x[2]}/${x[1]}` : s;
+}
+
+// Month picker control. Bound to selectedMonth via module state; onchange
+// re-renders the whole view (unlike the roster search, which patches in
+// place) because month affects totals + every cost cell, not just the
+// roster tables.
+function monthPickerHtml(){
+  const m = ensureMonth();
+  return `
+  <div class="month-picker">
+    <label for="monthPick">חודש עלויות</label>
+    <input type="month" id="monthPick" value="${escapeHtml(m)}"
+           onchange="onMonthChange(this.value)" />
+  </div>`;
+}
+
+function onMonthChange(value){
+  const m = String(value||'').trim();
+  if (MONTH_RE.test(m)) selectedMonth = m;
+  render();
+}
+
+// Small "estimate" badge shown on an hourly / per_session cost when no
+// actuals were recorded for the selected month, so the number shown is the
+// one-time estimate rather than the real month's cost.
+function estBadge(){
+  return ` <span class="est-badge" title="לא הוזנו שעות/מפגשים בפועל לחודש זה — מוצג אומדן לפי ההערכה בשיבוץ">אומדן</span>`;
+}
+
+// The month-aware cost cell inner for a roster row: cost for selectedMonth
+// (actuals where present, estimate otherwise) plus the אומדן badge on a
+// fallback, or a small "בפועל" note showing the recorded quantity used.
+function monthCostCellInner(a){
+  const m = ensureMonth();
+  const actual = calcLookupActual(ACTUALS_INDEX, a.id, m);
+  const mc = calcMonthlyAssignmentCost(a, actual);
+  let tail = '';
+  if (mc.isEstimate) {
+    tail = estBadge();
+  } else if (a.employmentType === 'hourly' && actual && actual.actualHours != null) {
+    tail = ` <span class="actual-note">בפועל ${Number(actual.actualHours)} ש'</span>`;
+  } else if (a.employmentType === 'per_session' && actual && actual.actualSessions != null) {
+    tail = ` <span class="actual-note">בפועל ${Number(actual.actualSessions)} מפגשים</span>`;
+  }
+  return `${fmt(mc.cost)}${tail}`;
+}
+
+// Month-aware house total + network total (for the selected month).
+function houseMonthTotal(houseId, today){
+  return calcHouseMonthlyTotal(ASSIGNMENTS, COVERAGES, ABSENCES, ARCHIVE_V3,
+    ACTUALS_INDEX, houseId, ensureMonth(), today);
+}
+function totalCostMonth(today){
+  const houseIds = HOUSES.map(h => h.id);
+  return calcNetworkMonthlyTotal(ASSIGNMENTS, COVERAGES, ABSENCES, ARCHIVE_V3,
+    ACTUALS_INDEX, houseIds, ensureMonth(), today);
+}
+
+// ---------- budget view helpers ----------
+
+const BUDGET_STATUS = {
+  ok:   { cls: 'bud-ok',   label: 'בתקציב' },
+  warn: { cls: 'bud-warn', label: 'חריגה קלה' },
+  over: { cls: 'bud-over', label: 'חריגה' },
+  none: { cls: 'bud-none', label: 'ללא תקציב' },
+};
+
+// Utilization percent as text ('∞' when a 0 budget carries positive cost).
+function pctText(pct){
+  if (pct === null || pct === undefined) return '—';
+  return Number.isFinite(pct) ? `${pct}%` : '∞';
+}
+// Variance ₪ as "יתרה X" (headroom) / "חריגה X" (over) / "—" (no budget).
+function varianceText(v){
+  if (v.variance === null) return '—';
+  return v.variance >= 0 ? `יתרה ${fmt(v.variance)}` : `חריגה ${fmt(-v.variance)}`;
+}
+
+// Compact read-only budget line for a house card / house view. `cost` is
+// the already-computed month total for the house.
+function budgetLineHtml(houseId, cost){
+  const budget = calcBudgetForHouse(BUDGETS, houseId, ensureMonth());
+  const v = calcBudgetVariance(budget, cost);
+  const meta = BUDGET_STATUS[v.status];
+  if (v.status === 'none'){
+    return `<div class="bud-line ${meta.cls}">תקציב: לא הוגדר</div>`;
+  }
+  return `<div class="bud-line ${meta.cls}">תקציב ${fmt(v.budget)} · ${varianceText(v)} · ${pctText(v.pct)}</div>`;
+}
+
+// Central "תקציב מול עלות" section: one row per house (budget, cost,
+// variance ₪, utilization %, status) with a per-house edit control, plus a
+// combined summary row across houses that have a budget set.
+function budgetSummarySection(today){
+  const month = ensureMonth();
+  let sumBudget = 0, sumCostBudgeted = 0, anyBudget = false;
+  const rows = HOUSES.map(h => {
+    const cost = houseMonthTotal(h.id, today);
+    const budget = calcBudgetForHouse(BUDGETS, h.id, month);
+    const v = calcBudgetVariance(budget, cost);
+    const meta = BUDGET_STATUS[v.status];
+    if (budget !== null){ anyBudget = true; sumBudget += v.budget; sumCostBudgeted += cost; }
+    return `
+    <tr class="${meta.cls}-row">
+      <td class="bud-house">${escapeHtml(h.name)}</td>
+      <td class="money">${budget === null ? '<span class="bud-none-txt">—</span>' : fmt(v.budget)}</td>
+      <td class="money">${fmt(cost)}</td>
+      <td class="money ${meta.cls}">${varianceText(v)}</td>
+      <td class="money ${meta.cls}">${pctText(v.pct)}</td>
+      <td><span class="bud-dot ${meta.cls}" title="${escapeHtml(meta.label)}"></span>${escapeHtml(meta.label)}</td>
+      <td><button class="btn btn-sm btn-accent-hover" onclick="openBudget('${escapeHtml(h.id)}')">עריכת תקציב</button></td>
+    </tr>`;
+  }).join('');
+
+  const cv = calcBudgetVariance(anyBudget ? sumBudget : null, sumCostBudgeted);
+  const cvMeta = BUDGET_STATUS[cv.status];
+  const summaryRow = `
+    <tr class="bud-summary">
+      <td class="bud-house">סה״כ (בתים עם תקציב)</td>
+      <td class="money">${anyBudget ? fmt(cv.budget) : '—'}</td>
+      <td class="money">${anyBudget ? fmt(cv.cost) : '—'}</td>
+      <td class="money ${cvMeta.cls}">${anyBudget ? varianceText(cv) : '—'}</td>
+      <td class="money ${cvMeta.cls}">${anyBudget ? pctText(cv.pct) : '—'}</td>
+      <td>${anyBudget ? `<span class="bud-dot ${cvMeta.cls}"></span>${escapeHtml(cvMeta.label)}` : '—'}</td>
+      <td></td>
+    </tr>`;
+
+  return `
+  <div class="section">
+    <div class="section-head">
+      <h2>תקציב מול עלות — ${escapeHtml(fmtMonth(month))}</h2>
+    </div>
+    <div class="tablecard">
+      <div class="table-scroll">
+        <table class="budget-table">
+          <thead><tr>
+            <th>בית</th><th>תקציב</th><th>עלות</th>
+            <th>יתרה / חריגה</th><th>ניצול</th><th>סטטוס</th><th>פעולה</th>
+          </tr></thead>
+          <tbody>${rows}${summaryRow}</tbody>
+        </table>
+      </div>
+    </div>
+  </div>`;
+}
+
+// House-view budget control: the read-only line + an edit button.
+function houseBudgetControlHtml(houseId, cost){
+  return `
+  <div class="house-budget">
+    ${budgetLineHtml(houseId, cost)}
+    <button class="btn btn-sm btn-accent-hover" onclick="openBudget('${escapeHtml(houseId)}')">עריכת תקציב</button>
+  </div>`;
+}
+
+// ---------- budget editor modal ----------
+
+let editingBudget = null;   // { house }
+
+function openBudget(houseId){
+  editingBudget = { house: houseId };
+  const month = ensureMonth();
+  document.getElementById('budgetModalSub').textContent =
+    houseName(houseId) + ' · ' + fmtMonth(month);
+  // Prefill with the current effective amount (month-specific, else default).
+  const specific = BUDGETS.find(b => b.house === houseId && b.month === month);
+  const def = BUDGETS.find(b => b.house === houseId && b.month === 'default');
+  const cur = specific || def || null;
+  document.getElementById('bg_amount').value = cur ? cur.amount : '';
+  document.getElementById('bg_default').checked = false;
+  document.getElementById('budgetOverlay').classList.add('show');
+  const inp = document.getElementById('bg_amount');
+  if (inp && inp.focus) inp.focus();
+}
+function closeBudget(){
+  document.getElementById('budgetOverlay').classList.remove('show');
+  editingBudget = null;
+}
+async function saveBudget(){
+  if (!editingBudget) return;
+  const amount = Number(document.getElementById('bg_amount').value);
+  if (!Number.isFinite(amount) || amount < 0){ toast('יש להזין סכום תקין', true); return; }
+  const asDefault = document.getElementById('bg_default').checked;
+  const month = asDefault ? 'default' : ensureMonth();
+  setBusy('budgetSaveBtn', true, 'שומר…');
+  try {
+    const res = await doAction({
+      action: 'setBudget',
+      budget: { house: editingBudget.house, month, amount: Math.round(amount) },
+    });
+    if (res && res.budget) upsertById(BUDGETS, res.budget);
+    closeBudget();
+    render();
+    toast('התקציב נשמר');
+  } catch (err) {
+    toast(err.message || 'שגיאה בשמירה', true);
+  } finally {
+    setBusy('budgetSaveBtn', false);
+  }
 }
 
 function roleLabel(a){
@@ -2457,6 +2788,10 @@ function logout(){ clearToken(); showPinGate(); }
 
 function render(){
   renderSwitch();
+  // Refresh the per-render month + actuals index BEFORE any view or the
+  // in-place roster search reads them.
+  ensureMonth();
+  ACTUALS_INDEX = calcIndexActuals(MONTHLY_ACTUALS);
   const app=document.getElementById('app');
   if (view === 'central')      app.innerHTML = centralView();
   else if (view === 'archive') app.innerHTML = archiveView();
@@ -2474,7 +2809,7 @@ function centralView(){
 
   const houseBoxes = HOUSES.map(h=>{
     const roster = rosterAt(h.id);
-    const houseT = calcHouseTotal(ASSIGNMENTS, COVERAGES, ABSENCES, ARCHIVE_V3, h.id, today);
+    const houseT = houseMonthTotal(h.id, today);
     const extra = calcCoverageExtra(COVERAGES, ABSENCES, h.id, today);
     const pending = calcPendingHouseCost(ARCHIVE_V3, h.id, today);
     const mgrPill = h.mgr
@@ -2493,6 +2828,7 @@ function centralView(){
           <div class="t">עלות חודשית</div>
           ${extra ? `<div class="bonus-line">כולל תוספות מחליפים ${fmt(extra)}</div>` : ''}
           ${pending ? `<div class="bonus-line">כולל בתקופת הודעה ${fmt(pending)}</div>` : ''}
+          ${budgetLineHtml(h.id, houseT)}
         </div>
       </div>
     </div>`;
@@ -2502,6 +2838,7 @@ function centralView(){
   <div class="head">
     <h1>מבט כללי — כל הבתים</h1>
     <p>תמונת מצב מרכזת של מצבת כוח האדם בכל הבתים. ניהול בלעדי — מורן, משאבי אנוש.</p>
+    ${monthPickerHtml()}
   </div>
 
   <div class="stats">
@@ -2511,9 +2848,9 @@ function centralView(){
       <div class="sub">${totalAssignments()} שיבוצים בכל הרשת</div>
     </div>
     <div class="stat">
-      <div class="lbl">עלות שכר חודשית</div>
-      <div class="val">${fmt(totalCost(today))}</div>
-      <div class="sub">שיבוצים + תוספות מחליפים פעילות + תקופת הודעה</div>
+      <div class="lbl">עלות שכר — ${escapeHtml(fmtMonth(ensureMonth()))}</div>
+      <div class="val">${fmt(totalCostMonth(today))}</div>
+      <div class="sub">שיבוצים (שעתי/מפגש לפי בפועל) + תוספות מחליפים + תקופת הודעה</div>
     </div>
     <div class="stat">
       <div class="lbl">בתים פעילים</div>
@@ -2542,7 +2879,9 @@ function centralView(){
   <div class="section">
     <div class="section-head"><h2>פירוט לפי בית</h2></div>
     <div class="house-grid">${houseBoxes}</div>
-  </div>`;
+  </div>
+
+  ${budgetSummarySection(today)}`;
 }
 
 // One dashboard JOIN row. Read-only — no buttons, no openX() handlers.
@@ -2635,7 +2974,7 @@ function rosterRow(a){
       <span class="type-tag">${escapeHtml(typeLabelShort(a.employmentType))}</span>
     </td>
     <td>${termsHtml(a)}</td>
-    <td class="money">${fmt(calcAssignmentCost(a))}</td>
+    <td class="money">${monthCostCellInner(a)}</td>
     <td class="note-cell">${a.notes?escapeHtml(a.notes):'<span style="color:#B6B0A0">—</span>'}</td>
     <td>
       <div class="row-actions">
@@ -2786,7 +3125,7 @@ function houseView(id){
   // not the headline numbers.
   const filtered = filterRoster(list, rosterFilter);
   const split = calcSplitByCategory(filtered);
-  const houseT = calcHouseTotal(ASSIGNMENTS, COVERAGES, ABSENCES, ARCHIVE_V3, id, today);
+  const houseT = houseMonthTotal(id, today);
   const extra = calcCoverageExtra(COVERAGES, ABSENCES, id, today);
   const pending = calcPendingHouseCost(ARCHIVE_V3, id, today);
   // v3.1: house view shows absences logged AT this house, and coverages
@@ -2862,6 +3201,8 @@ function houseView(id){
     <h1>${escapeHtml(houseName(id))}</h1>
     <p>צוות הבית, נעדרים והחלפות פעילות</p>
     ${mgrPill}
+    ${monthPickerHtml()}
+    ${houseBudgetControlHtml(id, houseT)}
   </div>
 
   <div class="stats">
@@ -2871,7 +3212,7 @@ function houseView(id){
       <div class="sub">${subBreakdown}</div>
     </div>
     <div class="stat">
-      <div class="lbl">עלות חודשית כוללת</div>
+      <div class="lbl">עלות ${escapeHtml(fmtMonth(ensureMonth()))}</div>
       <div class="val">${fmt(houseT)}</div>
       <div class="sub">${extra||pending
         ? [

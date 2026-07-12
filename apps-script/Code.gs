@@ -77,6 +77,14 @@ const ASSIGNMENTS_TAB = 'assignments';
 const ABSENCES_TAB = 'absences';
 const COVERAGES_TAB = 'coverages';
 const ARCHIVE_V3_TAB = 'archive_v3';
+// Monthly actuals: real hours/sessions worked per (assignment, month),
+// replacing the one-time estimate for hourly / per_session cost. Append-only
+// columns; one row per (assignment, month), updated in place on re-upsert.
+const MONTHLY_ACTUALS_TAB = 'monthly_actuals';
+// Per-house monthly salary budgets. One row per (house, month) where month
+// is 'YYYY-MM' or the sentinel 'default' (fallback for any month without a
+// specific override). Append-only; upserted in place per (house, month).
+const BUDGETS_TAB = 'budgets';
 
 // Legacy tabs (read-only during transition; renamed by finalizeV3).
 const HISTORY_TAB = 'history';
@@ -111,6 +119,15 @@ const HEADERS_ARCHIVE_V3 = [
   'salary', 'pct', 'hourly_rate', 'est_hours',
   'session_rate', 'est_sessions', 'retainer_amount',
   'notes', 'termination_date', 'reason_type', 'reason_detail', 'archived_at',
+];
+// Append-only. Blank actual_hours / actual_sessions mean "not recorded for
+// this type" (an hourly row leaves actual_sessions blank and vice versa).
+const HEADERS_MONTHLY_ACTUALS = [
+  'id', 'assignment_id', 'month', 'actual_hours', 'actual_sessions',
+  'note', 'created_at', 'updated_at',
+];
+const HEADERS_BUDGETS = [
+  'id', 'house', 'month', 'amount', 'created_at', 'updated_at',
 ];
 
 // Legacy headers (only used by setupSheetsV3 to repair partial legacy state
@@ -167,6 +184,10 @@ const RETAINER_MAX = 200000;
 const EST_HOURS_MAX = 744;
 const EST_SESSIONS_MAX = 500;
 const EXTRA_PAYMENT_MAX = 100000;
+const ACTUAL_HOURS_MAX = EST_HOURS_MAX;
+const ACTUAL_SESSIONS_MAX = EST_SESSIONS_MAX;
+const MONTHLY_ACTUALS_MAX_ITEMS = 1000;
+const BUDGET_MAX = 100000000;
 
 // Migration markers — mirror lib/migrate.js.
 const MIGRATION_NOTE_NO_ABSENTEE = 'יובא ממודל ישן ללא רישום נעדר';
@@ -185,6 +206,8 @@ function doGet(e) {
       absences: readAbsencesSafe(),
       coverages: readCoveragesSafe(),
       archiveV3: readArchiveV3Safe(),
+      monthlyActuals: readMonthlyActualsSafe(),
+      budgets: readBudgetsSafe(),
       // legacy passthrough — empty arrays/objects when tabs are missing
       // (e.g. after finalizeV3 or on a fresh v3-only install).
       houses: houses,
@@ -211,6 +234,10 @@ function doPost(e) {
       case 'deleteAbsence':        return deleteAbsence(body);
       case 'addCoverage':          return addCoverage(body);
       case 'deleteCoverage':       return deleteCoverage(body);
+      case 'upsertMonthlyActuals': return upsertMonthlyActuals(body);
+      case 'getMonthlyActuals':    return getMonthlyActuals(body);
+      case 'setBudget':            return setBudget(body);
+      case 'getBudgets':           return getBudgets(body);
       default: throw httpError(400, 'unknown action');
     }
   });
@@ -435,6 +462,86 @@ function validateRequiredDate(d, label) {
   return s;
 }
 
+// Month key 'YYYY-MM' with a real 01–12 month. Mirror of lib/validate.js.
+function validateMonth(m, label) {
+  const s = String(m || '').trim();
+  if (!s) throw httpError(400, 'missing ' + label);
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(s)) throw httpError(400, 'bad ' + label);
+  return s;
+}
+
+function validateNonNegative(raw, label, max, decimals) {
+  const n = Number(raw);
+  if (!isFinite(n)) throw httpError(400, 'bad ' + label);
+  if (n < 0) throw httpError(400, label + ' must be non-negative');
+  const capped = Math.min(n, max);
+  if (decimals === 0) return Math.round(capped);
+  const f = Math.pow(10, decimals);
+  return Math.round(capped * f) / f;
+}
+
+// Mirror of lib/validate.js validateMonthlyActualsItem. assignmentId +
+// month required; hours/sessions/note optional but validated when present;
+// unknown fields rejected. FK (assignment exists) is checked in the action.
+const MONTHLY_ACTUALS_FIELDS = ['assignmentId', 'month', 'actualHours', 'actualSessions', 'note'];
+function validateMonthlyActualsItem(item) {
+  if (!item || typeof item !== 'object') throw httpError(400, 'actuals item required');
+  Object.keys(item).forEach(function (k) {
+    if (MONTHLY_ACTUALS_FIELDS.indexOf(k) < 0) throw httpError(400, 'unknown field: ' + k);
+  });
+  const assignmentId = String(item.assignmentId || '').trim();
+  if (!assignmentId) throw httpError(400, 'assignmentId required');
+  const month = validateMonth(item.month, 'month');
+  const out = { assignmentId: assignmentId, month: month };
+  let hasValue = false;
+  if (item.actualHours !== undefined && item.actualHours !== null && item.actualHours !== '') {
+    out.actualHours = validateNonNegative(item.actualHours, 'actualHours', ACTUAL_HOURS_MAX, 2);
+    hasValue = true;
+  } else {
+    out.actualHours = null;
+  }
+  if (item.actualSessions !== undefined && item.actualSessions !== null && item.actualSessions !== '') {
+    out.actualSessions = validateNonNegative(item.actualSessions, 'actualSessions', ACTUAL_SESSIONS_MAX, 0);
+    hasValue = true;
+  } else {
+    out.actualSessions = null;
+  }
+  const note = String(item.note || '').trim().slice(0, 500);
+  out.note = note;
+  if (note) hasValue = true;
+  if (!hasValue) throw httpError(400, 'actuals item needs actualHours, actualSessions, or note');
+  return out;
+}
+
+function validateMonthlyActuals(items) {
+  if (!Array.isArray(items)) throw httpError(400, 'items must be an array');
+  if (!items.length) throw httpError(400, 'items required');
+  if (items.length > MONTHLY_ACTUALS_MAX_ITEMS) throw httpError(400, 'too many items');
+  const seen = Object.create(null);
+  return items.map(function (it) {
+    const v = validateMonthlyActualsItem(it);
+    const key = v.assignmentId + '|' + v.month;
+    if (seen[key]) throw httpError(400, 'duplicate assignmentId+month in request: ' + key);
+    seen[key] = true;
+    return v;
+  });
+}
+
+// Budget month: 'YYYY-MM' or the sentinel 'default'. Mirror of lib/validate.js.
+function validateBudgetMonth(m) {
+  const s = String(m || '').trim();
+  if (s === 'default') return 'default';
+  return validateMonth(s, 'month');
+}
+
+function validateBudget(b) {
+  if (!b || typeof b !== 'object') throw httpError(400, 'budget required');
+  if (!isHouse(b.house)) throw httpError(400, 'unknown house');
+  const month = validateBudgetMonth(b.month);
+  const amount = validateNonNegative(b.amount, 'amount', BUDGET_MAX, 0);
+  return { house: b.house, month: month, amount: amount };
+}
+
 // ---------- v3 readers ----------
 
 function rowsOf(sheet) {
@@ -564,6 +671,38 @@ function readArchiveV3Safe() {
       reasonType: String(r[17] || ''),
       reasonDetail: String(r[18] || ''),
       archivedAt: cellToIso(r[19]),
+    };
+  });
+}
+
+// Monthly actuals. Blank hour/session cells stay as null (not 0) so the
+// reader can tell "recorded 0" apart from "not recorded for this type".
+function readMonthlyActualsSafe() {
+  const sh = sheetByNameOrNull(MONTHLY_ACTUALS_TAB);
+  return rowsOf(sh).map(function (r) {
+    return {
+      id: String(r[0]),
+      assignmentId: String(r[1] || ''),
+      month: formatMonthCell(r[2]),
+      actualHours: numOrNull(r[3]),
+      actualSessions: numOrNull(r[4]),
+      note: String(r[5] || ''),
+      createdAt: cellToIso(r[6]),
+      updatedAt: cellToIso(r[7]),
+    };
+  });
+}
+
+function readBudgetsSafe() {
+  const sh = sheetByNameOrNull(BUDGETS_TAB);
+  return rowsOf(sh).map(function (r) {
+    return {
+      id: String(r[0]),
+      house: String(r[1] || ''),
+      month: formatBudgetMonthCell(r[2]),
+      amount: Number(r[3]) || 0,
+      createdAt: cellToIso(r[4]),
+      updatedAt: cellToIso(r[5]),
     };
   });
 }
@@ -1026,6 +1165,128 @@ function requireBodyId(body) {
   return id;
 }
 
+// ---------- monthly actuals actions ----------
+
+// Bulk upsert of monthly actuals. One row per (assignmentId, month): if a
+// row already exists for the pair it's updated in place (values + updated_at),
+// otherwise a new row is appended. Every referenced assignment must exist.
+// The whole batch is validated (and the FK checked) BEFORE any write, so a
+// bad item fails the request without leaving a partial write.
+function upsertMonthlyActuals(body) {
+  const items = validateMonthlyActuals(body.items);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    // FK: every assignmentId must exist in the assignments tab.
+    const known = Object.create(null);
+    readAssignmentsSafe().forEach(function (a) { known[a.id] = true; });
+    items.forEach(function (it) {
+      if (!known[it.assignmentId]) {
+        throw httpError(404, 'assignment not found: ' + it.assignmentId);
+      }
+    });
+
+    const sh = sheetByName(MONTHLY_ACTUALS_TAB);
+    const values = sh.getDataRange().getValues();
+    // Build (assignmentId|month) → row-number index from existing rows.
+    const rowByKey = Object.create(null);
+    for (let i = 1; i < values.length; i++) {
+      const r = values[i];
+      if (String(r[0] || '').trim() === '') continue;
+      const key = String(r[1] || '') + '|' + formatMonthCell(r[2]);
+      rowByKey[key] = i + 1;
+    }
+
+    const now = new Date().toISOString();
+    const results = items.map(function (it) {
+      const key = it.assignmentId + '|' + it.month;
+      const existingRow = rowByKey[key];
+      if (existingRow) {
+        // Update in place; preserve id + created_at, refresh values + updated_at.
+        const id = String(sh.getRange(existingRow, 1).getValue());
+        const createdAt = cellToIso(sh.getRange(existingRow, 7).getValue()) || now;
+        sh.getRange(existingRow, 1, 1, HEADERS_MONTHLY_ACTUALS.length).setValues([[
+          id, it.assignmentId, it.month,
+          it.actualHours === null ? '' : it.actualHours,
+          it.actualSessions === null ? '' : it.actualSessions,
+          it.note, createdAt, now,
+        ]]);
+        return { id: id, assignmentId: it.assignmentId, month: it.month,
+          actualHours: it.actualHours, actualSessions: it.actualSessions,
+          note: it.note, createdAt: createdAt, updatedAt: now, updated: true };
+      }
+      const id = newId('ma');
+      sh.appendRow([
+        id, it.assignmentId, it.month,
+        it.actualHours === null ? '' : it.actualHours,
+        it.actualSessions === null ? '' : it.actualSessions,
+        it.note, now, now,
+      ]);
+      // Record so a later item in the same batch with the same pair updates
+      // this freshly-appended row rather than appending a duplicate. (The
+      // request-level validator already rejects dup pairs, so this is
+      // belt-and-suspenders.)
+      rowByKey[key] = sh.getLastRow();
+      return { id: id, assignmentId: it.assignmentId, month: it.month,
+        actualHours: it.actualHours, actualSessions: it.actualSessions,
+        note: it.note, createdAt: now, updatedAt: now, updated: false };
+    });
+
+    return { ok: true, count: results.length, actuals: results };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function getMonthlyActuals(body) {
+  const month = validateMonth(body.month, 'month');
+  const rows = readMonthlyActualsSafe().filter(function (r) { return r.month === month; });
+  return { ok: true, month: month, actuals: rows };
+}
+
+// ---------- budget actions ----------
+
+// Upsert a single per-house budget. One row per (house, month): updated in
+// place if the pair exists (amount + updated_at), otherwise appended.
+function setBudget(body) {
+  const b = validateBudget(body.budget || {});
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const sh = sheetByName(BUDGETS_TAB);
+    const values = sh.getDataRange().getValues();
+    let row = -1;
+    for (let i = 1; i < values.length; i++) {
+      const r = values[i];
+      if (String(r[0] || '').trim() === '') continue;
+      if (String(r[1]) === b.house && formatBudgetMonthCell(r[2]) === b.month) {
+        row = i + 1;
+        break;
+      }
+    }
+    const now = new Date().toISOString();
+    if (row > 0) {
+      const id = String(sh.getRange(row, 1).getValue());
+      const createdAt = cellToIso(sh.getRange(row, 5).getValue()) || now;
+      sh.getRange(row, 1, 1, HEADERS_BUDGETS.length).setValues([[
+        id, b.house, b.month, b.amount, createdAt, now,
+      ]]);
+      return { ok: true, budget: { id: id, house: b.house, month: b.month,
+        amount: b.amount, createdAt: createdAt, updatedAt: now }, updated: true };
+    }
+    const id = newId('bud');
+    sh.appendRow([id, b.house, b.month, b.amount, now, now]);
+    return { ok: true, budget: { id: id, house: b.house, month: b.month,
+      amount: b.amount, createdAt: now, updatedAt: now }, updated: false };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function getBudgets() {
+  return { ok: true, budgets: readBudgetsSafe() };
+}
+
 // ---------- setup / migration / rollback / finalize ----------
 
 // Idempotent — safe to re-run. Creates v3 tabs with the right headers,
@@ -1038,6 +1299,8 @@ function setupSheetsV3() {
     { name: ABSENCES_TAB, headers: HEADERS_ABSENCES },
     { name: COVERAGES_TAB, headers: HEADERS_COVERAGES },
     { name: ARCHIVE_V3_TAB, headers: HEADERS_ARCHIVE_V3 },
+    { name: MONTHLY_ACTUALS_TAB, headers: HEADERS_MONTHLY_ACTUALS },
+    { name: BUDGETS_TAB, headers: HEADERS_BUDGETS },
   ];
   wanted.forEach(function (w) {
     let sh = book.getSheetByName(w.name);
@@ -1466,6 +1729,32 @@ function formatDateCell(cell) {
 function cellToIso(cell) {
   if (cell instanceof Date) return cell.toISOString();
   return String(cell || '');
+}
+
+// A numeric cell → Number, but a blank cell → null (distinguishes a
+// recorded 0 from "not recorded"). Used by the monthly-actuals reader.
+function numOrNull(cell) {
+  if (cell === '' || cell === null || cell === undefined) return null;
+  const n = Number(cell);
+  return isFinite(n) ? n : null;
+}
+
+// A month cell → 'YYYY-MM'. Sheets may coerce 'YYYY-MM' to a Date; handle
+// both. Falls through to the raw string for anything unexpected.
+function formatMonthCell(cell) {
+  if (cell instanceof Date) {
+    return Utilities.formatDate(cell, Session.getScriptTimeZone(), 'yyyy-MM');
+  }
+  const s = String(cell || '').trim();
+  const m = /^(\d{4}-\d{2})/.exec(s);
+  return m ? m[1] : s;
+}
+
+// Budget month cell → 'YYYY-MM' or the literal 'default'. Same coercion
+// handling as formatMonthCell, plus the sentinel passthrough.
+function formatBudgetMonthCell(cell) {
+  if (String(cell || '').trim() === 'default') return 'default';
+  return formatMonthCell(cell);
 }
 
 function active(startDate, endDate, today) {

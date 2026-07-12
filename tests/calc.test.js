@@ -5,10 +5,13 @@ const {
   EMPLOYMENT_TYPES, SALARIED_TYPES, FREELANCER_TYPES,
   assignmentCategory, assignmentCost,
   assignmentsByHouse, houseAssignmentsCost, splitByCategory,
+  currentMonth, indexActuals, lookupActual, monthlyAssignmentCost,
+  houseMonthlyAssignmentsCost, houseMonthlyTotal, networkMonthlyTotal,
   isAbsenceActive, activeAbsences, openAbsences,
   coveragesForAbsence, isCoverageActive, activeCoveragesByHouse, coverageExtra,
   pendingTerminations, pendingHouseCost,
   houseTotal, networkTotal,
+  budgetForHouse, budgetVariance,
   assignmentsForWorker, workerTotalCost,
   activeAbsenceForWorker,
   networkAbsenceCoverageRows,
@@ -605,4 +608,200 @@ test('networkAbsenceCoverageRows: sort order — orphans first, then by startDat
 test('networkAbsenceCoverageRows: empty inputs → empty array', () => {
   assert.deepEqual(networkAbsenceCoverageRows([], [], [], [], TODAY), []);
   assert.deepEqual(networkAbsenceCoverageRows(null, null, null, null, TODAY), []);
+});
+
+// ---------- monthly actuals: cost fallback logic ----------
+
+const MONTH = '2026-07';
+
+function hourly(over) {
+  return asg(Object.assign({
+    id: 'h1', employmentType: 'hourly',
+    salary: 0, hourlyRate: 60, estHours: 100,
+  }, over));
+}
+function perSession(over) {
+  return asg(Object.assign({
+    id: 's1', employmentType: 'per_session',
+    salary: 0, sessionRate: 400, estSessions: 12,
+  }, over));
+}
+function actual(over) {
+  return Object.assign({
+    id: 'ma1', assignmentId: 'h1', month: MONTH,
+    actualHours: null, actualSessions: null, note: '',
+  }, over);
+}
+
+test('monthlyAssignmentCost: hourly WITH actuals uses rate × actualHours', () => {
+  const a = hourly();                       // rate 60, est 100 → estimate 6000
+  const r = monthlyAssignmentCost(a, actual({ actualHours: 92 }));
+  assert.equal(r.cost, 5520);               // 60 × 92
+  assert.equal(r.isEstimate, false);
+});
+
+test('monthlyAssignmentCost: hourly WITHOUT actuals falls back to estimate + flags it', () => {
+  const a = hourly();
+  const r = monthlyAssignmentCost(a, null);
+  assert.equal(r.cost, 6000);               // 60 × 100 estimate
+  assert.equal(r.isEstimate, true);
+});
+
+test('monthlyAssignmentCost: actuals row with only sessions leaves hourly on estimate', () => {
+  // An actuals row exists but actualHours is null (blank) → still estimate.
+  const r = monthlyAssignmentCost(hourly(), actual({ actualSessions: 5 }));
+  assert.equal(r.cost, 6000);
+  assert.equal(r.isEstimate, true);
+});
+
+test('monthlyAssignmentCost: recorded 0 hours is a real value, not a fallback', () => {
+  const r = monthlyAssignmentCost(hourly(), actual({ actualHours: 0 }));
+  assert.equal(r.cost, 0);
+  assert.equal(r.isEstimate, false);
+});
+
+test('monthlyAssignmentCost: per_session WITH actuals uses rate × actualSessions', () => {
+  const a = perSession();                   // rate 400, est 12 → estimate 4800
+  const r = monthlyAssignmentCost(a, actual({ assignmentId: 's1', actualSessions: 9 }));
+  assert.equal(r.cost, 3600);               // 400 × 9
+  assert.equal(r.isEstimate, false);
+});
+
+test('monthlyAssignmentCost: per_session WITHOUT actuals flags the estimate', () => {
+  const r = monthlyAssignmentCost(perSession(), null);
+  assert.equal(r.cost, 4800);
+  assert.equal(r.isEstimate, true);
+});
+
+test('monthlyAssignmentCost: adds the allowance on top of the actual', () => {
+  const a = hourly({ allowance: 2000 });
+  const r = monthlyAssignmentCost(a, actual({ actualHours: 92 }));
+  assert.equal(r.cost, 5520 + 2000);
+  assert.equal(r.isEstimate, false);
+});
+
+test('monthlyAssignmentCost: fixed types are month-invariant, never flagged', () => {
+  const ft = asg({ employmentType: 'full_time', salary: 18000 });
+  assert.deepEqual(monthlyAssignmentCost(ft, null), { cost: 18000, isEstimate: false });
+  const ret = asg({ employmentType: 'fixed_retainer', salary: 0, retainerAmount: 4500 });
+  assert.deepEqual(monthlyAssignmentCost(ret, null), { cost: 4500, isEstimate: false });
+});
+
+test('monthlyAssignmentCost: leave zeroes the cost, ahead of actual/estimate', () => {
+  const a = hourly({ status: 'chld', statusDate: '2026-07-01' });
+  assert.deepEqual(monthlyAssignmentCost(a, actual({ actualHours: 92 })), { cost: 0, isEstimate: false });
+});
+
+test('indexActuals / lookupActual: keyed by assignmentId + month', () => {
+  const idx = indexActuals([
+    actual({ assignmentId: 'h1', month: '2026-07', actualHours: 92 }),
+    actual({ assignmentId: 'h1', month: '2026-08', actualHours: 40 }),
+    actual({ assignmentId: 's1', month: '2026-07', actualSessions: 9 }),
+  ]);
+  assert.equal(lookupActual(idx, 'h1', '2026-07').actualHours, 92);
+  assert.equal(lookupActual(idx, 'h1', '2026-08').actualHours, 40);
+  assert.equal(lookupActual(idx, 's1', '2026-07').actualSessions, 9);
+  assert.equal(lookupActual(idx, 'h1', '2026-09'), null);
+  assert.equal(lookupActual(idx, 'nope', '2026-07'), null);
+});
+
+test('currentMonth: YYYY-MM prefix of today', () => {
+  assert.match(currentMonth(), /^\d{4}-(0[1-9]|1[0-2])$/);
+});
+
+test('houseMonthlyAssignmentsCost: mixes actuals + estimate + fixed within a house', () => {
+  const assignments = [
+    asg({ id: 'ft', house: 'ramot', employmentType: 'full_time', salary: 18000 }),
+    hourly({ id: 'h1', house: 'ramot' }),                 // has actuals → 5520
+    hourly({ id: 'h2', house: 'ramot', hourlyRate: 50, estHours: 80 }), // no actuals → 4000 est
+  ];
+  const idx = indexActuals([actual({ assignmentId: 'h1', actualHours: 92 })]);
+  // 18000 + 5520 + 4000
+  assert.equal(houseMonthlyAssignmentsCost(assignments, idx, 'ramot', MONTH), 27520);
+});
+
+test('houseMonthlyTotal: month assignment costs + coverage extra (today) + pending (today)', () => {
+  const assignments = [hourly({ id: 'h1', house: 'ramot' })];
+  const idx = indexActuals([actual({ assignmentId: 'h1', actualHours: 92 })]); // 5520
+  const absences = [{ id: 'ab1', workerId: 'w9', house: 'ramot',
+    startDate: '2026-05-01', endDate: '2026-05-31', status: 'active' }];
+  const coverages = [{ id: 'c1', absenceId: 'ab1', coveringWorkerId: 'w2',
+    coveringHouse: 'asher', receivingHouse: 'ramot',
+    startDate: '2026-05-01', endDate: '2026-05-31', extraPayment: 800 }];
+  // today falls inside May so coverage is active; month view is July.
+  const t = '2026-05-20';
+  assert.equal(
+    houseMonthlyTotal(assignments, coverages, absences, [], idx, 'ramot', MONTH, t),
+    5520 + 800);
+});
+
+test('networkMonthlyTotal: sums month assignment costs across houses + one coverage extra', () => {
+  const assignments = [
+    hourly({ id: 'h1', house: 'ramot' }),              // actuals → 5520
+    perSession({ id: 's1', house: 'asher' }),          // no actuals → 4800 est
+  ];
+  const idx = indexActuals([actual({ assignmentId: 'h1', actualHours: 92 })]);
+  const absences = [{ id: 'ab1', workerId: 'w9', house: 'ramot',
+    startDate: '2026-05-01', endDate: '2026-05-31', status: 'active' }];
+  const coverages = [{ id: 'c1', absenceId: 'ab1', coveringWorkerId: 'w2',
+    coveringHouse: 'asher', receivingHouse: 'ramot',
+    startDate: '2026-05-01', endDate: '2026-05-31', extraPayment: 800 }];
+  const t = '2026-05-20';
+  assert.equal(
+    networkMonthlyTotal(assignments, coverages, absences, [], idx, HOUSES, MONTH, t),
+    5520 + 4800 + 800);
+});
+
+// ---------- budgets ----------
+
+test('budgetForHouse: month-specific overrides default; null when none', () => {
+  const budgets = [
+    { id: 'b1', house: 'ramot', month: 'default', amount: 100000 },
+    { id: 'b2', house: 'ramot', month: '2026-07', amount: 120000 },
+    { id: 'b3', house: 'asher', month: 'default', amount: 80000 },
+  ];
+  assert.equal(budgetForHouse(budgets, 'ramot', '2026-07'), 120000); // specific
+  assert.equal(budgetForHouse(budgets, 'ramot', '2026-08'), 100000); // falls to default
+  assert.equal(budgetForHouse(budgets, 'asher', '2026-07'), 80000);  // only default
+  assert.equal(budgetForHouse(budgets, 'ofroni', '2026-07'), null);  // none set
+  assert.equal(budgetForHouse([], 'ramot', '2026-07'), null);
+});
+
+test('budgetVariance: none when no budget', () => {
+  const v = budgetVariance(null, 5000);
+  assert.deepEqual(v, { budget: null, cost: 5000, variance: null, pct: null, status: 'none' });
+});
+
+test('budgetVariance: green at or under budget', () => {
+  const v = budgetVariance(100000, 90000);
+  assert.equal(v.status, 'ok');
+  assert.equal(v.variance, 10000);   // headroom
+  assert.equal(v.pct, 90);
+  const exact = budgetVariance(100000, 100000);
+  assert.equal(exact.status, 'ok');
+  assert.equal(exact.variance, 0);
+  assert.equal(exact.pct, 100);
+});
+
+test('budgetVariance: amber when over by up to 10%', () => {
+  const v = budgetVariance(100000, 105000);
+  assert.equal(v.status, 'warn');
+  assert.equal(v.variance, -5000);   // over
+  assert.equal(v.pct, 105);
+  const edge = budgetVariance(100000, 110000);   // exactly +10% → still amber
+  assert.equal(edge.status, 'warn');
+});
+
+test('budgetVariance: red when over by more than 10%', () => {
+  const v = budgetVariance(100000, 130000);
+  assert.equal(v.status, 'over');
+  assert.equal(v.variance, -30000);
+  assert.equal(v.pct, 130);
+});
+
+test('budgetVariance: zero budget is ok at 0 cost, over when cost > 0', () => {
+  assert.equal(budgetVariance(0, 0).status, 'ok');
+  const over = budgetVariance(0, 5000);
+  assert.equal(over.status, 'over');
+  assert.equal(over.pct, Infinity);
 });
