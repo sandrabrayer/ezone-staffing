@@ -74,6 +74,7 @@ function loadPage() {
   // response during the v2→v3 transition window.
   const emptyV3 = () => ({
     workers: [], assignments: [], absences: [], coverages: [], archiveV3: [],
+    monthlyActuals: [],
     houses: { ramot: [], asher: [], ofroni: [], rehab: [], pardes: [], sde_eliezer: [], hq: [] },
     events: [], archive: [],
   });
@@ -94,9 +95,10 @@ function loadPage() {
 // the DOM.
 async function authAndBoot(dom, {
   workers = [], assignments = [], absences = [], coverages = [], archiveV3 = [],
+  monthlyActuals = [],
 } = {}) {
   const data = {
-    workers, assignments, absences, coverages, archiveV3,
+    workers, assignments, absences, coverages, archiveV3, monthlyActuals,
     // legacy passthrough — empty in v3-only state
     houses: { ramot: [], asher: [], ofroni: [], rehab: [], pardes: [], sde_eliezer: [], hq: [] },
     events: [], archive: [],
@@ -542,4 +544,130 @@ test('static audit: no calc.js global is destructured without an alias in the in
   }
   assert.deepEqual(offenders, [],
     `These calc.js globals are destructured without renaming and would collide with their global function binding: ${offenders.join(', ')}`);
+});
+
+// ---------- month view (monthly actuals) ----------
+// The cost view carries a month picker; hourly / per_session costs reflect
+// the selected month's actuals, falling back to the estimate + an "אומדן"
+// badge when no actuals exist. Fixed types are unchanged. House + grand
+// totals reflect the selected month.
+
+function wk(over) {
+  return Object.assign({ id: 'w1', name: 'מדריך בדיקה', notes: '', createdAt: '' }, over);
+}
+function hourlyAsg(over) {
+  return Object.assign({
+    id: 'h1', workerId: 'w1', house: 'ramot', role: 'מדריך/ה', roleDetail: '',
+    employmentType: 'hourly', salary: 0, pct: 0,
+    hourlyRate: 60, estHours: 100, sessionRate: 0, estSessions: 0,
+    retainerAmount: 0, allowance: 0, status: 'active', statusDate: '', notes: '',
+  }, over);
+}
+function actualRow(over) {
+  return Object.assign({
+    id: 'ma1', assignmentId: 'h1', month: '', actualHours: null,
+    actualSessions: null, note: '', createdAt: '', updatedAt: '',
+  }, over);
+}
+
+test('month view: house view renders a month picker defaulting to the current month', async () => {
+  const { dom, errors } = loadPage();
+  await authAndBoot(dom, { workers: [wk()], assignments: [hourlyAsg()] });
+  dom.window.go('ramot');
+  const picker = dom.window.document.querySelector('#monthPick');
+  assert.ok(picker, 'expected a #monthPick month input in the house view');
+  assert.match(picker.value, /^\d{4}-(0[1-9]|1[0-2])$/, 'picker defaults to a YYYY-MM value');
+  assert.equal(picker.value, dom.window.EZONE_CALC.currentMonth());
+  dom.window.close();
+  assert.equal(errors.length, 0, 'no script errors');
+});
+
+test('month view: hourly cost falls back to the estimate WITH an אומדן badge when no actuals', async () => {
+  const { dom } = loadPage();
+  await authAndBoot(dom, { workers: [wk()], assignments: [hourlyAsg()] });
+  dom.window.go('ramot');
+  const doc = dom.window.document;
+  // Estimate = 60 × 100 = 6000. The cost cell should show it and be badged.
+  const badge = doc.querySelector('.est-badge');
+  assert.ok(badge, 'expected an אומדן badge on the estimate fallback');
+  const moneyCells = [...doc.querySelectorAll('#rosterSalaried td.money')];
+  assert.ok(moneyCells.some(td => /6,?000/.test(td.textContent)), 'estimate 6000 shown');
+  dom.window.close();
+});
+
+test('month view: hourly cost uses rate × actualHours when actuals exist for the month (no badge)', async () => {
+  const { dom } = loadPage();
+  const month = dom.window.EZONE_CALC.currentMonth();
+  await authAndBoot(dom, {
+    workers: [wk()],
+    assignments: [hourlyAsg()],
+    monthlyActuals: [actualRow({ month, actualHours: 92 })],
+  });
+  dom.window.go('ramot');
+  const doc = dom.window.document;
+  assert.equal(doc.querySelector('.est-badge'), null, 'no אומדן badge when actuals exist');
+  const moneyCells = [...doc.querySelectorAll('#rosterSalaried td.money')];
+  // 60 × 92 = 5520.
+  assert.ok(moneyCells.some(td => /5,?520/.test(td.textContent)), 'actual cost 5520 shown');
+  dom.window.close();
+});
+
+test('month view: changing the month switches a cell from actual to estimate', async () => {
+  const { dom } = loadPage();
+  const month = dom.window.EZONE_CALC.currentMonth();
+  await authAndBoot(dom, {
+    workers: [wk()],
+    assignments: [hourlyAsg()],
+    monthlyActuals: [actualRow({ month, actualHours: 92 })],
+  });
+  dom.window.go('ramot');
+  const doc = dom.window.document;
+  // Current month → actual, no badge.
+  assert.equal(doc.querySelector('.est-badge'), null);
+  // Switch to a different month with no actuals → estimate + badge.
+  const other = month.endsWith('-01') ? month.slice(0, 5) + '02' : month.slice(0, 5) + '01';
+  dom.window.onMonthChange(other);
+  assert.ok(dom.window.document.querySelector('.est-badge'),
+    'switching to a month without actuals shows the estimate badge');
+  dom.window.close();
+});
+
+test('month view: house total reflects the selected month actuals', async () => {
+  const { dom } = loadPage();
+  const month = dom.window.EZONE_CALC.currentMonth();
+  await authAndBoot(dom, {
+    workers: [wk()],
+    assignments: [hourlyAsg()],
+    monthlyActuals: [actualRow({ month, actualHours: 92 })],
+  });
+  dom.window.go('ramot');
+  const doc = dom.window.document;
+  // The accent-less cost stat shows the month total = 5520 (not the 6000 estimate).
+  const costStat = [...doc.querySelectorAll('.stat')].find(s => {
+    const lbl = s.querySelector('.lbl');
+    return lbl && /עלות/.test(lbl.textContent);
+  });
+  assert.ok(costStat, 'expected a cost stat card');
+  assert.match(costStat.querySelector('.val').textContent, /5,?520/,
+    'house cost stat reflects the actual, not the estimate');
+  dom.window.close();
+});
+
+test('month view: fixed-salary cost is unchanged and never badged', async () => {
+  const { dom } = loadPage();
+  await authAndBoot(dom, {
+    workers: [wk({ id: 'w2', name: 'אחות' })],
+    assignments: [{
+      id: 'ft1', workerId: 'w2', house: 'ramot', role: 'אחות', roleDetail: '',
+      employmentType: 'full_time', salary: 18000, pct: 0,
+      hourlyRate: 0, estHours: 0, sessionRate: 0, estSessions: 0,
+      retainerAmount: 0, allowance: 0, status: 'active', statusDate: '', notes: '',
+    }],
+  });
+  dom.window.go('ramot');
+  const doc = dom.window.document;
+  assert.equal(doc.querySelector('.est-badge'), null, 'full_time is never an estimate');
+  const moneyCells = [...doc.querySelectorAll('#rosterSalaried td.money')];
+  assert.ok(moneyCells.some(td => /18,?000/.test(td.textContent)), 'full_time salary shown as-is');
+  dom.window.close();
 });

@@ -518,6 +518,41 @@ tbody tr:hover{
 }
 .roster-search input::placeholder{color:var(--muted)}
 
+/* Month picker for the cost view. Sits in the page head; changing it
+   re-renders every cost cell + the totals for the selected month. */
+.month-picker{display:flex;align-items:center;gap:10px;margin-top:14px}
+.month-picker label{font-size:13px;color:var(--muted);font-weight:600}
+.month-picker input{
+  font-family:inherit;
+  font-size:14px;
+  padding:8px 12px;
+  border:1px solid var(--line-strong);
+  border-radius:10px;
+  background:var(--bg-elevated);
+  color:var(--ink);
+  outline:none;
+  transition:border-color .15s, box-shadow .15s;
+}
+.month-picker input:focus{
+  border-color:var(--accent-2);
+  box-shadow:0 0 0 3px rgba(239,159,39,0.18);
+}
+/* "אומדן" badge — shown on an hourly / per_session cost when no actuals
+   were recorded for the selected month (the figure is the estimate). */
+.est-badge{
+  display:inline-block;
+  font-size:10.5px;font-weight:700;
+  padding:1px 7px;border-radius:999px;
+  background:var(--warning);color:#1a1200;
+  vertical-align:middle;margin-inline-start:6px;
+}
+/* Small note showing the actual quantity used when a cost IS from actuals. */
+.actual-note{
+  display:inline-block;
+  font-size:11px;font-weight:600;color:var(--muted);
+  margin-inline-start:6px;
+}
+
 /* Dashboard join rows (היעדרויות פעילות ברשת). One row per active
    absence, with optional matching coverage. Read-only — no row actions
    live here. Orphan variant gets the same red-dashed treatment as the
@@ -1207,6 +1242,12 @@ const {
   assignmentsByHouse: calcAssignmentsByHouse,
   houseAssignmentsCost: calcHouseAssignmentsCost,
   splitByCategory: calcSplitByCategory,
+  currentMonth: calcCurrentMonth,
+  indexActuals: calcIndexActuals,
+  lookupActual: calcLookupActual,
+  monthlyAssignmentCost: calcMonthlyAssignmentCost,
+  houseMonthlyTotal: calcHouseMonthlyTotal,
+  networkMonthlyTotal: calcNetworkMonthlyTotal,
   todayStr: calcTodayStr,
   isAbsenceActive: calcIsAbsenceActive,
   activeAbsences: calcActiveAbsences,
@@ -1231,7 +1272,17 @@ let ASSIGNMENTS = [];
 let ABSENCES = [];
 let COVERAGES = [];
 let ARCHIVE_V3 = [];
+let MONTHLY_ACTUALS = [];
 let view = 'central';
+// Selected month (YYYY-MM) for the cost view. Hourly / per_session costs
+// reflect this month's actuals (falling back to the estimate + an "אומדן"
+// badge). Defaults to the current month on first render; persists across
+// house navigation (unlike rosterFilter) so switching houses keeps the
+// chosen month. ACTUALS_INDEX is rebuilt from MONTHLY_ACTUALS on every
+// render so rosterRow() (also invoked by the in-place search re-render)
+// can look up a row by assignmentId+month without recomputing.
+let selectedMonth = '';
+let ACTUALS_INDEX = Object.create(null);
 // Per-house roster search term. Filters the roster tables (שכירים +
 // פרילנסרים) by worker name within a single house view. Lives in module
 // state — not the DOM — so a re-render (e.g. after an edit) keeps the
@@ -1269,6 +1320,7 @@ async function loadData(){
   ABSENCES    = Array.isArray(d.absences)    ? d.absences    : [];
   COVERAGES   = Array.isArray(d.coverages)   ? d.coverages   : [];
   ARCHIVE_V3  = Array.isArray(d.archiveV3)   ? d.archiveV3   : [];
+  MONTHLY_ACTUALS = Array.isArray(d.monthlyActuals) ? d.monthlyActuals : [];
 }
 
 /* ---------- local cache mutation (perf) ----------
@@ -1379,6 +1431,80 @@ function totalAssignments(){ return ASSIGNMENTS.length; }
 function totalCost(today){
   const houseIds = HOUSES.map(h => h.id);
   return calcNetworkTotal(ASSIGNMENTS, COVERAGES, ABSENCES, ARCHIVE_V3, houseIds, today);
+}
+
+// ---------- month view helpers ----------
+
+const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+
+// The active month for the cost view. Lazily initialized to the current
+// month the first time it's read.
+function ensureMonth(){
+  if (!MONTH_RE.test(selectedMonth)) selectedMonth = calcCurrentMonth();
+  return selectedMonth;
+}
+
+// Human month label 'MM/YYYY' from a 'YYYY-MM' key (parallels fmtDate).
+function fmtMonth(m){
+  const s = String(m||'').trim();
+  const x = /^(\d{4})-(\d{2})$/.exec(s);
+  return x ? `${x[2]}/${x[1]}` : s;
+}
+
+// Month picker control. Bound to selectedMonth via module state; onchange
+// re-renders the whole view (unlike the roster search, which patches in
+// place) because month affects totals + every cost cell, not just the
+// roster tables.
+function monthPickerHtml(){
+  const m = ensureMonth();
+  return `
+  <div class="month-picker">
+    <label for="monthPick">חודש עלויות</label>
+    <input type="month" id="monthPick" value="${escapeHtml(m)}"
+           onchange="onMonthChange(this.value)" />
+  </div>`;
+}
+
+function onMonthChange(value){
+  const m = String(value||'').trim();
+  if (MONTH_RE.test(m)) selectedMonth = m;
+  render();
+}
+
+// Small "estimate" badge shown on an hourly / per_session cost when no
+// actuals were recorded for the selected month, so the number shown is the
+// one-time estimate rather than the real month's cost.
+function estBadge(){
+  return ` <span class="est-badge" title="לא הוזנו שעות/מפגשים בפועל לחודש זה — מוצג אומדן לפי ההערכה בשיבוץ">אומדן</span>`;
+}
+
+// The month-aware cost cell inner for a roster row: cost for selectedMonth
+// (actuals where present, estimate otherwise) plus the אומדן badge on a
+// fallback, or a small "בפועל" note showing the recorded quantity used.
+function monthCostCellInner(a){
+  const m = ensureMonth();
+  const actual = calcLookupActual(ACTUALS_INDEX, a.id, m);
+  const mc = calcMonthlyAssignmentCost(a, actual);
+  let tail = '';
+  if (mc.isEstimate) {
+    tail = estBadge();
+  } else if (a.employmentType === 'hourly' && actual && actual.actualHours != null) {
+    tail = ` <span class="actual-note">בפועל ${Number(actual.actualHours)} ש'</span>`;
+  } else if (a.employmentType === 'per_session' && actual && actual.actualSessions != null) {
+    tail = ` <span class="actual-note">בפועל ${Number(actual.actualSessions)} מפגשים</span>`;
+  }
+  return `${fmt(mc.cost)}${tail}`;
+}
+
+// Month-aware house total + network total (for the selected month).
+function houseMonthTotal(houseId, today){
+  return calcHouseMonthlyTotal(ASSIGNMENTS, COVERAGES, ABSENCES, ARCHIVE_V3,
+    ACTUALS_INDEX, houseId, ensureMonth(), today);
+}
+function totalCostMonth(today){
+  const houseIds = HOUSES.map(h => h.id);
+  return calcNetworkMonthlyTotal(ASSIGNMENTS, COVERAGES, ABSENCES, ARCHIVE_V3,
+    ACTUALS_INDEX, houseIds, ensureMonth(), today);
 }
 
 function roleLabel(a){
@@ -2457,6 +2583,10 @@ function logout(){ clearToken(); showPinGate(); }
 
 function render(){
   renderSwitch();
+  // Refresh the per-render month + actuals index BEFORE any view or the
+  // in-place roster search reads them.
+  ensureMonth();
+  ACTUALS_INDEX = calcIndexActuals(MONTHLY_ACTUALS);
   const app=document.getElementById('app');
   if (view === 'central')      app.innerHTML = centralView();
   else if (view === 'archive') app.innerHTML = archiveView();
@@ -2474,7 +2604,7 @@ function centralView(){
 
   const houseBoxes = HOUSES.map(h=>{
     const roster = rosterAt(h.id);
-    const houseT = calcHouseTotal(ASSIGNMENTS, COVERAGES, ABSENCES, ARCHIVE_V3, h.id, today);
+    const houseT = houseMonthTotal(h.id, today);
     const extra = calcCoverageExtra(COVERAGES, ABSENCES, h.id, today);
     const pending = calcPendingHouseCost(ARCHIVE_V3, h.id, today);
     const mgrPill = h.mgr
@@ -2502,6 +2632,7 @@ function centralView(){
   <div class="head">
     <h1>מבט כללי — כל הבתים</h1>
     <p>תמונת מצב מרכזת של מצבת כוח האדם בכל הבתים. ניהול בלעדי — מורן, משאבי אנוש.</p>
+    ${monthPickerHtml()}
   </div>
 
   <div class="stats">
@@ -2511,9 +2642,9 @@ function centralView(){
       <div class="sub">${totalAssignments()} שיבוצים בכל הרשת</div>
     </div>
     <div class="stat">
-      <div class="lbl">עלות שכר חודשית</div>
-      <div class="val">${fmt(totalCost(today))}</div>
-      <div class="sub">שיבוצים + תוספות מחליפים פעילות + תקופת הודעה</div>
+      <div class="lbl">עלות שכר — ${escapeHtml(fmtMonth(ensureMonth()))}</div>
+      <div class="val">${fmt(totalCostMonth(today))}</div>
+      <div class="sub">שיבוצים (שעתי/מפגש לפי בפועל) + תוספות מחליפים + תקופת הודעה</div>
     </div>
     <div class="stat">
       <div class="lbl">בתים פעילים</div>
@@ -2635,7 +2766,7 @@ function rosterRow(a){
       <span class="type-tag">${escapeHtml(typeLabelShort(a.employmentType))}</span>
     </td>
     <td>${termsHtml(a)}</td>
-    <td class="money">${fmt(calcAssignmentCost(a))}</td>
+    <td class="money">${monthCostCellInner(a)}</td>
     <td class="note-cell">${a.notes?escapeHtml(a.notes):'<span style="color:#B6B0A0">—</span>'}</td>
     <td>
       <div class="row-actions">
@@ -2786,7 +2917,7 @@ function houseView(id){
   // not the headline numbers.
   const filtered = filterRoster(list, rosterFilter);
   const split = calcSplitByCategory(filtered);
-  const houseT = calcHouseTotal(ASSIGNMENTS, COVERAGES, ABSENCES, ARCHIVE_V3, id, today);
+  const houseT = houseMonthTotal(id, today);
   const extra = calcCoverageExtra(COVERAGES, ABSENCES, id, today);
   const pending = calcPendingHouseCost(ARCHIVE_V3, id, today);
   // v3.1: house view shows absences logged AT this house, and coverages
@@ -2862,6 +2993,7 @@ function houseView(id){
     <h1>${escapeHtml(houseName(id))}</h1>
     <p>צוות הבית, נעדרים והחלפות פעילות</p>
     ${mgrPill}
+    ${monthPickerHtml()}
   </div>
 
   <div class="stats">
@@ -2871,7 +3003,7 @@ function houseView(id){
       <div class="sub">${subBreakdown}</div>
     </div>
     <div class="stat">
-      <div class="lbl">עלות חודשית כוללת</div>
+      <div class="lbl">עלות ${escapeHtml(fmtMonth(ensureMonth()))}</div>
       <div class="val">${fmt(houseT)}</div>
       <div class="sub">${extra||pending
         ? [
