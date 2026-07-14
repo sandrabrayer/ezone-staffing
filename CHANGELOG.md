@@ -1,6 +1,9 @@
+[CHANGELOG (4).md](https://github.com/user-attachments/files/30002547/CHANGELOG.4.md)
 Changelog
 All notable changes to this project are documented here. Format inspired by Keep a Changelog.
 [Unreleased]
+Fixed
+Worker transfer ("מעבר לבית זה") now saves. The frontend's `moveWorkerHouse()` posted `{ action: 'moveAssignment' }`, but `apps-script/Code.gs` had no case for it, so the dispatch fell through to `default → httpError(400, 'unknown action')` and the transfer silently failed with an "unknown action" toast. Added the `moveAssignment` handler in `Code.gs`: it validates the target house against `HOUSE_IDS`, loads the assignment row by id, rejects a no-op move to the same house and a move onto a house where the worker already has an assignment, then rewrites only the `house` column (all employment terms preserved, `LockService` held) and echoes the updated assignment back so the frontend patches `ASSIGNMENTS` in place. New regression guard `tests/action-parity.test.js` parses `public/index.html` and `apps-script/Code.gs` and asserts every `action:` string the frontend posts has a matching `case` in the backend switch — this bug class ("unknown action") can no longer ship undetected — plus a direct end-to-end wiring assertion for `moveAssignment`.
 Docs
 EZONE-ECOSYSTEM-STATUS.md added at the repo root — the July 4 merged cross-app ecosystem status doc, distributed to the root of all six E-Zone repos so every project/session starts from the true state.
 Added
