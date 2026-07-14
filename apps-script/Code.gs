@@ -228,6 +228,7 @@ function doPost(e) {
       case 'addAssignment':        return addAssignment(body);
       case 'updateAssignment':     return updateAssignment(body);
       case 'deleteAssignment':     return deleteAssignment(body);
+      case 'moveAssignment':       return moveAssignment(body);
       case 'terminateAssignment':  return terminateAssignment(body);
       case 'logAbsence':           return logAbsence(body);
       case 'endAbsence':           return endAbsence(body);
@@ -912,6 +913,63 @@ function deleteAssignment(body) {
     if (row < 0) throw httpError(404, 'assignment not found');
     sh.deleteRow(row);
     return { ok: true };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// Move a worker's existing assignment to a different house, keeping ALL
+// employment terms unchanged. Only the `house` column is rewritten. This
+// is the dedicated action behind the "מעבר לבית זה" button. It refuses
+// to move onto a house where the worker already has an assignment
+// (that collision is an edit, not a move).
+function moveAssignment(body) {
+  const id = requireBodyId(body);
+  const target = String(body.house || '').trim();
+  if (!isHouse(target)) throw httpError(400, 'bad house');
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const sh = sheetByName(ASSIGNMENTS_TAB);
+    const row = findRow(sh, 0, id);
+    if (row < 0) throw httpError(404, 'assignment not found');
+
+    const cur = sh.getRange(row, 1, 1, HEADERS_ASSIGNMENTS.length).getValues()[0];
+    const workerId = String(cur[1]);
+    const fromHouse = String(cur[2]);
+    if (fromHouse === target) throw httpError(409, 'already at target house');
+
+    // Reject if this worker already has an assignment at the target house.
+    const all = sh.getDataRange().getValues();
+    for (let i = 1; i < all.length; i++) {
+      const r = all[i];
+      if (String(r[0] || '').trim() === '') continue;
+      if (String(r[0]) === id) continue;
+      if (String(r[1]) === workerId && String(r[2]) === target) {
+        throw httpError(409, 'worker already assigned to target house');
+      }
+    }
+
+    sh.getRange(row, 3).setValue(target);  // house is column 3 (1-indexed)
+
+    const assignment = {
+      id: id,
+      workerId: workerId,
+      house: target,
+      role: String(cur[3]),
+      roleDetail: String(cur[4]),
+      employmentType: String(cur[5]),
+      salary: Number(cur[6]) || 0,
+      pct: Number(cur[7]) || 0,
+      hourlyRate: Number(cur[8]) || 0,
+      estHours: Number(cur[9]) || 0,
+      sessionRate: Number(cur[10]) || 0,
+      estSessions: Number(cur[11]) || 0,
+      retainerAmount: Number(cur[12]) || 0,
+      notes: String(cur[13] || ''),
+    };
+    return { ok: true, assignment: assignment };
   } finally {
     lock.releaseLock();
   }
