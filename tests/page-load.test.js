@@ -467,6 +467,107 @@ test('standalone create flow: fill name → save → toast + worker count increm
   assert.equal(errors.length, 0, errors.length ? JSON.stringify(errors) : '');
 });
 
+test('worker dialog: shift commitment is instructor-gated and prefilled from the worker', async () => {
+  const { dom, errors } = loadPage();
+  await authAndBoot(dom, {
+    workers: [{ id: 'w1', name: 'משה', notes: '', createdAt: '', shift_commitment: '4+1' }],
+    assignments: [{ id: 'a1', workerId: 'w1', house: 'ramot', role: 'מדריך/ה',
+      employmentType: 'full_time', salary: 12000 }],
+  });
+  dom.window.go('ramot');
+  const doc = dom.window.document;
+
+  // Open the instructor: field visible, value read off the WORKER (not asg).
+  dom.window.openWorker('w1', 'ramot');
+  const wrap = doc.getElementById('w_shiftCommitment_wrap');
+  const sel = doc.getElementById('w_shiftCommitment');
+  assert.ok(!wrap.classList.contains('hidden'), 'instructor role → field visible');
+  assert.equal(sel.value, '4+1', 'prefilled from worker.shift_commitment');
+
+  // It must sit ABOVE w_terms so it survives the hidden-terms multi-house case.
+  const terms = doc.getElementById('w_terms');
+  assert.ok(
+    (wrap.compareDocumentPosition(terms) & dom.window.Node.DOCUMENT_POSITION_FOLLOWING) !== 0,
+    'shift commitment field must precede w_terms in the DOM');
+
+  // Switch the role away from מדריך/ה → hidden AND cleared.
+  doc.getElementById('w_role').value = 'אחות';
+  dom.window.onWorkerRoleChange();
+  assert.ok(wrap.classList.contains('hidden'), 'non-instructor role → field hidden');
+  assert.equal(sel.value, '', 'value cleared when the field is hidden');
+
+  dom.window.close();
+  assert.equal(errors.length, 0, errors.length ? JSON.stringify(errors) : '');
+});
+
+test('worker dialog: a non-instructor worker never shows a commitment value', async () => {
+  const { dom, errors } = loadPage();
+  await authAndBoot(dom, {
+    workers: [{ id: 'w2', name: 'נועה', notes: '', createdAt: '', shift_commitment: '' }],
+    assignments: [{ id: 'a2', workerId: 'w2', house: 'ramot', role: 'אחות',
+      employmentType: 'full_time', salary: 15000 }],
+  });
+  dom.window.go('ramot');
+  const doc = dom.window.document;
+
+  dom.window.openWorker('w2', 'ramot');
+  assert.ok(doc.getElementById('w_shiftCommitment_wrap').classList.contains('hidden'),
+    'nurse role → commitment field hidden');
+  assert.equal(doc.getElementById('w_shiftCommitment').value, '');
+
+  dom.window.close();
+  assert.equal(errors.length, 0, errors.length ? JSON.stringify(errors) : '');
+});
+
+test('saveWorker sends shift_commitment on the WORKER payload, never on the assignment', async () => {
+  const { dom, errors } = loadPage();
+  await authAndBoot(dom, {
+    workers: [{ id: 'w1', name: 'משה', notes: '', createdAt: '', shift_commitment: '3+1' }],
+    assignments: [{ id: 'a1', workerId: 'w1', house: 'ramot', role: 'מדריך/ה',
+      employmentType: 'full_time', salary: 12000 }],
+  });
+  dom.window.go('ramot');
+  const doc = dom.window.document;
+  dom.window.openWorker('w1', 'ramot');
+
+  // Manager bumps the contractual commitment.
+  doc.getElementById('w_shiftCommitment').value = '5+1';
+
+  const posts = [];
+  const refreshed = {
+    workers: [], assignments: [], absences: [], coverages: [], archiveV3: [],
+    houses: { ramot: [], asher: [], ofroni: [], rehab: [], pardes: [], sde_eliezer: [], hq: [] },
+    events: [], archive: [],
+  };
+  dom.window.fetch = async (url, init) => {
+    if (init && init.method === 'POST') {
+      const body = JSON.parse(init.body);
+      posts.push(body);
+      if (body.action === 'updateWorker' || body.action === 'createWorker') {
+        return { ok: true, status: 200, text: async () => JSON.stringify({
+          ok: true, worker: { id: 'w1', name: 'משה', notes: '', shift_commitment: body.worker.shift_commitment } }) };
+      }
+      return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true, assignment: { id: 'a1' } }) };
+    }
+    return { ok: true, status: 200, text: async () => JSON.stringify(refreshed) };
+  };
+
+  await dom.window.saveWorker();
+
+  const workerPost = posts.find(p => p.action === 'updateWorker');
+  assert.ok(workerPost, 'a worker update should be posted');
+  assert.equal(workerPost.worker.shift_commitment, '5+1',
+    'the commitment must ride on the worker payload');
+
+  const asgPost = posts.find(p => p.action === 'updateAssignment' || p.action === 'addAssignment');
+  assert.ok(asgPost, 'an assignment write should be posted');
+  assert.equal('shift_commitment' in asgPost.assignment, false,
+    'the commitment must NOT be on the assignment object');
+
+  dom.window.close();
+  assert.equal(errors.length, 0, errors.length ? JSON.stringify(errors) : '');
+});
+
 test('worker dialog: inline dup-name warning shows when an existing name is entered (but save still allowed)', async () => {
   const { dom, errors } = loadPage();
   await authAndBoot(dom, {

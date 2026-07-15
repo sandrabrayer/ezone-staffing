@@ -7,6 +7,7 @@ const {
   SALARY_MAX, HOURLY_RATE_MAX, SESSION_RATE_MAX, RETAINER_MAX,
   EST_HOURS_MAX, EST_SESSIONS_MAX, EXTRA_PAYMENT_MAX,
   isHouse, isRole, isEmploymentType,
+  COMMITMENT_VALUES, validateShiftCommitment,
   clampPct, clampMoney, clampInt,
   validateWorker, validateAssignment, validateAbsence, validateCoverage,
   validateMonth, validateMonthlyActualsItem, validateMonthlyActuals,
@@ -109,6 +110,54 @@ test('validateWorker: caps long strings', () => {
   const w = validateWorker({ name: 'a'.repeat(200), notes: 'b'.repeat(800) });
   assert.equal(w.name.length, 80);
   assert.equal(w.notes.length, 500);
+});
+
+// ---------- shift_commitment (worker-level, optional enum) ----------
+
+test('validateWorker: omitting shift_commitment yields empty string, not undefined', () => {
+  const w = validateWorker({ name: 'שחר' });
+  assert.equal(w.shift_commitment, '');
+});
+
+test('validateWorker: accepts each whitelisted commitment verbatim', () => {
+  ['3+1', '4+1', '5+1'].forEach(c => {
+    const w = validateWorker({ name: 'מדריך', shift_commitment: c });
+    assert.equal(w.shift_commitment, c, c);
+  });
+});
+
+test('validateWorker: empty / null / whitespace commitment normalizes to empty', () => {
+  [undefined, null, '', '   '].forEach(v => {
+    const w = validateWorker({ name: 'מדריך', shift_commitment: v });
+    assert.equal(w.shift_commitment, '', String(v));
+  });
+});
+
+test('validateWorker: rejects a commitment outside the whitelist', () => {
+  ['6+1', '3+2', '3', 'full', '3+1 ', '3-1'].forEach(v => {
+    // note: '3+1 ' trims to '3+1' and is accepted — assert the genuinely bad ones throw
+    if (String(v).trim() === '3+1') return;
+    assert.throws(() => validateWorker({ name: 'מדריך', shift_commitment: v }),
+      /bad shift_commitment/, String(v));
+  });
+});
+
+test('validateShiftCommitment: trims surrounding whitespace before matching', () => {
+  assert.equal(validateShiftCommitment('  4+1  '), '4+1');
+});
+
+test('validateAction createWorker/updateWorker carry shift_commitment through', () => {
+  const created = validateAction({ action: 'createWorker', worker: { name: 'רון', shift_commitment: '5+1' } });
+  assert.equal(created.worker.shift_commitment, '5+1');
+  const updated = validateAction({ action: 'updateWorker', id: 'w1', worker: { name: 'רון', shift_commitment: '3+1' } });
+  assert.equal(updated.worker.shift_commitment, '3+1');
+});
+
+test('the proxy whitelist is exactly the shift-compliance enum — no drift', () => {
+  const sc = require('../lib/shift-compliance');
+  assert.deepEqual(COMMITMENT_VALUES, ['3+1', '4+1', '5+1']);
+  assert.deepEqual(COMMITMENT_VALUES, Object.keys(sc.SHIFT_COMMITMENTS),
+    'validate.js COMMITMENT_VALUES must match shift-compliance SHIFT_COMMITMENTS keys');
 });
 
 // ---------- validateAssignment ----------
