@@ -92,7 +92,11 @@ const EVENTS_TAB = 'events';
 const ARCHIVE_TAB = 'archive';
 const LEGACY_PREFIX = '_legacy_';
 
-const HEADERS_WORKERS = ['id', 'name', 'notes', 'created_at'];
+// APPEND-ONLY. _readAll/_writeAll map columns by position, so a mid-array
+// insert would shift every stored value one column right and corrupt every
+// row. 'shift_commitment' (worker-level contractual commitment) must stay
+// last; new columns go after it, never before.
+const HEADERS_WORKERS = ['id', 'name', 'notes', 'created_at', 'shift_commitment'];
 const HEADERS_ASSIGNMENTS = [
   'id', 'worker_id', 'house', 'role', 'role_detail', 'employment_type',
   'salary', 'pct', 'hourly_rate', 'est_hours',
@@ -157,6 +161,12 @@ const TERMINATION_REASONS = [
 const EMPLOYMENT_TYPES = [
   'full_time', 'part_time', 'hourly', 'per_session', 'fixed_retainer',
 ];
+
+// Contractual weekly shift-commitment enum for instructors: weekday shifts
+// plus one weekend shift. ASCII keys — must match SHIFT_COMMITMENTS in
+// lib/shift-compliance.js, the shared source of truth. Raw value only; the
+// backend never computes a compliance / qualifies flag from it.
+const SHIFT_COMMITMENT_VALUES = ['3+1', '4+1', '5+1'];
 
 // Mirror of TYPE_COST_FIELDS / ALL_COST_FIELDS in lib/validate.js.
 // Defense in depth: the Express proxy validates first, but Apps Script
@@ -310,6 +320,18 @@ function isHouse(id)          { return HOUSE_IDS.indexOf(id) >= 0; }
 function isRole(role)         { return ROLE_OPTIONS.indexOf(role) >= 0; }
 function isEmploymentType(t)  { return EMPLOYMENT_TYPES.indexOf(t) >= 0; }
 
+// Worker-level shift commitment. Optional: '' / missing is valid. When
+// present it must be a whitelisted enum value — otherwise we throw, so a
+// caller hitting /exec directly can never write free text into the sheet.
+// Returns the normalized value ('' when absent). No compliance computed.
+function validateShiftCommitment(v) {
+  if (v === undefined || v === null) return '';
+  const s = String(v).trim();
+  if (s === '') return '';
+  if (SHIFT_COMMITMENT_VALUES.indexOf(s) < 0) throw httpError(400, 'bad shift_commitment');
+  return s;
+}
+
 function clampPct(n) {
   if (!isFinite(n)) return 100;
   return Math.max(1, Math.min(100, Math.round(n)));
@@ -332,7 +354,8 @@ function validateWorker(w) {
   const name = String(w.name || '').trim().slice(0, 80);
   if (!name) throw httpError(400, 'name required');
   const notes = String(w.notes || '').trim().slice(0, 500);
-  return { name: name, notes: notes };
+  const shiftCommitment = validateShiftCommitment(w.shift_commitment);
+  return { name: name, notes: notes, shiftCommitment: shiftCommitment };
 }
 
 function validateAssignment(a) {
@@ -562,6 +585,9 @@ function readWorkersSafe() {
       name: String(r[1] || ''),
       notes: String(r[2] || ''),
       createdAt: cellToIso(r[3]),
+      // Worker-level contractual commitment. Raw value straight off the
+      // sheet — key name matches lib/shift-compliance.js worker.shift_commitment.
+      shift_commitment: String(r[4] || ''),
     };
   });
 }
@@ -796,8 +822,9 @@ function createWorker(body) {
     const sh = sheetByName(WORKERS_TAB);
     const id = newId('w');
     const createdAt = new Date().toISOString();
-    sh.appendRow([id, w.name, w.notes, createdAt]);
-    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, createdAt: createdAt } };
+    // Column order MUST match HEADERS_WORKERS (append-only): shift_commitment last.
+    sh.appendRow([id, w.name, w.notes, createdAt, w.shiftCommitment]);
+    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, createdAt: createdAt, shift_commitment: w.shiftCommitment } };
   } finally {
     lock.releaseLock();
   }
@@ -814,7 +841,9 @@ function updateWorker(body) {
     if (row < 0) throw httpError(404, 'worker not found');
     sh.getRange(row, 2).setValue(w.name);
     sh.getRange(row, 3).setValue(w.notes);
-    return { ok: true, worker: { id: id, name: w.name, notes: w.notes } };
+    // Column 5 = shift_commitment (HEADERS_WORKERS index 4, 1-based col 5).
+    sh.getRange(row, 5).setValue(w.shiftCommitment);
+    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, shift_commitment: w.shiftCommitment } };
   } finally {
     lock.releaseLock();
   }

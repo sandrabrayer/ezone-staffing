@@ -874,6 +874,24 @@ tbody tr:hover{
         <div class="hint" id="w_nameDupWarning" style="display:none;color:var(--warning)">⚠️ עובד/ת בשם זהה כבר קיים/ת — שמירה תיצור רשומה נפרדת</div>
       </div>
 
+      <!-- Contractual weekly shift commitment. WORKER-LEVEL, not per-house:
+           a madrich has one contract even when he covers at two houses, so
+           this sits on the worker payload alongside name + notes. Placed
+           ABOVE w_terms on purpose — w_terms is hidden in the multi-house
+           edit case, and this field must survive that. Shown only for the
+           מדריך/ה role; onWorkerRoleChange clears + hides it otherwise.
+           Values are ASCII enum keys shared with lib/shift-compliance.js. -->
+      <div class="field hidden" id="w_shiftCommitment_wrap">
+        <label>התחייבות משמרות שבועית</label>
+        <select id="w_shiftCommitment">
+          <option value="">ללא התחייבות</option>
+          <option value="3+1">3+1 — שלוש חול ואחת סופ״ש</option>
+          <option value="4+1">4+1 — ארבע חול ואחת סופ״ש</option>
+          <option value="5+1">5+1 — חמש חול ואחת סופ״ש</option>
+        </select>
+        <div class="hint">משמרות חול בתוספת משמרת סופ״ש אחת</div>
+      </div>
+
       <!-- Assignment terms. Shown only when the form operates on a single
            house (the normal add / single-house edit case). Hidden for the
            rare "edit a worker who has assignments at several houses" case,
@@ -1266,6 +1284,10 @@ const ROLE_OPTIONS = [
   'מנהל/ת','רכז/ת','מדריך/ה','מטפל/ת','אחות',
   'פסיכיאטר/ית','טבח/ית','איש/אשת אחזקה','אחר',
 ];
+// Contractual weekly shift-commitment enum for instructors. ASCII keys —
+// must mirror SHIFT_COMMITMENTS in lib/shift-compliance.js, the shared
+// source of truth. Empty means no commitment on file (never an alert).
+const SHIFT_COMMITMENT_VALUES = ['3+1','4+1','5+1'];
 const ABSENCE_REASON_TYPES = [
   'חופשה','חל״ת','מחלה','חופשת לידה','ניתוח','צורך תפעולי','אישי','אחר',
 ];
@@ -1906,6 +1928,13 @@ function openWorker(workerId, house){
   document.getElementById('w_name').value = editingWorker.name;
   document.getElementById('w_notes').value = editingWorker.notes;
 
+  // Worker-level shift commitment: read straight off the worker (never the
+  // assignment). onWorkerRoleChange below hides + clears it if this house's
+  // role isn't מדריך/ה. Ignore anything not in the whitelist.
+  const scStored = w && w.shift_commitment;
+  document.getElementById('w_shiftCommitment').value =
+    SHIFT_COMMITMENT_VALUES.indexOf(scStored) >= 0 ? scStored : '';
+
   // Terms: prefill from the existing assignment at this house, else blank.
   fillWorkerRoleDropdown(asg ? asg.role : ROLE_OPTIONS[0]);
   fillWorkerTypeDropdown(asg ? asg.employmentType : 'full_time');
@@ -1983,6 +2012,16 @@ function onWorkerRoleChange(){
     wrap.classList.add('hidden');
     inp.value = '';
   }
+  // Shift commitment is contractual for instructors only. When the role is
+  // not מדריך/ה we hide AND clear it, so a stray value can't be saved on a
+  // non-instructor worker.
+  const scWrap = document.getElementById('w_shiftCommitment_wrap');
+  if (role === 'מדריך/ה'){
+    scWrap.classList.remove('hidden');
+  } else {
+    scWrap.classList.add('hidden');
+    document.getElementById('w_shiftCommitment').value = '';
+  }
 }
 function onWorkerTypeChange(){
   const t = document.getElementById('w_type').value;
@@ -2025,6 +2064,14 @@ async function saveWorker(){
   const notes = document.getElementById('w_notes').value.trim();
   if (!name){ toast('יש להזין שם', true); return; }
 
+  // Worker-level shift commitment. Optional; when present it must be a
+  // whitelisted enum value. The field is cleared for non-instructors, so a
+  // blank here is the normal case.
+  const shiftCommitment = document.getElementById('w_shiftCommitment').value;
+  if (shiftCommitment && SHIFT_COMMITMENT_VALUES.indexOf(shiftCommitment) < 0){
+    toast('התחייבות משמרות לא תקינה', true); return;
+  }
+
   // Collect the assignment terms from the form.
   const house = editingWorker.house;
   const role = document.getElementById('w_role').value;
@@ -2064,8 +2111,8 @@ async function saveWorker(){
     // 1) Worker identity (create or update).
     let workerId = editingWorker.id;
     const workerPayload = wasEdit
-      ? { action: 'updateWorker', id: workerId, worker: { name, notes } }
-      : { action: 'createWorker', worker: { name, notes } };
+      ? { action: 'updateWorker', id: workerId, worker: { name, notes, shift_commitment: shiftCommitment } }
+      : { action: 'createWorker', worker: { name, notes, shift_commitment: shiftCommitment } };
     const wRes = await doAction(workerPayload);
     if (wRes && wRes.worker && wRes.worker.id){
       upsertById(WORKERS, wRes.worker);
