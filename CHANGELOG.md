@@ -1,3 +1,4 @@
+[CHANGELOG-entry.md](https://github.com/user-attachments/files/30055907/CHANGELOG-entry.md)
 [CHANGELOG (4).md](https://github.com/user-attachments/files/30002547/CHANGELOG.4.md)
 Changelog
 All notable changes to this project are documented here. Format inspired by Keep a Changelog.
@@ -223,3 +224,47 @@ Server refuses to start without all four required env vars (or `SESSION_SECRET` 
 Constant-time comparisons for both PIN and token signature.
 All inputs validated server-side before reaching Apps Script; Apps Script re-validates.
 Apps Script URL is server-only; the browser only talks to `/api/*`.
+workers.shift_commitment` — instructors' contractual weekly shift
+commitment, entered manually by Moran on the worker form. Enum: `3+1`, `4+1`,
+`5+1` — weekday shifts plus one weekend shift. Optional; blank means no
+commitment on file.
+Appended to the END of `WORKERS_HEADERS`. Append-only, never reordered.
+`_readAll`/`_writeAll` map the live sheet by position, so a mid-array insert
+silently rewrites every worker row into the wrong columns. A guard test
+asserts the field stays last and appears exactly once.
+Existing worker rows read back `''`. Not backfilled with a default — an
+empty commitment must never raise an alert.
+Hebrew labels live in the UI; the stored value stays ASCII so Sheet exports
+and CSV round-trips stay clean. Guard-tested.
+Server-side whitelist in `_validateShiftCommitment` throws on anything off
+the enum, failing the whole write rather than persisting garbage. The
+frontend check mirrors it for UX only — the frontend is not a trust boundary.
+Field shows only for instructor-type workers (`hourly` / `per_session`).
+`lib/shift-compliance.js` — copied VERBATIM from `ezone-scheduling`.
+Computes, per Sunday–Saturday week, whether an instructor's blocked dates
+leave enough free days to meet his commitment.
+Do not patch this file locally. It is byte-identical in both repos and
+must stay that way; `tests/shift-compliance.test.js` is likewise a verbatim
+copy and both suites must stay green. If behaviour needs to change, change
+it in both repos and re-run both suites.
+The backend serves the raw commitment string only. It must never compute
+`qualifies` / `compliant` / `feasible` / `gap`. This mirrors the managers
+bonus overhaul of July 4 2026, which ended a recurring
+two-systems-out-of-sync bug by moving all math to a single shared frontend
+lib and reducing the backend to raw data. A guard test asserts that a stray
+`compliant: true` on the payload cannot suppress a real alert.
+`tests/shift-compliance.test.js` — 30 guard tests, verbatim copy from
+`ezone-scheduling`. Calendar primitives, week ownership across month and year
+boundaries, per-commitment feasibility boundaries, alert payload shape.
+`tests/shift-commitment.test.js` — 8 staffing-specific tests: the shared
+lib's export contract, backend-flag independence, empty-commitment silence
+across ~90 existing workers, no-blocks-is-not-a-violation, ASCII value
+guard, and the append-only header position guard.
+Notes
+The worker-card alert slot ships dark. `instructorAlert` returns `null`
+with no blocks, by design, so the staffing app is safe to deploy before the
+scheduling app exists. It lights up on its own once blocks are wired in.
+No new endpoint. `shift_commitment` rides the existing `/api/data` GET.
+Deployment: verify the Railway-connected branch in the Railway dashboard
+first — it is not stored in the repo. Apps Script changes go out via
+Deploy → Manage Deployments → pencil → New Version. Never "New Deployment".
