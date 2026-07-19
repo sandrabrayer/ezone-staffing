@@ -10,7 +10,36 @@ const {
   mapLegacyEventToAbsenceCoverage,
   mapLegacyArchiveRow,
   collectWorkers,
+  perSessionRatesToThreeRate,
 } = require('../lib/migrate');
+
+// ---------- perSessionRatesToThreeRate (single rate → 3-rate model) ----------
+
+test('perSessionRatesToThreeRate: copies legacy rate/sessions into the individual pair', () => {
+  assert.deepEqual(
+    perSessionRatesToThreeRate(400, 12),
+    {
+      rateIndividual: 400, sessionsIndividual: 12,
+      rateGroup: 0, sessionsGroup: 0,
+      rateExternal: 0, externalPatients: 0,
+    },
+  );
+});
+
+test('perSessionRatesToThreeRate: missing / blank legacy values map to 0', () => {
+  assert.deepEqual(perSessionRatesToThreeRate(undefined, null), {
+    rateIndividual: 0, sessionsIndividual: 0,
+    rateGroup: 0, sessionsGroup: 0,
+    rateExternal: 0, externalPatients: 0,
+  });
+});
+
+test('perSessionRatesToThreeRate: negatives floor to 0, fractions round', () => {
+  const m = perSessionRatesToThreeRate(-50, 11.6);
+  assert.equal(m.rateIndividual, 0);
+  assert.equal(m.sessionsIndividual, 12);
+  assert.equal(m.rateGroup, 0);
+});
 
 // ---------- legacyTermsFromPct ----------
 

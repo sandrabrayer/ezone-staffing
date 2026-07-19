@@ -3,7 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   EMPLOYMENT_TYPES, SALARIED_TYPES, FREELANCER_TYPES,
-  assignmentCategory, assignmentCost,
+  assignmentCategory, assignmentCost, perSessionCost,
   assignmentsByHouse, houseAssignmentsCost, splitByCategory,
   currentMonth, indexActuals, lookupActual, monthlyAssignmentCost,
   houseMonthlyAssignmentsCost, houseMonthlyTotal, networkMonthlyTotal,
@@ -151,8 +151,47 @@ test('assignmentCost: hourly multiplies rate × estHours', () => {
   assert.equal(assignmentCost(asg({ employmentType: 'hourly', hourlyRate: 75.5, estHours: 100 })), 7550);
 });
 
-test('assignmentCost: per_session multiplies rate × estSessions', () => {
+test('assignmentCost: per_session (legacy single pair) multiplies rate × estSessions', () => {
+  // Un-migrated rows carry only the legacy pair → priced off the fallback.
   assert.equal(assignmentCost(asg({ employmentType: 'per_session', sessionRate: 300, estSessions: 12 })), 3600);
+});
+
+test('perSessionCost: sums the three rate/count products', () => {
+  const a = asg({
+    employmentType: 'per_session',
+    rateIndividual: 300, sessionsIndividual: 10,   // 3000
+    rateGroup: 200, sessionsGroup: 4,              // 800
+    rateExternal: 150, externalPatients: 6,        // 900
+  });
+  assert.equal(perSessionCost(a), 4700);
+  assert.equal(assignmentCost(a), 4700);
+});
+
+test('perSessionCost: fields are optional and default to 0', () => {
+  // Only individual work — group/external blank.
+  assert.equal(perSessionCost(asg({
+    employmentType: 'per_session', rateIndividual: 400, sessionsIndividual: 8,
+  })), 3200);
+  // Nothing set at all → 0.
+  assert.equal(perSessionCost(asg({ employmentType: 'per_session' })), 0);
+});
+
+test('perSessionCost: the new 3-rate model takes precedence over the legacy pair', () => {
+  // When any new product is present the legacy pair is ignored entirely.
+  const a = asg({
+    employmentType: 'per_session',
+    sessionRate: 999, estSessions: 999,            // legacy noise
+    rateIndividual: 300, sessionsIndividual: 10,   // 3000 wins
+  });
+  assert.equal(perSessionCost(a), 3000);
+});
+
+test('perSessionCost: negative inputs are floored to 0', () => {
+  assert.equal(perSessionCost(asg({
+    employmentType: 'per_session',
+    rateIndividual: -300, sessionsIndividual: 10,
+    rateGroup: 200, sessionsGroup: -4,
+  })), 0);
 });
 
 test('assignmentCost: fixed_retainer = retainerAmount', () => {
@@ -195,6 +234,26 @@ test('houseAssignmentsCost: sums per-type costs', () => {
 test('houseAssignmentsCost: empty list', () => {
   assert.equal(houseAssignmentsCost([], 'ramot'), 0);
   assert.equal(houseAssignmentsCost(null, 'ramot'), 0);
+});
+
+test('houseAssignmentsCost: a חל"ד worker contributes 0 to the house total', () => {
+  // Putting someone on חל"ד must drop their cost from the house immediately
+  // (salary AND allowance stop). Only the active worker remains.
+  const active = asg({ id: 'a-active', house: 'ramot', employmentType: 'full_time', salary: 20000 });
+  const onLeave = asg({
+    id: 'a-leave', house: 'ramot', employmentType: 'full_time', salary: 18000,
+    allowance: 6000, status: 'chld', statusDate: '2026-07-01',
+  });
+  assert.equal(assignmentCost(onLeave), 0, 'the חל"ד worker alone costs 0');
+  assert.equal(houseAssignmentsCost([active, onLeave], 'ramot'), 20000);
+});
+
+test('houseTotal: a חל"ט worker drops out of the house total', () => {
+  const active = asg({ id: 'a1', house: 'asher', employmentType: 'full_time', salary: 12000 });
+  const onLeave = asg({ id: 'a2', house: 'asher', employmentType: 'per_session',
+    rateIndividual: 400, sessionsIndividual: 10, status: 'chlt', statusDate: '2026-06-15' });
+  // Only the active worker's 12000 counts — the חל"ט therapist's 4000 is zeroed.
+  assert.equal(houseTotal([active, onLeave], [], [], [], 'asher', TODAY), 12000);
 });
 
 test('splitByCategory: groups salaried vs freelancer', () => {

@@ -773,6 +773,139 @@ test('month view: fixed-salary cost is unchanged and never badged', async () => 
   dom.window.close();
 });
 
+// ---------- per_session 3-rate worker modal + leave status ----------
+
+function perSessionAsg(over) {
+  return Object.assign({
+    id: 'ps1', workerId: 'w1', house: 'ramot', role: 'מטפל/ת', roleDetail: 'אמנות',
+    employmentType: 'per_session', salary: 0, pct: 0,
+    hourlyRate: 0, estHours: 0, sessionRate: 0, estSessions: 0, retainerAmount: 0,
+    rateIndividual: 300, sessionsIndividual: 10,
+    rateGroup: 200, sessionsGroup: 4,
+    rateExternal: 150, externalPatients: 6,
+    allowance: 0, status: 'active', statusDate: '', notes: '',
+  }, over);
+}
+
+test('per_session modal: shows the three rate groups + a live monthly total', async () => {
+  const { dom, errors } = loadPage();
+  await authAndBoot(dom, {
+    workers: [wk({ id: 'w1', name: 'מטפלת' })],
+    assignments: [perSessionAsg()],
+  });
+  dom.window.openWorker('w1', 'ramot');
+  const doc = dom.window.document;
+  // The three new groups are visible; the legacy single pair is gone.
+  for (const id of ['w_rateIndividual', 'w_sessionsIndividual', 'w_rateGroup',
+                    'w_sessionsGroup', 'w_rateExternal', 'w_externalPatients']) {
+    const field = doc.getElementById(id).closest('.field');
+    assert.ok(!field.classList.contains('hidden'), id + ' should be visible for per_session');
+  }
+  assert.equal(doc.getElementById('w_sessionRate'), null, 'legacy w_sessionRate input removed');
+  // Live total = 300*10 + 200*4 + 150*6 = 4700.
+  const totalWrap = doc.getElementById('w_perSessionTotal_wrap');
+  assert.ok(!totalWrap.classList.contains('hidden'), 'total shown for per_session');
+  assert.match(doc.getElementById('w_perSessionTotal').textContent, /4,?700/);
+  dom.window.close();
+  assert.equal(errors.length, 0, errors.length ? JSON.stringify(errors) : '');
+});
+
+test('per_session modal: editing recomputes the live total as rates change', async () => {
+  const { dom } = loadPage();
+  await authAndBoot(dom, {
+    workers: [wk({ id: 'w1', name: 'מטפלת' })],
+    assignments: [perSessionAsg({ rateGroup: 0, sessionsGroup: 0, rateExternal: 0, externalPatients: 0 })],
+  });
+  dom.window.openWorker('w1', 'ramot');
+  const doc = dom.window.document;
+  assert.match(doc.getElementById('w_perSessionTotal').textContent, /3,?000/, 'individual-only 300×10');
+  doc.getElementById('w_rateGroup').value = '250';
+  doc.getElementById('w_sessionsGroup').value = '4';
+  dom.window.updateWorkerPerSessionTotal();
+  assert.match(doc.getElementById('w_perSessionTotal').textContent, /4,?000/, '3000 + 250×4');
+  dom.window.close();
+});
+
+test('leave status: saving חל"ד posts status + start date on the assignment', async () => {
+  const { dom } = loadPage();
+  await authAndBoot(dom, {
+    workers: [wk({ id: 'w1', name: 'מטפלת' })],
+    assignments: [perSessionAsg()],
+  });
+  dom.window.openWorker('w1', 'ramot');
+  const doc = dom.window.document;
+  doc.getElementById('w_status').value = 'chld';
+  dom.window.onWorkerStatusChange();
+  assert.ok(!doc.getElementById('w_statusDate_wrap').classList.contains('hidden'),
+    'selecting חל"ד reveals the start-date field');
+  doc.getElementById('w_statusDate').value = '2026-07-01';
+
+  const posts = [];
+  dom.window.fetch = async (url, init) => {
+    if (init && init.method === 'POST') {
+      const body = JSON.parse(init.body);
+      posts.push(body);
+      const echo = body.action === 'createWorker' || body.action === 'updateWorker'
+        ? { ok: true, worker: Object.assign({ id: 'w1' }, body.worker) }
+        : { ok: true, assignment: Object.assign({ id: 'ps1' }, body.assignment) };
+      return { ok: true, status: 200, text: async () => JSON.stringify(echo), json: async () => echo };
+    }
+    return { ok: true, status: 200, text: async () => '{}', json: async () => ({}) };
+  };
+  await dom.window.saveWorker();
+
+  const asgPost = posts.find(p => p.action === 'updateAssignment' || p.action === 'addAssignment');
+  assert.ok(asgPost, 'an assignment action was posted');
+  assert.equal(asgPost.assignment.status, 'chld', 'status posted');
+  assert.equal(asgPost.assignment.statusDate, '2026-07-01', 'leave start date posted');
+  // The three rate groups ride along in the same payload.
+  assert.equal(asgPost.assignment.rateIndividual, 300);
+  assert.equal(asgPost.assignment.sessionsGroup, 4);
+  dom.window.close();
+});
+
+test('leave status: חל"ד without a start date is blocked with an error toast', async () => {
+  const { dom } = loadPage();
+  await authAndBoot(dom, {
+    workers: [wk({ id: 'w1', name: 'מטפלת' })],
+    assignments: [perSessionAsg()],
+  });
+  dom.window.openWorker('w1', 'ramot');
+  const doc = dom.window.document;
+  doc.getElementById('w_status').value = 'chld';
+  dom.window.onWorkerStatusChange();
+  doc.getElementById('w_statusDate').value = '';   // missing
+
+  let posted = false;
+  dom.window.fetch = async () => { posted = true; return { ok: true, status: 200, text: async () => '{}' }; };
+  await dom.window.saveWorker();
+  assert.equal(posted, false, 'save is blocked — nothing posted');
+  const toast = doc.getElementById('toast');
+  assert.ok(/תאריך/.test(toast.textContent), 'an error toast about the missing date is shown');
+  dom.window.close();
+});
+
+// ---------- additional-house dropdown ----------
+
+test('additional-house dropdown: defaults to "ללא" (empty value) for a no-op', async () => {
+  const { dom } = loadPage();
+  await authAndBoot(dom, {
+    workers: [wk({ id: 'w1', name: 'מטפלת' })],
+    assignments: [perSessionAsg()],
+  });
+  dom.window.openWorker('w1', 'ramot');
+  const doc = dom.window.document;
+  const sel = doc.getElementById('w_targetHouse');
+  assert.equal(sel.value, '', 'default selection is the empty "ללא" option');
+  assert.equal(sel.options[0].textContent, 'ללא');
+  // Clicking "add" with "ללא" selected is a guarded no-op (no throw, no post).
+  let posted = false;
+  dom.window.fetch = async () => { posted = true; return { ok: true, status: 200, text: async () => '{}' }; };
+  dom.window.addWorkerHouse();
+  assert.equal(posted, false, 'empty additional house does not post');
+  dom.window.close();
+});
+
 // ---------- budgets (Part 4) ----------
 // Central view: a "תקציב מול עלות" section with one row per house
 // (budget/cost/variance/status) + a combined summary row. House view: a

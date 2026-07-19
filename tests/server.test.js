@@ -594,35 +594,53 @@ test('addAssignment: full_time happy path; rejects duplicate (worker, house)', a
   } finally { await close(srv); }
 });
 
-test('addAssignment: per_session validates sessionRate + estSessions', async () => {
+test('addAssignment: per_session accepts the 3-rate model, all fields optional', async () => {
   const { srv, base } = await listen();
   try {
     const token = await login(base);
     const workerId = await createWorker(base, token, 'איציק');
 
-    // Missing sessionRate → rejected.
+    // All rate fields are optional now — a per_session row with none is valid.
     let r = await addAssignment(base, token, {
       workerId, house: 'ramot', role: 'מטפל/ת', roleDetail: 'אמנות',
-      employmentType: 'per_session', estSessions: 10,
+      employmentType: 'per_session',
     });
-    assert.equal(r.status, 400);
+    assert.equal(r.status, 200, 'per_session with no rates is valid (all optional)');
+    assert.equal(r.json.assignment.rateIndividual, 0);
+    assert.equal(r.json.assignment.sessionsIndividual, 0);
 
-    // Missing estSessions → rejected.
+    // The three rate/count pairs round-trip through validation.
     r = await addAssignment(base, token, {
-      workerId, house: 'ramot', role: 'מטפל/ת', roleDetail: 'אמנות',
-      employmentType: 'per_session', sessionRate: 300,
-    });
-    assert.equal(r.status, 400);
-
-    // Both present → ok.
-    r = await addAssignment(base, token, {
-      workerId, house: 'ramot', role: 'מטפל/ת', roleDetail: 'אמנות',
-      employmentType: 'per_session', sessionRate: 300, estSessions: 10,
+      workerId, house: 'asher', role: 'מטפל/ת', roleDetail: 'אמנות',
+      employmentType: 'per_session',
+      rateIndividual: 300, sessionsIndividual: 10,
+      rateGroup: 200, sessionsGroup: 4,
+      rateExternal: 150, externalPatients: 6,
     });
     assert.equal(r.status, 200);
-    assert.equal(r.json.assignment.sessionRate, 300);
-    assert.equal(r.json.assignment.estSessions, 10);
+    assert.equal(r.json.assignment.rateIndividual, 300);
+    assert.equal(r.json.assignment.sessionsIndividual, 10);
+    assert.equal(r.json.assignment.rateGroup, 200);
+    assert.equal(r.json.assignment.sessionsGroup, 4);
+    assert.equal(r.json.assignment.rateExternal, 150);
+    assert.equal(r.json.assignment.externalPatients, 6);
     assert.equal(r.json.assignment.salary, 0, 'per_session zeros salary');
+
+    // Negative numeric fields are floored to 0, never stored negative.
+    r = await addAssignment(base, token, {
+      workerId, house: 'rehab', role: 'מטפל/ת', roleDetail: 'אמנות',
+      employmentType: 'per_session', rateIndividual: -5, sessionsIndividual: -2,
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.assignment.rateIndividual, 0);
+    assert.equal(r.json.assignment.sessionsIndividual, 0);
+
+    // A foreign cost field (salary) is still rejected for per_session.
+    r = await addAssignment(base, token, {
+      workerId, house: 'pardes', role: 'מטפל/ת', roleDetail: 'אמנות',
+      employmentType: 'per_session', salary: 5000,
+    });
+    assert.equal(r.status, 400);
   } finally { await close(srv); }
 });
 

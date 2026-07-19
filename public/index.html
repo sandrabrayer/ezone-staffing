@@ -926,13 +926,38 @@ tbody tr:hover{
           <label>שעות בחודש (הערכה)</label>
           <input id="w_estHours" type="number" min="0" step="1" placeholder="0"/>
         </div>
-        <div class="field" data-wcost-field="sessionRate">
-          <label>תעריף למפגש (₪)</label>
-          <input id="w_sessionRate" type="number" min="0" step="10" placeholder="0"/>
+        <!-- per_session (תשלום לפי מפגש): three independent rate groups.
+             Each rate/count pair is optional (default 0) — a therapist who
+             only does individual work leaves the group/external pairs blank.
+             The legacy single pair (w_sessionRate/w_estSessions) is retired
+             from the form; existing rows are migrated to rate_individual. -->
+        <div class="field" data-wcost-field="rateIndividual">
+          <label>תעריף למפגש פרטני (₪)</label>
+          <input id="w_rateIndividual" type="number" min="0" step="10" placeholder="0" oninput="updateWorkerPerSessionTotal()"/>
         </div>
-        <div class="field" data-wcost-field="estSessions">
-          <label>מפגשים בחודש (הערכה)</label>
-          <input id="w_estSessions" type="number" min="0" step="1" placeholder="0"/>
+        <div class="field" data-wcost-field="sessionsIndividual">
+          <label>מפגשים פרטניים בחודש</label>
+          <input id="w_sessionsIndividual" type="number" min="0" step="1" placeholder="0" oninput="updateWorkerPerSessionTotal()"/>
+        </div>
+        <div class="field" data-wcost-field="rateGroup">
+          <label>תעריף למפגש קבוצתי (₪)</label>
+          <input id="w_rateGroup" type="number" min="0" step="10" placeholder="0" oninput="updateWorkerPerSessionTotal()"/>
+        </div>
+        <div class="field" data-wcost-field="sessionsGroup">
+          <label>מפגשים קבוצתיים בחודש</label>
+          <input id="w_sessionsGroup" type="number" min="0" step="1" placeholder="0" oninput="updateWorkerPerSessionTotal()"/>
+        </div>
+        <div class="field" data-wcost-field="rateExternal">
+          <label>תעריף למטופל חוץ (₪)</label>
+          <input id="w_rateExternal" type="number" min="0" step="10" placeholder="0" oninput="updateWorkerPerSessionTotal()"/>
+        </div>
+        <div class="field" data-wcost-field="externalPatients">
+          <label>מספר מטופלי חוץ</label>
+          <input id="w_externalPatients" type="number" min="0" step="1" placeholder="0" oninput="updateWorkerPerSessionTotal()"/>
+        </div>
+        <div class="field hidden" id="w_perSessionTotal_wrap">
+          <div class="hint">עלות חודשית משוערת (סכום שלושת הסוגים):</div>
+          <div class="money" id="w_perSessionTotal">₪0</div>
         </div>
         <div class="field" data-wcost-field="retainerAmount">
           <label>ריטיינר חודשי (₪)</label>
@@ -1318,6 +1343,7 @@ const TOKEN_KEY = 'ezone_staff_token_v1';
 const {
   assignmentCategory: calcAssignmentCategory,
   assignmentCost: calcAssignmentCost,
+  perSessionCost: calcPerSessionCost,
   isOnLeave: calcIsOnLeave,
   assignmentsByHouse: calcAssignmentsByHouse,
   houseAssignmentsCost: calcHouseAssignmentsCost,
@@ -1764,8 +1790,22 @@ function termsHtml(a){
       return `<div class="money">${fmt(a.salary)} <span style="color:#B6B0A0">(${Number(a.pct)||0}% משרה)</span></div>`;
     case 'hourly':
       return `<div class="money">${fmt(a.hourlyRate)}/שעה × ${Number(a.estHours)||0} ש'</div>`;
-    case 'per_session':
-      return `<div class="money">${fmt(a.sessionRate)}/מפגש × ${Number(a.estSessions)||0}</div>`;
+    case 'per_session': {
+      // 3-rate model: show the computed monthly total plus a compact
+      // breakdown of the non-zero session types. Falls back to the legacy
+      // single pair for rows not yet migrated (perSessionCost handles that).
+      const parts = [];
+      if ((Number(a.rateIndividual)||0) && (Number(a.sessionsIndividual)||0))
+        parts.push(`פרטני ${fmt(a.rateIndividual)}×${Number(a.sessionsIndividual)}`);
+      if ((Number(a.rateGroup)||0) && (Number(a.sessionsGroup)||0))
+        parts.push(`קבוצתי ${fmt(a.rateGroup)}×${Number(a.sessionsGroup)}`);
+      if ((Number(a.rateExternal)||0) && (Number(a.externalPatients)||0))
+        parts.push(`חוץ ${fmt(a.rateExternal)}×${Number(a.externalPatients)}`);
+      if (!parts.length && (Number(a.sessionRate)||0) && (Number(a.estSessions)||0))
+        parts.push(`${fmt(a.sessionRate)}/מפגש × ${Number(a.estSessions)}`);
+      const breakdown = parts.length ? `<div class="sub" style="font-size:11px">${escapeHtml(parts.join(' · '))}</div>` : '';
+      return `<div class="money">${fmt(calcPerSessionCost(a))}</div>${breakdown}`;
+    }
     case 'fixed_retainer':
       return `<div class="money">${fmt(a.retainerAmount)}</div>`;
     default:
@@ -1804,11 +1844,19 @@ async function doAction(payload){
 // TYPE_COST_FIELDS in lib/validate.js + apps-script/Code.gs — the server
 // will 400 on any mismatch, so the form here zeros foreign fields out
 // before the POST.
+// per_session's visible fields are the three rate/count pairs. The legacy
+// sessionRate/estSessions pair still exists in the data model (and is
+// accepted by the server) but is no longer shown or written by this form.
+const PER_SESSION_RATE_FIELDS = [
+  'rateIndividual', 'sessionsIndividual',
+  'rateGroup', 'sessionsGroup',
+  'rateExternal', 'externalPatients',
+];
 const TYPE_COST_FIELDS = {
   full_time:      ['salary'],
   part_time:      ['salary', 'pct'],
   hourly:         ['hourlyRate', 'estHours'],
-  per_session:    ['sessionRate', 'estSessions'],
+  per_session:    PER_SESSION_RATE_FIELDS.slice(),
   fixed_retainer: ['retainerAmount'],
 };
 const ALL_COST_FIELDS = [
@@ -1816,7 +1864,7 @@ const ALL_COST_FIELDS = [
   'hourlyRate', 'estHours',
   'sessionRate', 'estSessions',
   'retainerAmount',
-];
+].concat(PER_SESSION_RATE_FIELDS);
 
 // Human label for the per-type required-field error messages.
 function labelForCostField(f){
@@ -1827,6 +1875,12 @@ function labelForCostField(f){
     estHours:       'שעות בחודש',
     sessionRate:    'תעריף למפגש',
     estSessions:    'מפגשים בחודש',
+    rateIndividual:     'תעריף למפגש פרטני',
+    sessionsIndividual: 'מפגשים פרטניים בחודש',
+    rateGroup:          'תעריף למפגש קבוצתי',
+    sessionsGroup:      'מפגשים קבוצתיים בחודש',
+    rateExternal:       'תעריף למטופל חוץ',
+    externalPatients:   'מספר מטופלי חוץ',
     retainerAmount: 'ריטיינר חודשי',
   }[f] || f;
 }
@@ -1943,6 +1997,18 @@ function openWorker(workerId, house){
     const el = document.getElementById('w_' + f);
     if (el) el.value = asg && asg[f] ? asg[f] : '';
   });
+  // per_session transition safety: a row not yet touched by the one-time
+  // migration carries its rate only in the legacy sessionRate/estSessions
+  // pair. Seed the "individual" inputs from those so editing such a worker
+  // shows (and preserves) their existing rate instead of blanking it.
+  if (asg && asg.employmentType === 'per_session'){
+    if (!(Number(asg.rateIndividual) > 0) && Number(asg.sessionRate) > 0){
+      document.getElementById('w_rateIndividual').value = asg.sessionRate;
+    }
+    if (!(Number(asg.sessionsIndividual) > 0) && Number(asg.estSessions) > 0){
+      document.getElementById('w_sessionsIndividual').value = asg.estSessions;
+    }
+  }
   const allowanceVal = asg && [2000, 6000].indexOf(Number(asg.allowance)) >= 0 ? String(Number(asg.allowance)) : '0';
   document.getElementById('w_allowance').value = allowanceVal;
 
@@ -1960,7 +2026,10 @@ function openWorker(workerId, house){
   if (w && asg){
     const occupied = new Set(ASSIGNMENTS.filter(a => a.workerId === w.id).map(a => a.house));
     const targetSel = document.getElementById('w_targetHouse');
-    targetSel.innerHTML = HOUSES
+    // Default "ללא" (empty value) so a worker can have no additional house.
+    // The move/add handlers treat an empty selection as a no-op with a hint.
+    const noneOpt = '<option value="" selected>ללא</option>';
+    targetSel.innerHTML = noneOpt + HOUSES
       .filter(h => h.id !== targetHouse)
       .map(h => {
         const already = occupied.has(h.id);
@@ -2031,6 +2100,22 @@ function onWorkerTypeChange(){
     if (allowed.indexOf(f) >= 0) el.classList.remove('hidden');
     else el.classList.add('hidden');
   });
+  // The per_session live total is shown only for that type.
+  const totalWrap = document.getElementById('w_perSessionTotal_wrap');
+  if (t === 'per_session'){ totalWrap.classList.remove('hidden'); updateWorkerPerSessionTotal(); }
+  else totalWrap.classList.add('hidden');
+}
+
+// Live monthly-cost preview for the per_session 3-rate form: sum of the
+// three rate×count products, mirroring perSessionCost() in lib/calc.js.
+// Negative / non-numeric inputs count as 0 (they're rejected on save).
+function updateWorkerPerSessionTotal(){
+  const val = id => Math.max(0, Number(document.getElementById(id).value) || 0);
+  const total = val('w_rateIndividual') * val('w_sessionsIndividual')
+              + val('w_rateGroup')      * val('w_sessionsGroup')
+              + val('w_rateExternal')   * val('w_externalPatients');
+  const el = document.getElementById('w_perSessionTotal');
+  if (el) el.textContent = '₪' + Math.round(total).toLocaleString('he-IL');
 }
 // Show the start-date field only for leave statuses (חל"ד / חל"ט).
 function onWorkerStatusChange(){
@@ -2080,17 +2165,33 @@ async function saveWorker(){
   if (!role){ toast('יש לבחור תפקיד', true); return; }
   if (role === 'אחר' && !roleDetail){ toast('בתפקיד "אחר" יש לפרט', true); return; }
 
-  // Only the type's allowed cost fields, each required + positive.
+  // Collect the type's cost fields. per_session is special: its three
+  // rate/count pairs are ALL optional (default 0), so each is validated as a
+  // non-negative number rather than a required-positive one. Every other type
+  // keeps the required-positive rule.
   const allowed = TYPE_COST_FIELDS[employmentType] || [];
   const costFields = {};
-  for (let i = 0; i < allowed.length; i++){
-    const f = allowed[i];
-    const v = Number(document.getElementById('w_' + f).value);
-    if (!Number.isFinite(v) || v <= 0){
-      toast('יש להזין ' + labelForCostField(f) + ' חיובי לסוג העסקה ' + EMPLOYMENT_TYPE_LABELS[employmentType], true);
-      return;
+  if (employmentType === 'per_session'){
+    for (let i = 0; i < allowed.length; i++){
+      const f = allowed[i];
+      const raw = document.getElementById('w_' + f).value;
+      const v = raw === '' ? 0 : Number(raw);
+      if (!Number.isFinite(v) || v < 0){
+        toast(labelForCostField(f) + ' חייב להיות מספר לא שלילי', true);
+        return;
+      }
+      costFields[f] = v;
     }
-    costFields[f] = v;
+  } else {
+    for (let i = 0; i < allowed.length; i++){
+      const f = allowed[i];
+      const v = Number(document.getElementById('w_' + f).value);
+      if (!Number.isFinite(v) || v <= 0){
+        toast('יש להזין ' + labelForCostField(f) + ' חיובי לסוג העסקה ' + EMPLOYMENT_TYPE_LABELS[employmentType], true);
+        return;
+      }
+      costFields[f] = v;
+    }
   }
   const allowanceRaw = Number(document.getElementById('w_allowance').value);
   const allowance = [0, 2000, 6000].indexOf(allowanceRaw) >= 0 ? allowanceRaw : 0;
