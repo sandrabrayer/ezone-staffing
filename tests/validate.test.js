@@ -213,18 +213,47 @@ test('validateAssignment: hourly requires rate and hours', () => {
   }), /estHours required/);
 });
 
-test('validateAssignment: per_session requires rate and sessions', () => {
+test('validateAssignment: per_session accepts the 3-rate model (all optional)', () => {
+  // The three rate/count pairs round-trip and default to 0 when omitted.
   const a = validateAssignment({
+    workerId: 'w1', house: 'ramot', role: 'פסיכיאטר/ית',
+    employmentType: 'per_session',
+    rateIndividual: 400, sessionsIndividual: 12,
+    rateGroup: 250, sessionsGroup: 5,
+    rateExternal: 180, externalPatients: 8,
+  });
+  assert.equal(a.rateIndividual, 400);
+  assert.equal(a.sessionsIndividual, 12);
+  assert.equal(a.rateGroup, 250);
+  assert.equal(a.sessionsGroup, 5);
+  assert.equal(a.rateExternal, 180);
+  assert.equal(a.externalPatients, 8);
+
+  // No rate fields at all is valid — every per_session field is optional.
+  const empty = validateAssignment({
+    workerId: 'w1', house: 'ramot', role: 'פסיכיאטר/ית',
+    employmentType: 'per_session',
+  });
+  assert.equal(empty.rateIndividual, 0);
+  assert.equal(empty.sessionsIndividual, 0);
+  assert.equal(empty.rateGroup, 0);
+  assert.equal(empty.externalPatients, 0);
+
+  // The legacy single pair is still accepted (pre-migration rows round-trip).
+  const legacy = validateAssignment({
     workerId: 'w1', house: 'ramot', role: 'פסיכיאטר/ית',
     employmentType: 'per_session', sessionRate: 400, estSessions: 12,
   });
-  assert.equal(a.sessionRate, 400);
-  assert.equal(a.estSessions, 12);
+  assert.equal(legacy.sessionRate, 400);
+  assert.equal(legacy.estSessions, 12);
 
-  assert.throws(() => validateAssignment({
+  // Negative values floor to 0 (non-negative guarantee), never throw.
+  const neg = validateAssignment({
     workerId: 'w1', house: 'ramot', role: 'פסיכיאטר/ית',
-    employmentType: 'per_session', sessionRate: 0, estSessions: 12,
-  }), /sessionRate required/);
+    employmentType: 'per_session', rateIndividual: -50, sessionsIndividual: -3,
+  });
+  assert.equal(neg.rateIndividual, 0);
+  assert.equal(neg.sessionsIndividual, 0);
 });
 
 test('validateAssignment: fixed_retainer requires amount', () => {
@@ -552,6 +581,45 @@ test('validateAction: terminateAssignment accepts missing reason', () => {
   });
   assert.equal(p.reasonType, '');
   assert.equal(p.reasonDetail, '');
+});
+
+test('validateAction: moveAssignment rejects an empty target house', () => {
+  // The worker form's "בית נוסף / מעבר בית" dropdown defaults to "ללא"
+  // (empty value). The frontend treats that as a no-op, and the server is a
+  // second line of defense: an empty / bogus target house is a 400, never a
+  // silent write.
+  assert.throws(() => validateAction({ action: 'moveAssignment', id: 'a1', house: '' }),
+    /bad target house/);
+  assert.throws(() => validateAction({ action: 'moveAssignment', id: 'a1', house: 'nope' }),
+    /bad target house/);
+  const ok = validateAction({ action: 'moveAssignment', id: 'a1', house: 'asher' });
+  assert.equal(ok.house, 'asher');
+});
+
+test('validateAssignment: leave status persists with its start date; חל"ד needs one', () => {
+  // Regression guard for the "status not saving" bug: a leave status and its
+  // start date must survive validation so they can be written to the sheet.
+  const leave = validateAssignment({
+    workerId: 'w1', house: 'ramot', role: 'אחות',
+    employmentType: 'full_time', salary: 18000,
+    status: 'chld', statusDate: '2026-07-01',
+  });
+  assert.equal(leave.status, 'chld');
+  assert.equal(leave.statusDate, '2026-07-01');
+
+  // חל"ד / חל"ט without a start date is rejected (not silently dropped).
+  assert.throws(() => validateAssignment({
+    workerId: 'w1', house: 'ramot', role: 'אחות',
+    employmentType: 'full_time', salary: 18000, status: 'chlt',
+  }), /missing statusDate/);
+
+  // Active carries no start date, and unknown statuses fall back to active.
+  const active = validateAssignment({
+    workerId: 'w1', house: 'ramot', role: 'אחות',
+    employmentType: 'full_time', salary: 18000, status: 'bogus',
+  });
+  assert.equal(active.status, 'active');
+  assert.equal(active.statusDate, '');
 });
 
 test('validateAction: terminateAssignment rejects bad inputs', () => {

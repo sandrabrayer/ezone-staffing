@@ -97,11 +97,21 @@ const LEGACY_PREFIX = '_legacy_';
 // row. 'shift_commitment' (worker-level contractual commitment) must stay
 // last; new columns go after it, never before.
 const HEADERS_WORKERS = ['id', 'name', 'notes', 'created_at', 'shift_commitment'];
+// APPEND-ONLY (columns 0-14 are the original v3 shape). Columns 15+ were
+// appended later and MUST stay in this order — read/write map by position:
+//   15 allowance, 16 status, 17 status_date  (fixes the leave-status bug —
+//      previously validated but never persisted, so חל"ד never stuck);
+//   18-23 the per_session 3-rate model (individual / group / external),
+//      populated for existing rows by migratePerSessionRatesToThreeRate().
 const HEADERS_ASSIGNMENTS = [
   'id', 'worker_id', 'house', 'role', 'role_detail', 'employment_type',
   'salary', 'pct', 'hourly_rate', 'est_hours',
   'session_rate', 'est_sessions', 'retainer_amount',
   'notes', 'created_at',
+  'allowance', 'status', 'status_date',
+  'rate_individual', 'sessions_individual',
+  'rate_group', 'sessions_group',
+  'rate_external', 'external_patients',
 ];
 const HEADERS_ABSENCES = [
   'id', 'worker_id', 'house', 'start_date', 'end_date',
@@ -117,12 +127,19 @@ const HEADERS_COVERAGES = [
   'covering_house', 'receiving_house', 'start_date', 'end_date',
   'extra_payment', 'notes', 'created_at',
 ];
+// APPEND-ONLY. Columns 20-25 (the per_session 3-rate snapshot) were
+// appended so a terminated therapist's frozen terms keep their real cost
+// during the notice window — the legacy session_rate/est_sessions pair is 0
+// for workers created under the 3-rate model.
 const HEADERS_ARCHIVE_V3 = [
   'id', 'assignment_id', 'worker_id', 'name', 'house', 'role', 'role_detail',
   'employment_type',
   'salary', 'pct', 'hourly_rate', 'est_hours',
   'session_rate', 'est_sessions', 'retainer_amount',
   'notes', 'termination_date', 'reason_type', 'reason_detail', 'archived_at',
+  'rate_individual', 'sessions_individual',
+  'rate_group', 'sessions_group',
+  'rate_external', 'external_patients',
 ];
 // Append-only. Blank actual_hours / actual_sessions mean "not recorded for
 // this type" (an hourly row leaves actual_sessions blank and vice versa).
@@ -172,11 +189,18 @@ const SHIFT_COMMITMENT_VALUES = ['3+1', '4+1', '5+1'];
 // Defense in depth: the Express proxy validates first, but Apps Script
 // re-validates so the Sheet can never be written to with an inconsistent
 // (type, cost-fields) combo even if someone calls /exec directly.
+// per_session carries the three optional rate/count pairs (individual /
+// group / external) PLUS the legacy single sessionRate/estSessions pair.
+const PER_SESSION_RATE_FIELDS = [
+  'rateIndividual', 'sessionsIndividual',
+  'rateGroup', 'sessionsGroup',
+  'rateExternal', 'externalPatients',
+];
 const TYPE_COST_FIELDS = {
   full_time:      ['salary'],
   part_time:      ['salary', 'pct'],
   hourly:         ['hourlyRate', 'estHours'],
-  per_session:    ['sessionRate', 'estSessions'],
+  per_session:    ['sessionRate', 'estSessions'].concat(PER_SESSION_RATE_FIELDS),
   fixed_retainer: ['retainerAmount'],
 };
 const ALL_COST_FIELDS = [
@@ -184,7 +208,14 @@ const ALL_COST_FIELDS = [
   'hourlyRate', 'estHours',
   'sessionRate', 'estSessions',
   'retainerAmount',
-];
+].concat(PER_SESSION_RATE_FIELDS);
+
+// Whitelisted monthly allowance values (₪) — mirror lib/calc.js /
+// lib/validate.js: none / gas-only / car+gas.
+const ALLOWANCE_VALUES = [0, 2000, 6000];
+// Worker status: active (paid) / chld (חל"ד) / chlt (חל"ט). Leave states
+// are unpaid and carry a start date.
+const WORKER_STATUS_VALUES = ['active', 'chld', 'chlt'];
 
 // Per-field caps — must mirror lib/validate.js.
 const SALARY_MAX = 1000000;
@@ -373,6 +404,19 @@ function validateAssignment(a) {
   if (!isEmploymentType(employmentType)) throw httpError(400, 'bad employmentType');
   const notes = String(a.notes || '').trim().slice(0, 500);
 
+  // Monthly allowance (₪): whitelisted enum, applies to every type.
+  const allowanceRaw = Number(a.allowance);
+  const allowance = ALLOWANCE_VALUES.indexOf(allowanceRaw) >= 0 ? allowanceRaw : 0;
+
+  // Worker status: active / chld (חל"ד) / chlt (חל"ט). Leave states are
+  // unpaid and REQUIRE a start date; active carries none. Unknown → active.
+  const statusRaw = String(a.status || 'active').trim();
+  const status = WORKER_STATUS_VALUES.indexOf(statusRaw) >= 0 ? statusRaw : 'active';
+  let statusDate = '';
+  if (status === 'chld' || status === 'chlt') {
+    statusDate = validateRequiredDate(a.statusDate, 'statusDate');
+  }
+
   // Mirror of lib/validate.js: reject cost fields that don't belong to
   // the chosen type. Checks the raw input — silently zeroing would mask
   // the inconsistency rather than surface it.
@@ -390,6 +434,10 @@ function validateAssignment(a) {
 
   let salary = 0, pct = 0, hourlyRate = 0, estHours = 0;
   let sessionRate = 0, estSessions = 0, retainerAmount = 0;
+  // per_session 3-rate model (all optional, default 0).
+  let rateIndividual = 0, sessionsIndividual = 0;
+  let rateGroup = 0, sessionsGroup = 0;
+  let rateExternal = 0, externalPatients = 0;
 
   switch (employmentType) {
     case 'full_time':
@@ -408,10 +456,17 @@ function validateAssignment(a) {
       if (estHours <= 0) throw httpError(400, 'estHours required for hourly');
       break;
     case 'per_session':
+      // Three optional rate/count pairs; legacy pair stays accepted so
+      // pre-migration rows round-trip. clampMoney/clampInt floor negatives
+      // to 0 and cap at the session maxima.
       sessionRate = clampMoney(a.sessionRate, SESSION_RATE_MAX);
-      if (sessionRate <= 0) throw httpError(400, 'sessionRate required for per_session');
       estSessions = clampInt(a.estSessions, EST_SESSIONS_MAX);
-      if (estSessions <= 0) throw httpError(400, 'estSessions required for per_session');
+      rateIndividual     = clampMoney(a.rateIndividual, SESSION_RATE_MAX);
+      sessionsIndividual = clampInt(a.sessionsIndividual, EST_SESSIONS_MAX);
+      rateGroup          = clampMoney(a.rateGroup, SESSION_RATE_MAX);
+      sessionsGroup      = clampInt(a.sessionsGroup, EST_SESSIONS_MAX);
+      rateExternal       = clampMoney(a.rateExternal, SESSION_RATE_MAX);
+      externalPatients   = clampInt(a.externalPatients, EST_SESSIONS_MAX);
       break;
     case 'fixed_retainer':
       retainerAmount = clampMoney(a.retainerAmount, RETAINER_MAX);
@@ -426,6 +481,11 @@ function validateAssignment(a) {
     hourlyRate: hourlyRate, estHours: estHours,
     sessionRate: sessionRate, estSessions: estSessions,
     retainerAmount: retainerAmount,
+    rateIndividual: rateIndividual, sessionsIndividual: sessionsIndividual,
+    rateGroup: rateGroup, sessionsGroup: sessionsGroup,
+    rateExternal: rateExternal, externalPatients: externalPatients,
+    allowance: allowance,
+    status: status, statusDate: statusDate,
     notes: notes,
   };
 }
@@ -611,8 +671,24 @@ function readAssignmentsSafe() {
       retainerAmount: Number(r[12]) || 0,
       notes: String(r[13] || ''),
       createdAt: cellToIso(r[14]),
+      // Appended columns (blank on legacy rows → sensible defaults).
+      allowance: Number(r[15]) || 0,
+      status: normalizeStatus(r[16]),
+      statusDate: String(r[17] || ''),
+      rateIndividual: Number(r[18]) || 0,
+      sessionsIndividual: Number(r[19]) || 0,
+      rateGroup: Number(r[20]) || 0,
+      sessionsGroup: Number(r[21]) || 0,
+      rateExternal: Number(r[22]) || 0,
+      externalPatients: Number(r[23]) || 0,
     };
   });
+}
+
+// Normalize a stored status cell to a known value; blank/unknown → active.
+function normalizeStatus(v) {
+  const s = String(v || '').trim();
+  return WORKER_STATUS_VALUES.indexOf(s) >= 0 ? s : 'active';
 }
 
 // Reads absences and lazily corrects stored status: any row stored as
@@ -698,6 +774,12 @@ function readArchiveV3Safe() {
       reasonType: String(r[17] || ''),
       reasonDetail: String(r[18] || ''),
       archivedAt: cellToIso(r[19]),
+      rateIndividual: Number(r[20]) || 0,
+      sessionsIndividual: Number(r[21]) || 0,
+      rateGroup: Number(r[22]) || 0,
+      sessionsGroup: Number(r[23]) || 0,
+      rateExternal: Number(r[24]) || 0,
+      externalPatients: Number(r[25]) || 0,
     };
   });
 }
@@ -899,6 +981,10 @@ function addAssignment(body) {
       a.salary, a.pct, a.hourlyRate, a.estHours,
       a.sessionRate, a.estSessions, a.retainerAmount,
       a.notes, createdAt,
+      a.allowance, a.status, a.statusDate,
+      a.rateIndividual, a.sessionsIndividual,
+      a.rateGroup, a.sessionsGroup,
+      a.rateExternal, a.externalPatients,
     ]);
     return { ok: true, assignment: Object.assign({ id: id, createdAt: createdAt }, a) };
   } finally {
@@ -925,6 +1011,10 @@ function updateAssignment(body) {
       a.salary, a.pct, a.hourlyRate, a.estHours,
       a.sessionRate, a.estSessions, a.retainerAmount,
       a.notes, current[14] || new Date().toISOString(),
+      a.allowance, a.status, a.statusDate,
+      a.rateIndividual, a.sessionsIndividual,
+      a.rateGroup, a.sessionsGroup,
+      a.rateExternal, a.externalPatients,
     ]]);
     return { ok: true, assignment: Object.assign({ id: id }, a) };
   } finally {
@@ -997,6 +1087,15 @@ function moveAssignment(body) {
       estSessions: Number(cur[11]) || 0,
       retainerAmount: Number(cur[12]) || 0,
       notes: String(cur[13] || ''),
+      allowance: Number(cur[15]) || 0,
+      status: normalizeStatus(cur[16]),
+      statusDate: String(cur[17] || ''),
+      rateIndividual: Number(cur[18]) || 0,
+      sessionsIndividual: Number(cur[19]) || 0,
+      rateGroup: Number(cur[20]) || 0,
+      sessionsGroup: Number(cur[21]) || 0,
+      rateExternal: Number(cur[22]) || 0,
+      externalPatients: Number(cur[23]) || 0,
     };
     return { ok: true, assignment: assignment };
   } finally {
@@ -1035,6 +1134,12 @@ function terminateAssignment(body) {
       estSessions: Number(r[11]) || 0,
       retainerAmount: Number(r[12]) || 0,
       notes: String(r[13] || ''),
+      rateIndividual: Number(r[18]) || 0,
+      sessionsIndividual: Number(r[19]) || 0,
+      rateGroup: Number(r[20]) || 0,
+      sessionsGroup: Number(r[21]) || 0,
+      rateExternal: Number(r[22]) || 0,
+      externalPatients: Number(r[23]) || 0,
     };
     // Look up worker name (frozen into the archive).
     const wsh = sheetByName(WORKERS_TAB);
@@ -1072,6 +1177,9 @@ function terminateAssignment(body) {
       snapshot.salary, snapshot.pct, snapshot.hourlyRate, snapshot.estHours,
       snapshot.sessionRate, snapshot.estSessions, snapshot.retainerAmount,
       snapshot.notes, terminationDate, reasonType, reasonDetail, archivedAt,
+      snapshot.rateIndividual, snapshot.sessionsIndividual,
+      snapshot.rateGroup, snapshot.sessionsGroup,
+      snapshot.rateExternal, snapshot.externalPatients,
     ]);
 
     // Remove the active assignment row.
@@ -1395,6 +1503,71 @@ function setupSheetsV3() {
     ensureHeaders(sh, w.headers);
   });
   return 'setupSheetsV3 ok';
+}
+
+// ---------- one-time migration: per_session single rate → 3-rate model ----------
+//
+// Run ONCE from the Apps Script editor (Run ▸ migratePerSessionRatesToThreeRate)
+// AFTER deploying the new Code.gs. For every existing per_session assignment
+// it copies the legacy single pair into the new `individual` pair:
+//   session_rate  → rate_individual
+//   est_sessions  → sessions_individual
+// group + external stay 0 (Moran fills them in per therapist later).
+//
+// Idempotent: a row whose rate_individual is already populated is skipped,
+// so re-running is safe. Mirrors perSessionRatesToThreeRate() in
+// lib/migrate.js (the pure, unit-tested mapping). Use
+// dryRunMigratePerSessionRatesToThreeRate() first to preview the count.
+function migratePerSessionRatesToThreeRate() {
+  return _migratePerSessionRates(false);
+}
+
+function dryRunMigratePerSessionRatesToThreeRate() {
+  return _migratePerSessionRates(true);
+}
+
+function _migratePerSessionRates(dryRun) {
+  const sh = sheetByName(ASSIGNMENTS_TAB);
+  // Guarantee the appended columns physically exist + carry their labels.
+  ensureHeaders(sh, HEADERS_ASSIGNMENTS);
+  const lastRow = sh.getLastRow();
+  if (lastRow < 2) return { migrated: 0, skipped: 0, total: 0, dryRun: !!dryRun };
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const n = lastRow - 1;
+    // Columns are 1-based: employment_type=6, session_rate=11, est_sessions=12,
+    // rate_individual=19, sessions_individual=20.
+    const types = sh.getRange(2, 6, n, 1).getValues();          // col 6
+    const legacy = sh.getRange(2, 11, n, 2).getValues();        // cols 11-12
+    const indiv = sh.getRange(2, 19, n, 2).getValues();         // cols 19-20
+    let migrated = 0, skipped = 0, total = 0;
+    for (let i = 0; i < n; i++) {
+      if (String(types[i][0]).trim() !== 'per_session') continue;
+      total++;
+      const alreadyRate = Number(indiv[i][0]) || 0;
+      const alreadySess = Number(indiv[i][1]) || 0;
+      if (alreadyRate > 0 || alreadySess > 0) { skipped++; continue; }
+      const mapped = perSessionRatesToThreeRate_(legacy[i][0], legacy[i][1]);
+      indiv[i][0] = mapped.rateIndividual;
+      indiv[i][1] = mapped.sessionsIndividual;
+      migrated++;
+    }
+    if (!dryRun && migrated > 0) {
+      sh.getRange(2, 19, n, 2).setValues(indiv);
+    }
+    return { migrated: migrated, skipped: skipped, total: total, dryRun: !!dryRun };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// Pure mapping — mirror of perSessionRatesToThreeRate() in lib/migrate.js.
+function perSessionRatesToThreeRate_(legacyRate, legacySessions) {
+  const rate = Math.max(0, Math.round(Number(legacyRate) || 0));
+  const sessions = Math.max(0, Math.round(Number(legacySessions) || 0));
+  return { rateIndividual: rate, sessionsIndividual: sessions };
 }
 
 function ensureHeaders(sh, expected) {
