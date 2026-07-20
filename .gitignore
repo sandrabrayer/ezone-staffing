@@ -9,8 +9,7 @@ Thumbs.db
 coverage/
 .claude/
 
-# clasp / Apps Script deployment — never commit credentials or the resolved
-# project config. The workflow generates .clasp.json from the SCRIPT_ID variable
-# at CI time; locally, copy .clasp.json.example → .clasp.json. See DEPLOY.md.
+# clasp / Apps Script credentials — NEVER commit. These hold OAuth tokens.
+# (.clasp.json itself is committed — it holds only the non-secret Script ID.)
 .clasprc.json
-.clasp.json
+.clasp.local.json

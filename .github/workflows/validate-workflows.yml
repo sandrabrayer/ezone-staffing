@@ -1,15 +1,14 @@
 name: Validate Workflows
 
-# Cheap guard so a malformed workflow file (bad indentation, unclosed quote,
-# duplicate key) can never merge silently. Runs on any PR or push that touches
-# .github/workflows/**. Pure syntactic YAML parse via js-yaml — no committed deps.
+# CI check that every GitHub Actions workflow file is valid YAML. Runs on any
+# change under .github/workflows/** so a broken deploy workflow is caught in a
+# PR instead of silently never running on the deployed branch.
 
 on:
-  pull_request:
+  push:
     paths:
       - '.github/workflows/**'
-  push:
-    branches: [main]
+  pull_request:
     paths:
       - '.github/workflows/**'
 
@@ -17,34 +16,45 @@ permissions:
   contents: read
 
 jobs:
-  yaml:
-    name: Parse workflow YAML
+  yaml-valid:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          node-version: '20'
+          python-version: '3.x'
 
-      - name: Validate every workflow file parses
+      - name: Install PyYAML
+        run: python3 -m pip install --quiet pyyaml
+
+      - name: Validate every workflow YAML parses
         run: |
-          shopt -s nullglob
-          files=(.github/workflows/*.yml .github/workflows/*.yaml)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "::error::No workflow files found to validate."
-            exit 1
-          fi
-          echo "Validating ${#files[@]} workflow file(s)…"
-          fail=0
-          for f in "${files[@]}"; do
-            if npx --yes js-yaml "$f" > /dev/null; then
-              echo "  ok  $f"
-            else
-              echo "::error file=$f::Invalid YAML in $f"
-              fail=1
-            fi
-          done
-          [ "$fail" -eq 0 ] && echo "All workflow YAML is valid." || exit 1
+          python3 - <<'PY'
+          import sys, glob, yaml
+          files = sorted(glob.glob('.github/workflows/*.yml') + glob.glob('.github/workflows/*.yaml'))
+          if not files:
+              print('No workflow files found — nothing to validate.')
+              sys.exit(0)
+          ok = True
+          for f in files:
+              try:
+                  with open(f, encoding='utf-8') as fh:
+                      doc = yaml.safe_load(fh)
+                  if not isinstance(doc, dict):
+                      ok = False
+                      print(f'FAIL {f}: top level is not a mapping')
+                      continue
+                  # `on:` is loaded as the boolean True under YAML 1.1 — accept either spelling.
+                  if 'jobs' not in doc or not (True in doc or 'on' in doc):
+                      ok = False
+                      print(f"FAIL {f}: missing required 'on:' and/or 'jobs:' keys")
+                      continue
+                  print(f'OK   {f}')
+              except yaml.YAMLError as e:
+                  ok = False
+                  print(f'FAIL {f}: {e}')
+          sys.exit(0 if ok else 1)
+          PY
