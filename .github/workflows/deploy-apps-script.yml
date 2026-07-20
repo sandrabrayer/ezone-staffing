@@ -1,0 +1,113 @@
+name: Deploy Apps Script
+
+# Automatically pushes apps-script/** to the Google Apps Script project and
+# publishes a NEW VERSION of the EXISTING deployment (same deployment ID → the
+# /exec URL never changes, so Railway's APPS_SCRIPT_URL and any sibling
+# consumers keep working).
+#
+# Fires only when the Apps Script sources actually change on the deployed
+# branch. Requires two GitHub secrets — see DEPLOY.md:
+#   - CLASPRC_JSON  : contents of ~/.clasprc.json from a local `clasp login`
+#   - DEPLOYMENT_ID : the existing Web App deployment ID (starts with "AKfyc")
+
+on:
+  push:
+    branches:
+      # The Staffing Railway/production branch (per EZONE-ECOSYSTEM-STATUS.md).
+      - main
+    paths:
+      - 'apps-script/**'
+      - '.clasp.json'
+      - '.github/workflows/deploy-apps-script.yml'
+  # Manual on-demand deploy from the Actions tab (Run workflow → pick the branch).
+  # Uses the same secrets and the same push→deploy steps as the push trigger.
+  workflow_dispatch:
+
+# Never let two deploys race on the same Apps Script project.
+concurrency:
+  group: deploy-apps-script
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Verify required secrets are present (fail loudly if not)
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+          DEPLOYMENT_ID: ${{ secrets.DEPLOYMENT_ID }}
+        run: |
+          missing=0
+          if [ -z "$CLASPRC_JSON" ]; then
+            echo "::error::Missing secret CLASPRC_JSON. Run 'clasp login' locally and copy ~/.clasprc.json into the CLASPRC_JSON GitHub secret. See DEPLOY.md."
+            missing=1
+          fi
+          if [ -z "$DEPLOYMENT_ID" ]; then
+            echo "::error::Missing secret DEPLOYMENT_ID. Apps Script editor → Deploy → Manage deployments → copy the deployment ID (starts with 'AKfyc'). See DEPLOY.md."
+            missing=1
+          fi
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::Required deploy credentials are missing — aborting BEFORE touching the live deployment, so the /exec URL and its consumers are never disturbed by a broken run."
+            exit 1
+          fi
+
+      - name: Install clasp
+        # Pinned to 3.x to match the clasp version that produced the credential
+        # secret (clasp 3.x's ~/.clasprc.json is a different, per-user-keyed
+        # format that clasp 2.x cannot read). Keep this in lockstep with the
+        # local clasp version documented in DEPLOY.md.
+        run: npm install -g @google/clasp@3.3.0
+
+      - name: Write clasp credentials
+        env:
+          CLASPRC_JSON: ${{ secrets.CLASPRC_JSON }}
+        run: |
+          printf '%s' "$CLASPRC_JSON" > "$HOME/.clasprc.json"
+          # Validate it is real JSON so a truncated/corrupt secret fails here,
+          # loudly, instead of mid-deploy with a confusing clasp error.
+          node -e "JSON.parse(require('fs').readFileSync(process.env.HOME + '/.clasprc.json', 'utf8'))" \
+            || { echo "::error::CLASPRC_JSON is not valid JSON. Re-run 'clasp login' locally and re-copy the whole ~/.clasprc.json into the secret. See DEPLOY.md."; exit 1; }
+
+      - name: Push code to the Apps Script project
+        # -f overwrites the project's files (incl. the manifest) without prompting.
+        run: clasp push -f
+
+      - name: Redeploy the EXISTING deployment (new version, same /exec URL)
+        env:
+          DEPLOYMENT_ID: ${{ secrets.DEPLOYMENT_ID }}
+        # In clasp 3.x `deploy` is an alias of `create-deployment`; -i
+        # <deploymentId> updates that one deployment to a freshly-created
+        # version. It NEVER mints a new deployment, so the /exec URL is stable.
+        #
+        # IMPORTANT: clasp 3.x can print a rejection (e.g. "Invalid deployment
+        # ID") and STILL exit 0, which would make a no-op look green. So we
+        # require clasp's "Deployed …@<version>" success line and fail loudly
+        # otherwise — a silent non-deploy must never pass as success.
+        run: |
+          set +e
+          dep="$(printf '%s' "$DEPLOYMENT_ID" | tr -d '[:space:]')"   # strip stray whitespace/newlines
+          out="$(clasp deploy -i "$dep" -d "CI deploy ${GITHUB_SHA} on ${GITHUB_REF_NAME}" 2>&1)"
+          rc=$?
+          set -e
+          echo "$out"
+          if [ "$rc" -ne 0 ] || ! printf '%s\n' "$out" | grep -q 'Deployed'; then
+            echo "::error::clasp did NOT redeploy the existing deployment (no 'Deployed …@<version>' confirmation). The DEPLOYMENT_ID secret must be the EXISTING Web App deployment ID (starts with 'AKfyc') — not the /exec URL, the Script ID, or a value with quotes/whitespace. Existing deployments for this project:"
+            clasp list-deployments || true
+            exit 1
+          fi
+          echo "Redeploy confirmed — new version of the EXISTING deployment (same /exec URL)."
+
+      - name: Remove credentials from the runner
+        if: always()
+        run: rm -f "$HOME/.clasprc.json"

@@ -1,0 +1,60 @@
+name: Validate Workflows
+
+# CI check that every GitHub Actions workflow file is valid YAML. Runs on any
+# change under .github/workflows/** so a broken deploy workflow is caught in a
+# PR instead of silently never running on the deployed branch.
+
+on:
+  push:
+    paths:
+      - '.github/workflows/**'
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+
+permissions:
+  contents: read
+
+jobs:
+  yaml-valid:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install PyYAML
+        run: python3 -m pip install --quiet pyyaml
+
+      - name: Validate every workflow YAML parses
+        run: |
+          python3 - <<'PY'
+          import sys, glob, yaml
+          files = sorted(glob.glob('.github/workflows/*.yml') + glob.glob('.github/workflows/*.yaml'))
+          if not files:
+              print('No workflow files found — nothing to validate.')
+              sys.exit(0)
+          ok = True
+          for f in files:
+              try:
+                  with open(f, encoding='utf-8') as fh:
+                      doc = yaml.safe_load(fh)
+                  if not isinstance(doc, dict):
+                      ok = False
+                      print(f'FAIL {f}: top level is not a mapping')
+                      continue
+                  # `on:` is loaded as the boolean True under YAML 1.1 — accept either spelling.
+                  if 'jobs' not in doc or not (True in doc or 'on' in doc):
+                      ok = False
+                      print(f"FAIL {f}: missing required 'on:' and/or 'jobs:' keys")
+                      continue
+                  print(f'OK   {f}')
+              except yaml.YAMLError as e:
+                  ok = False
+                  print(f'FAIL {f}: {e}')
+          sys.exit(0 if ok else 1)
+          PY
