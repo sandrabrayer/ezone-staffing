@@ -1,22 +1,89 @@
-# E-ZONE Ecosystem Status — updated July 4, 2026
+# E-ZONE Ecosystem Status — updated July 22, 2026
 
-Add this file to the knowledge of EVERY E-Zone app Project (all six), replacing
-the July 3 version, so any future chat/session starts from the true state.
+Add this file to the knowledge of EVERY E-Zone app Project (all eight), replacing
+the July 15 version, so any future chat/session starts from the true state.
 
-## Deployment ground truth (verified July 4, 2026)
+## Deployment ground truth (branches re-verified July 22, 2026)
 
-| App | Repo | Railway deploys branch |
+| App | Repo | Deploys branch |
 |---|---|---|
 | Outpatient | ezone-outpatient | **claude/youthful-volta-laarnk** (UNIFIED — see below) |
 | Dashboard | E-Zone-Dashboard | claude/build-ezone-dashboard-QOg5s |
 | Therapists | ezone-therapists | claude/inspiring-tesla-jipobw |
 | Managers | ezone-managers | main |
 | Staffing | ezone-staffing | main |
+| Kitchen | ezone-kitchen | main |
+| Coordinators | ezone-coordinators | main |
 | Logistics | sandrabrayer-ezone-logistics | main |
 
 ⚠️ Verify the Railway-connected branch in the Railway dashboard before any work —
 it is NOT stored in the repo and has been silently switched before (July 3:
-outpatient was switched dashboard-hKjf9 → volta, orphaning a day of work).
+outpatient was switched dashboard-hKjf9 → volta, orphaning a day of work). The
+clasp CI deploy workflow, by contrast, DOES store the deployed branch (its
+`branches:` list) in the repo — see "Apps Script deployment" below.
+
+## Apps Script deployment — automatic via clasp CI (rollout COMPLETE, verified 22/07/2026)
+
+Every E-Zone app's Apps Script backend now auto-deploys from GitHub Actions via
+clasp. No more hand-pasting `Code.gs` into the editor. The rollout is complete
+and was verified green across all six apps on 22/07/2026 (ezone-therapists
+already ran this exact setup — it was the template the six were matched to).
+
+- **Automatic via GitHub Actions** — `.github/workflows/deploy-apps-script.yml`,
+  clasp pinned to `@google/clasp@3.3.0`, hardened workflow: it fails loudly and
+  early (before touching the live deployment) if a secret is missing or
+  `CLASPRC_JSON` isn't valid JSON, and it requires clasp's `Deployed …@<version>`
+  confirmation on the redeploy step — so a rejected deployment ID can never pass
+  as a green no-op. Runners use `actions/checkout@v5` + `actions/setup-node@v5`
+  (Node 24 native — clears the Node 20 deprecation warning) with the clasp
+  toolchain on `node-version: '22'`.
+- **Trigger** — a push/merge to the app's **deployed branch** that touches
+  `apps-script/**` (also `.clasp.json` or the workflow file itself). A
+  `workflow_dispatch` trigger allows manual on-demand runs from the Actions tab,
+  and a `concurrency` group serializes runs so two pushes can't race the same
+  deployment.
+- **Redeploys the EXISTING deployment (same `/exec` URL)** — `clasp push -f`
+  uploads `apps-script/**`, then `clasp deploy -i <DEPLOYMENT_ID>` republishes
+  the existing deployment as a NEW VERSION. The deployment ID is reused, so **the
+  `/exec` URL never changes** and no consumer (Railway `APPS_SCRIPT_URL`, sibling
+  apps) has to be re-pointed.
+- **Secrets (per repo)** — `CLASPRC_JSON` (clasp OAuth tokens from a local
+  `clasp login`) + `DEPLOYMENT_ID` (the existing Web App deployment ID, starts
+  with `AKfyc…`). Both live ONLY in GitHub Secrets, never in git; the workflow
+  `rm`s the runner's token copy at job end (`if: always()`).
+- **Token-refresh procedure** — clasp OAuth tokens expire / can be revoked. To
+  refresh: run `clasp login` locally (clasp 3.x) → copy the fresh
+  `~/.clasprc.json` → update the **`CLASPRC_JSON`** secret **in all six repos**
+  (the SAME value everywhere — they share one deploying Google account) → re-run
+  the failed deploy job. `DEPLOYMENT_ID` and the per-repo Script IDs are
+  unchanged.
+
+### Per-app deployed branch (verified 22/07/2026)
+
+| App | Repo | Deployed branch |
+|---|---|---|
+| Staffing | ezone-staffing | `main` |
+| Kitchen | ezone-kitchen | `main` |
+| Coordinators | ezone-coordinators | `main` |
+| Outpatient | ezone-outpatient | `claude/youthful-volta-laarnk` |
+| Logistics | sandrabrayer-ezone-logistics | `main` |
+| Dashboard | E-Zone-Dashboard | `claude/build-ezone-dashboard-QOg5s` |
+
+Each app's workflow `branches:` list and its `.clasp.json` Script ID are the
+source of truth for that app's deploy; the deployment ID lives only in the
+repo's `DEPLOYMENT_ID` secret. Setup, token-refresh, and the manual fallback are
+documented per repo in `DEPLOY.md`.
+
+### ⛔ OBSOLETE — manual copy-paste redeploy (superseded by clasp CI)
+
+The old manual procedure — open the Apps Script editor, paste `Code.gs`, Save,
+Deploy → Manage deployments → New version of the EXISTING deployment — is
+**SUPERSEDED** by the clasp CI above and must no longer be used for routine
+deploys. It is retained only as an emergency fallback (see each repo's
+`DEPLOY.md` → "Manual fallback", which uses clasp locally, not the editor). The
+CI path is the ecosystem's standard; hand-pasting was the ecosystem's most
+error-prone operation (accidental "New deployment" → the `/exec` URL changes →
+every consumer breaks).
 
 ## Outpatient: the two production lines are UNIFIED (July 4, PR #56)
 
@@ -93,10 +160,12 @@ outpatient was switched dashboard-hKjf9 → volta, orphaning a day of work).
 
 ## Known pitfalls (hard-won, extended July 4)
 
-- Apps Script NEVER auto-syncs from GitHub: paste Code.gs → Save → deploy a NEW
-  VERSION of the EXISTING deployment. Wrong choices seen this week: new
-  deployment (URL changes, consumers break) and access flipped off "Anyone"
-  (consumers get Google's HTML page → "Non-JSON from Apps Script").
+- **[OBSOLETE for routine deploys — Apps Script now deploys automatically via
+  clasp CI; see "Apps Script deployment" above. Kept as history / emergency
+  fallback only.]** Apps Script NEVER auto-syncs from GitHub: paste Code.gs →
+  Save → deploy a NEW VERSION of the EXISTING deployment. Wrong choices seen this
+  week: new deployment (URL changes, consumers break) and access flipped off
+  "Anyone" (consumers get Google's HTML page → "Non-JSON from Apps Script").
 - GitHub web editor nests paths when creating files inside a folder — type only
   the filename when already in the folder. Browser re-downloads add " (N)"
   suffixes — drag FOLDERS to the upload page, not loose files.

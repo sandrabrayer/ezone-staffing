@@ -178,6 +178,15 @@ therefore *is* the live Web App configuration:
 
 ## Manual fallback (if CI is unavailable)
 
+> ⛔ **Emergency use only — not the routine path.** As of the July 2026 clasp CI
+> rollout (verified 22/07/2026, ecosystem-wide), Apps Script deploys are
+> **automatic** on every merge to the deployed branch. Reach for this manual
+> `clasp` fallback only when CI itself is down. The old **copy-paste-into-the-
+> Apps-Script-editor** procedure is **OBSOLETE** — do not hand-paste `Code.gs`;
+> it is the ecosystem's most error-prone operation (accidental "New deployment"
+> changes the `/exec` URL and breaks every consumer). See
+> `EZONE-ECOSYSTEM-STATUS.md` → "Apps Script deployment".
+
 ```bash
 npm install -g @google/clasp@3.3.0
 clasp login
