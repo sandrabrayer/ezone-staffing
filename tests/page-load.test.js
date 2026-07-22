@@ -1034,3 +1034,93 @@ test('budgets: "כברירת מחדל" checkbox posts month=default', async () =
   assert.equal(posted.budget.month, 'default');
   dom.window.close();
 });
+
+// ---------- instructors budget split (מדריכים sub-row) ----------
+
+test('budgets: house with an instructors budget renders an indented מדריכים sub-row', async () => {
+  const { dom, errors } = loadPage();
+  const month = dom.window.EZONE_CALC.currentMonth();
+  await authAndBoot(dom, {
+    workers: [wk()],
+    assignments: [hourlyAsg()],   // מדריך/ה hourly, no actuals → 6000 estimate
+    budgets: [budgetRow({ house: 'ramot', month, amount: 100000, instructorsAmount: 50000 })],
+  });
+  const doc = dom.window.document;
+  const sub = doc.querySelector('.budget-table .bud-sub');
+  assert.ok(sub, 'expected an indented מדריכים sub-row');
+  assert.match(sub.textContent, /מדריכים/, 'sub-row labeled מדריכים');
+  assert.match(sub.textContent, /אומדן/, 'estimate instructor cost shows the אומדן badge');
+  dom.window.close();
+  assert.equal(errors.length, 0, 'no script errors');
+});
+
+test('budgets: house without an instructors budget renders no sub-row', async () => {
+  const { dom } = loadPage();
+  const month = dom.window.EZONE_CALC.currentMonth();
+  await authAndBoot(dom, {
+    workers: [wk()],
+    assignments: [hourlyAsg()],
+    budgets: [budgetRow({ house: 'ramot', month, amount: 100000 })], // total only
+  });
+  const doc = dom.window.document;
+  assert.equal(doc.querySelector('.budget-table .bud-sub'), null,
+    'no instructors budget → no מדריכים sub-row');
+  dom.window.close();
+});
+
+test('budgets: editor has a תקציב מדריכים input that prefills from the row', async () => {
+  const { dom } = loadPage();
+  const month = dom.window.EZONE_CALC.currentMonth();
+  await authAndBoot(dom, {
+    workers: [wk()],
+    assignments: [hourlyAsg()],
+    budgets: [budgetRow({ house: 'ramot', month, amount: 100000, instructorsAmount: 42000 })],
+  });
+  dom.window.openBudget('ramot');
+  const doc = dom.window.document;
+  const instrInput = doc.getElementById('bg_instructors');
+  assert.ok(instrInput, 'expected a bg_instructors input');
+  assert.equal(String(instrInput.value), '42000', 'prefilled from the existing instructors line');
+  dom.window.close();
+});
+
+test('budgets: saveBudget posts instructorsAmount alongside the total', async () => {
+  const { dom } = loadPage();
+  await authAndBoot(dom, { workers: [wk()], assignments: [hourlyAsg()] });
+  dom.window.go('ramot');
+  let posted = null;
+  dom.window.fetch = async (url, init) => {
+    posted = JSON.parse(init.body);
+    const budget = Object.assign({ id: 'budX' }, posted.budget);
+    return { ok: true, status: 200,
+      text: async () => JSON.stringify({ ok: true, budget }),
+      json: async () => ({ ok: true, budget }) };
+  };
+  dom.window.openBudget('ramot');
+  dom.window.document.getElementById('bg_amount').value = '120000';
+  dom.window.document.getElementById('bg_instructors').value = '48000';
+  await dom.window.saveBudget();
+  assert.equal(posted.budget.amount, 120000);
+  assert.equal(posted.budget.instructorsAmount, 48000);
+  dom.window.close();
+});
+
+test('budgets: blank instructors input posts instructorsAmount=null', async () => {
+  const { dom } = loadPage();
+  await authAndBoot(dom, { workers: [wk()], assignments: [hourlyAsg()] });
+  dom.window.go('ramot');
+  let posted = null;
+  dom.window.fetch = async (url, init) => {
+    posted = JSON.parse(init.body);
+    const budget = Object.assign({ id: 'budX' }, posted.budget);
+    return { ok: true, status: 200,
+      text: async () => JSON.stringify({ ok: true, budget }),
+      json: async () => ({ ok: true, budget }) };
+  };
+  dom.window.openBudget('ramot');
+  dom.window.document.getElementById('bg_amount').value = '120000';
+  dom.window.document.getElementById('bg_instructors').value = '';
+  await dom.window.saveBudget();
+  assert.equal(posted.budget.instructorsAmount, null);
+  dom.window.close();
+});

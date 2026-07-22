@@ -147,8 +147,13 @@ const HEADERS_MONTHLY_ACTUALS = [
   'id', 'assignment_id', 'month', 'actual_hours', 'actual_sessions',
   'note', 'created_at', 'updated_at',
 ];
+// APPEND-ONLY. `amount` is the house TOTAL budget; `instructors_amount`
+// (appended after the split) is the optional מדריך/ה sub-line — blank on
+// legacy rows written before the split, which read back as instructorsAmount
+// = null (total-only, backward compatible). New columns go at the END so the
+// position-based reader keeps mapping the original columns unchanged.
 const HEADERS_BUDGETS = [
-  'id', 'house', 'month', 'amount', 'created_at', 'updated_at',
+  'id', 'house', 'month', 'amount', 'created_at', 'updated_at', 'instructors_amount',
 ];
 
 // Legacy headers (only used by setupSheetsV3 to repair partial legacy state
@@ -618,12 +623,20 @@ function validateBudgetMonth(m) {
   return validateMonth(s, 'month');
 }
 
+// Mirror of validateBudget in lib/validate.js. `amount` is the house TOTAL;
+// `instructorsAmount` is the optional מדריך/ה sub-line — validated
+// non-negative + capped when present, null when blank. instructors > total
+// is intentionally NOT an error (independent lines, warn-only on the client).
 function validateBudget(b) {
   if (!b || typeof b !== 'object') throw httpError(400, 'budget required');
   if (!isHouse(b.house)) throw httpError(400, 'unknown house');
   const month = validateBudgetMonth(b.month);
   const amount = validateNonNegative(b.amount, 'amount', BUDGET_MAX, 0);
-  return { house: b.house, month: month, amount: amount };
+  var instructorsAmount = null;
+  if (b.instructorsAmount !== undefined && b.instructorsAmount !== null && b.instructorsAmount !== '') {
+    instructorsAmount = validateNonNegative(b.instructorsAmount, 'instructorsAmount', BUDGET_MAX, 0);
+  }
+  return { house: b.house, month: month, amount: amount, instructorsAmount: instructorsAmount };
 }
 
 // ---------- v3 readers ----------
@@ -812,8 +825,19 @@ function readBudgetsSafe() {
       amount: Number(r[3]) || 0,
       createdAt: cellToIso(r[4]),
       updatedAt: cellToIso(r[5]),
+      instructorsAmount: budgetInstructorsCell(r[6]),
     };
   });
+}
+
+// Instructors-budget cell → a non-negative number, or null when blank
+// (a legacy row written before the total/instructors split, or a house
+// budget with no instructors sub-line). NaN → null.
+function budgetInstructorsCell(cell) {
+  if (cell === '' || cell === null || cell === undefined) return null;
+  var n = Number(cell);
+  if (n !== n) return null;   // NaN
+  return n < 0 ? 0 : n;
 }
 
 // ---------- legacy readers (transition + migration) ----------
@@ -1445,10 +1469,16 @@ function getMonthlyActuals(body) {
 // place if the pair exists (amount + updated_at), otherwise appended.
 function setBudget(body) {
   const b = validateBudget(body.budget || {});
+  // Blank instructors line → empty cell (keeps legacy total-only rows blank).
+  const instrCell = (b.instructorsAmount === null || b.instructorsAmount === undefined)
+    ? '' : b.instructorsAmount;
   const lock = LockService.getScriptLock();
   lock.waitLock(15000);
   try {
     const sh = sheetByName(BUDGETS_TAB);
+    // Guarantee the appended instructors_amount column physically exists +
+    // carries its label before we write a full-width row into it.
+    ensureHeaders(sh, HEADERS_BUDGETS);
     const values = sh.getDataRange().getValues();
     let row = -1;
     for (let i = 1; i < values.length; i++) {
@@ -1464,15 +1494,17 @@ function setBudget(body) {
       const id = String(sh.getRange(row, 1).getValue());
       const createdAt = cellToIso(sh.getRange(row, 5).getValue()) || now;
       sh.getRange(row, 1, 1, HEADERS_BUDGETS.length).setValues([[
-        id, b.house, b.month, b.amount, createdAt, now,
+        id, b.house, b.month, b.amount, createdAt, now, instrCell,
       ]]);
       return { ok: true, budget: { id: id, house: b.house, month: b.month,
-        amount: b.amount, createdAt: createdAt, updatedAt: now }, updated: true };
+        amount: b.amount, instructorsAmount: b.instructorsAmount,
+        createdAt: createdAt, updatedAt: now }, updated: true };
     }
     const id = newId('bud');
-    sh.appendRow([id, b.house, b.month, b.amount, now, now]);
+    sh.appendRow([id, b.house, b.month, b.amount, now, now, instrCell]);
     return { ok: true, budget: { id: id, house: b.house, month: b.month,
-      amount: b.amount, createdAt: now, updatedAt: now }, updated: false };
+      amount: b.amount, instructorsAmount: b.instructorsAmount,
+      createdAt: now, updatedAt: now }, updated: false };
   } finally {
     lock.releaseLock();
   }
