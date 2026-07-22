@@ -12,6 +12,8 @@ const {
   pendingTerminations, pendingHouseCost,
   houseTotal, networkTotal,
   budgetForHouse, budgetVariance,
+  isInstructorRole, instructorAssignments, houseMonthlyInstructorsCost,
+  hasInstructorsBudget, instructorsBudgetForHouse, budgetWarning,
   assignmentsForWorker, workerTotalCost,
   activeAbsenceForWorker,
   networkAbsenceCoverageRows,
@@ -863,4 +865,121 @@ test('budgetVariance: zero budget is ok at 0 cost, over when cost > 0', () => {
   const over = budgetVariance(0, 5000);
   assert.equal(over.status, 'over');
   assert.equal(over.pct, Infinity);
+});
+
+// ---------- instructor (מדריך/ה) cost aggregation ----------
+
+const INSTR = 'מדריך/ה';
+
+test('isInstructorRole: exact match on מדריך/ה only', () => {
+  assert.equal(isInstructorRole(INSTR), true);
+  assert.equal(isInstructorRole(' מדריך/ה '), true);  // trimmed
+  assert.equal(isInstructorRole('מטפל/ת'), false);
+  assert.equal(isInstructorRole('אחות'), false);
+  assert.equal(isInstructorRole(''), false);
+  assert.equal(isInstructorRole(undefined), false);
+});
+
+test('instructorAssignments: only מדריך/ה rows at the house', () => {
+  const list = [
+    asg({ id: 'i1', house: 'ramot', role: INSTR }),
+    asg({ id: 'n1', house: 'ramot', role: 'אחות' }),
+    asg({ id: 'i2', house: 'asher', role: INSTR }),
+  ];
+  const got = instructorAssignments(list, 'ramot').map(a => a.id);
+  assert.deepEqual(got, ['i1']);
+});
+
+test('houseMonthlyInstructorsCost: sums fixed instructor salaries, not an estimate', () => {
+  const list = [
+    asg({ id: 'i1', house: 'ramot', role: INSTR, employmentType: 'full_time', salary: 12000 }),
+    asg({ id: 'i2', house: 'ramot', role: INSTR, employmentType: 'full_time', salary: 8000 }),
+    asg({ id: 'n1', house: 'ramot', role: 'אחות', employmentType: 'full_time', salary: 18000 }),
+  ];
+  const idx = indexActuals([]);
+  const r = houseMonthlyInstructorsCost(list, idx, 'ramot', MONTH);
+  assert.equal(r.cost, 20000);       // only the two instructors, nurse excluded
+  assert.equal(r.isEstimate, false); // full_time is month-invariant
+});
+
+test('houseMonthlyInstructorsCost: hourly instructor uses actuals when present', () => {
+  const list = [
+    asg({ id: 'h1', house: 'ramot', role: INSTR, employmentType: 'hourly',
+      salary: 0, hourlyRate: 60, estHours: 100 }),
+  ];
+  const idx = indexActuals([{ assignmentId: 'h1', month: MONTH, actualHours: 120 }]);
+  const r = houseMonthlyInstructorsCost(list, idx, 'ramot', MONTH);
+  assert.equal(r.cost, 7200);        // 60 × 120 actual, not the 6000 estimate
+  assert.equal(r.isEstimate, false);
+});
+
+test('houseMonthlyInstructorsCost: hourly instructor falls back to estimate (isEstimate=true)', () => {
+  const list = [
+    asg({ id: 'h1', house: 'ramot', role: INSTR, employmentType: 'hourly',
+      salary: 0, hourlyRate: 60, estHours: 100 }),
+  ];
+  const idx = indexActuals([]);     // no actuals for the month
+  const r = houseMonthlyInstructorsCost(list, idx, 'ramot', MONTH);
+  assert.equal(r.cost, 6000);        // estimate 60 × 100
+  assert.equal(r.isEstimate, true);  // flagged so the UI shows אומדן
+});
+
+test('houseMonthlyInstructorsCost: any estimate fallback flags the whole total', () => {
+  const list = [
+    asg({ id: 'f1', house: 'ramot', role: INSTR, employmentType: 'full_time', salary: 10000 }),
+    asg({ id: 'h1', house: 'ramot', role: INSTR, employmentType: 'hourly',
+      salary: 0, hourlyRate: 50, estHours: 40 }),   // no actuals → estimate 2000
+  ];
+  const idx = indexActuals([]);
+  const r = houseMonthlyInstructorsCost(list, idx, 'ramot', MONTH);
+  assert.equal(r.cost, 12000);       // 10000 + 2000
+  assert.equal(r.isEstimate, true);  // the hourly leg fell back
+});
+
+test('houseMonthlyInstructorsCost: no instructors → zero, not an estimate', () => {
+  const list = [asg({ id: 'n1', house: 'ramot', role: 'אחות', salary: 18000 })];
+  const r = houseMonthlyInstructorsCost(list, indexActuals([]), 'ramot', MONTH);
+  assert.deepEqual(r, { cost: 0, isEstimate: false });
+});
+
+// ---------- instructors budget resolution + warning ----------
+
+test('instructorsBudgetForHouse: specific month wins, blank falls through to default', () => {
+  const budgets = [
+    { id: 'b1', house: 'ramot', month: 'default', amount: 200000, instructorsAmount: 60000 },
+    { id: 'b2', house: 'ramot', month: '2026-07', amount: 210000, instructorsAmount: 72744 },
+    { id: 'b3', house: 'asher', month: 'default', amount: 190000, instructorsAmount: null },
+    { id: 'b4', house: 'ofroni', month: 'default', amount: 180000 }, // no instructors field
+  ];
+  assert.equal(instructorsBudgetForHouse(budgets, 'ramot', '2026-07'), 72744); // specific
+  assert.equal(instructorsBudgetForHouse(budgets, 'ramot', '2026-08'), 60000); // default
+  assert.equal(instructorsBudgetForHouse(budgets, 'asher', '2026-07'), null);  // blank line
+  assert.equal(instructorsBudgetForHouse(budgets, 'ofroni', '2026-07'), null); // missing line
+  assert.equal(instructorsBudgetForHouse(budgets, 'rehab', '2026-07'), null);  // no house
+});
+
+test('instructorsBudgetForHouse: month-specific total with blank instructors falls back to default instructors', () => {
+  const budgets = [
+    { id: 'b1', house: 'ramot', month: 'default', amount: 200000, instructorsAmount: 60000 },
+    { id: 'b2', house: 'ramot', month: '2026-07', amount: 210000, instructorsAmount: null },
+  ];
+  assert.equal(instructorsBudgetForHouse(budgets, 'ramot', '2026-07'), 60000);
+});
+
+test('hasInstructorsBudget: only a finite non-blank value counts', () => {
+  assert.equal(hasInstructorsBudget({ instructorsAmount: 0 }), true);
+  assert.equal(hasInstructorsBudget({ instructorsAmount: 60000 }), true);
+  assert.equal(hasInstructorsBudget({ instructorsAmount: null }), false);
+  assert.equal(hasInstructorsBudget({ instructorsAmount: '' }), false);
+  assert.equal(hasInstructorsBudget({}), false);
+  assert.equal(hasInstructorsBudget(null), false);
+});
+
+test('budgetWarning: warns only when instructors exceed total; blank never warns', () => {
+  assert.equal(budgetWarning(200000, 72744), null);        // within
+  assert.equal(budgetWarning(200000, 200000), null);       // equal is fine
+  assert.equal(budgetWarning(200000, null), null);         // blank line
+  assert.equal(budgetWarning(200000, ''), null);
+  assert.ok(budgetWarning(50000, 60000));                  // instructors > total
+  assert.match(budgetWarning(50000, 60000), /מדריכים/);
 });

@@ -579,6 +579,16 @@ tbody tr:hover{
 .budget-table .bud-house{font-weight:700}
 .budget-table .bud-summary td{border-top:2px solid var(--line-strong);font-weight:700}
 .budget-table .bud-none-txt{color:var(--muted)}
+/* Indented "מדריכים" sub-row beneath a house row: the instructors budget
+   line. Lighter than the house total row, with an indented, un-bolded label
+   so it reads as a child of the house above it. */
+.budget-table .bud-sub td{
+  background:var(--panel-2, rgba(127,127,127,.05));
+  font-size:12px;border-bottom:1px solid var(--line);
+}
+.budget-table .bud-sub .bud-sub-label{
+  font-weight:600;color:var(--muted);padding-inline-start:26px;
+}
 /* Checkbox line in the budget editor. */
 .checkline{display:flex;align-items:center;gap:8px;font-weight:600;cursor:pointer}
 .checkline input{width:auto;margin:0}
@@ -1149,8 +1159,14 @@ tbody tr:hover{
     </div>
     <div class="modal-body">
       <div class="field">
-        <label>סכום התקציב (₪)</label>
-        <input id="bg_amount" type="number" min="0" step="100" inputmode="numeric" placeholder="לדוגמה 120000"/>
+        <label>תקציב כולל ₪</label>
+        <input id="bg_amount" type="number" min="0" step="100" inputmode="numeric" placeholder="לדוגמה 120000" oninput="onBudgetInput()"/>
+      </div>
+      <div class="field">
+        <label>תקציב מדריכים ₪</label>
+        <input id="bg_instructors" type="number" min="0" step="100" inputmode="numeric" placeholder="לא חובה" oninput="onBudgetInput()"/>
+        <div class="hint">שכר המדריכים בלבד. השאירי ריק אם אין תקציב מדריכים נפרד.</div>
+        <div class="hint bud-warn" id="bg_instructors_warn" style="display:none"></div>
       </div>
       <div class="field">
         <label class="checkline">
@@ -1354,7 +1370,10 @@ const {
   monthlyAssignmentCost: calcMonthlyAssignmentCost,
   houseMonthlyTotal: calcHouseMonthlyTotal,
   networkMonthlyTotal: calcNetworkMonthlyTotal,
+  houseMonthlyInstructorsCost: calcHouseMonthlyInstructorsCost,
   budgetForHouse: calcBudgetForHouse,
+  instructorsBudgetForHouse: calcInstructorsBudgetForHouse,
+  budgetWarning: calcBudgetWarning,
   budgetVariance: calcBudgetVariance,
   todayStr: calcTodayStr,
   isAbsenceActive: calcIsAbsenceActive,
@@ -1649,9 +1668,34 @@ function budgetLineHtml(houseId, cost){
   return `<div class="bud-line ${meta.cls}">תקציב ${fmt(v.budget)} · ${varianceText(v)} · ${pctText(v.pct)}</div>`;
 }
 
+// Indented "מדריכים" sub-row for a house, shown only when that house has an
+// instructors budget set. Instructor cost = the month-aware sum of the
+// house's מדריך/ה assignment costs (actuals where present, estimate + אומדן
+// badge otherwise). Same columns as the house row: budget, cost, יתרה/חריגה,
+// ניצול %, status. Returns '' when the house has no instructors budget.
+function instructorsSubRow(houseId, month){
+  const instBudget = calcInstructorsBudgetForHouse(BUDGETS, houseId, month);
+  if (instBudget === null) return '';
+  const ic = calcHouseMonthlyInstructorsCost(ASSIGNMENTS, ACTUALS_INDEX, houseId, month);
+  const v = calcBudgetVariance(instBudget, ic.cost);
+  const meta = BUDGET_STATUS[v.status];
+  const costCell = `${fmt(ic.cost)}${ic.isEstimate ? estBadge() : ''}`;
+  return `
+    <tr class="bud-sub ${meta.cls}-row">
+      <td class="bud-sub-label">מדריכים</td>
+      <td class="money">${fmt(v.budget)}</td>
+      <td class="money">${costCell}</td>
+      <td class="money ${meta.cls}">${varianceText(v)}</td>
+      <td class="money ${meta.cls}">${pctText(v.pct)}</td>
+      <td><span class="bud-dot ${meta.cls}" title="${escapeHtml(meta.label)}"></span>${escapeHtml(meta.label)}</td>
+      <td></td>
+    </tr>`;
+}
+
 // Central "תקציב מול עלות" section: one row per house (budget, cost,
 // variance ₪, utilization %, status) with a per-house edit control, plus a
-// combined summary row across houses that have a budget set.
+// combined summary row across houses that have a budget set. Houses with an
+// instructors budget get an indented "מדריכים" sub-row beneath them.
 function budgetSummarySection(today){
   const month = ensureMonth();
   let sumBudget = 0, sumCostBudgeted = 0, anyBudget = false;
@@ -1661,7 +1705,7 @@ function budgetSummarySection(today){
     const v = calcBudgetVariance(budget, cost);
     const meta = BUDGET_STATUS[v.status];
     if (budget !== null){ anyBudget = true; sumBudget += v.budget; sumCostBudgeted += cost; }
-    return `
+    const houseRow = `
     <tr class="${meta.cls}-row">
       <td class="bud-house">${escapeHtml(h.name)}</td>
       <td class="money">${budget === null ? '<span class="bud-none-txt">—</span>' : fmt(v.budget)}</td>
@@ -1671,6 +1715,7 @@ function budgetSummarySection(today){
       <td><span class="bud-dot ${meta.cls}" title="${escapeHtml(meta.label)}"></span>${escapeHtml(meta.label)}</td>
       <td><button class="btn btn-sm btn-accent-hover" onclick="openBudget('${escapeHtml(h.id)}')">עריכת תקציב</button></td>
     </tr>`;
+    return houseRow + instructorsSubRow(h.id, month);
   }).join('');
 
   const cv = calcBudgetVariance(anyBudget ? sumBudget : null, sumCostBudgeted);
@@ -1728,10 +1773,25 @@ function openBudget(houseId){
   const def = BUDGETS.find(b => b.house === houseId && b.month === 'default');
   const cur = specific || def || null;
   document.getElementById('bg_amount').value = cur ? cur.amount : '';
+  const instr = cur && cur.instructorsAmount != null ? cur.instructorsAmount : '';
+  document.getElementById('bg_instructors').value = instr;
   document.getElementById('bg_default').checked = false;
+  onBudgetInput();
   document.getElementById('budgetOverlay').classList.add('show');
   const inp = document.getElementById('bg_amount');
   if (inp && inp.focus) inp.focus();
+}
+
+// Live, non-blocking warning: an instructors budget above the total is
+// allowed (independent lines) but flagged so it isn't a silent mistake.
+function onBudgetInput(){
+  const el = document.getElementById('bg_instructors_warn');
+  if (!el) return;
+  const amount = document.getElementById('bg_amount').value;
+  const instr = document.getElementById('bg_instructors').value;
+  const w = calcBudgetWarning(amount, instr === '' ? null : instr);
+  if (w){ el.textContent = w; el.style.display = ''; }
+  else { el.textContent = ''; el.style.display = 'none'; }
 }
 function closeBudget(){
   document.getElementById('budgetOverlay').classList.remove('show');
@@ -1741,13 +1801,23 @@ async function saveBudget(){
   if (!editingBudget) return;
   const amount = Number(document.getElementById('bg_amount').value);
   if (!Number.isFinite(amount) || amount < 0){ toast('יש להזין סכום תקין', true); return; }
+  // Instructors budget is optional. Blank → null. When present it must be a
+  // non-negative number; an instructors budget above the total is allowed
+  // (warned live via onBudgetInput), so it is NOT blocked here.
+  const instrRaw = document.getElementById('bg_instructors').value;
+  let instructorsAmount = null;
+  if (String(instrRaw).trim() !== ''){
+    const n = Number(instrRaw);
+    if (!Number.isFinite(n) || n < 0){ toast('תקציב מדריכים לא תקין', true); return; }
+    instructorsAmount = Math.round(n);
+  }
   const asDefault = document.getElementById('bg_default').checked;
   const month = asDefault ? 'default' : ensureMonth();
   setBusy('budgetSaveBtn', true, 'שומר…');
   try {
     const res = await doAction({
       action: 'setBudget',
-      budget: { house: editingBudget.house, month, amount: Math.round(amount) },
+      budget: { house: editingBudget.house, month, amount: Math.round(amount), instructorsAmount },
     });
     if (res && res.budget) upsertById(BUDGETS, res.budget);
     closeBudget();

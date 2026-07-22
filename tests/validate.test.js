@@ -780,7 +780,7 @@ test('validateAction: upsertMonthlyActuals / getMonthlyActuals', () => {
 
 test('validateBudget: house + month/default + non-negative amount', () => {
   const b = validateBudget({ house: 'ramot', month: '2026-07', amount: 120000 });
-  assert.deepEqual(b, { house: 'ramot', month: '2026-07', amount: 120000 });
+  assert.deepEqual(b, { house: 'ramot', month: '2026-07', amount: 120000, instructorsAmount: null });
 
   const def = validateBudget({ house: 'ramot', month: 'default', amount: 100000 });
   assert.equal(def.month, 'default');
@@ -793,10 +793,33 @@ test('validateBudget: house + month/default + non-negative amount', () => {
   assert.throws(() => validateBudget({ house: 'ramot', month: 'default', amount: -1 }), /non-negative/);
 });
 
+test('validateBudget: instructorsAmount is optional, blank → null', () => {
+  assert.equal(validateBudget({ house: 'ramot', month: 'default', amount: 100000 }).instructorsAmount, null);
+  assert.equal(validateBudget({ house: 'ramot', month: 'default', amount: 100000, instructorsAmount: null }).instructorsAmount, null);
+  assert.equal(validateBudget({ house: 'ramot', month: 'default', amount: 100000, instructorsAmount: '' }).instructorsAmount, null);
+  assert.equal(validateBudget({ house: 'ramot', month: 'default', amount: 100000, instructorsAmount: 0 }).instructorsAmount, 0);
+});
+
+test('validateBudget: instructorsAmount validated non-negative and capped', () => {
+  assert.equal(validateBudget({ house: 'ramot', month: 'default', amount: 200000, instructorsAmount: 60000 }).instructorsAmount, 60000);
+  assert.equal(validateBudget({ house: 'ramot', month: 'default', amount: 200000, instructorsAmount: 6.6 }).instructorsAmount, 7);
+  assert.equal(validateBudget({ house: 'ramot', month: 'default', amount: 200000, instructorsAmount: BUDGET_MAX * 10 }).instructorsAmount, BUDGET_MAX);
+  assert.throws(() => validateBudget({ house: 'ramot', month: 'default', amount: 200000, instructorsAmount: -1 }), /non-negative/);
+});
+
+test('validateBudget: instructors > total is accepted, not an error (warn-only)', () => {
+  const b = validateBudget({ house: 'ramot', month: 'default', amount: 50000, instructorsAmount: 60000 });
+  assert.equal(b.amount, 50000);
+  assert.equal(b.instructorsAmount, 60000);
+});
+
 test('validateAction: setBudget / getBudgets', () => {
   const s = validateAction({ action: 'setBudget', budget: { house: 'ramot', month: '2026-07', amount: 90000 } });
   assert.equal(s.action, 'setBudget');
   assert.equal(s.budget.amount, 90000);
+  assert.equal(s.budget.instructorsAmount, null);
+  const s2 = validateAction({ action: 'setBudget', budget: { house: 'ramot', month: '2026-07', amount: 90000, instructorsAmount: 30000 } });
+  assert.equal(s2.budget.instructorsAmount, 30000);
   const g = validateAction({ action: 'getBudgets' });
   assert.equal(g.action, 'getBudgets');
 });
