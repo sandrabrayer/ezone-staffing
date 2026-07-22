@@ -559,12 +559,13 @@ tbody tr:hover{
 .bud-warn{color:#EF9F27}
 .bud-over{color:#E0533D}
 .bud-none{color:var(--muted)}
-/* Compact read-only budget line on house cards / house view. */
-.bud-line{font-size:11px;font-weight:700;margin-top:6px}
+/* Compact read-only budget line on house cards / house view. Sized for
+   at-a-glance readability; colored green/red by budget compliance. */
+.bud-line{font-size:14px;font-weight:600;margin-top:6px}
 .house-budget{
   display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:14px;
 }
-.house-budget .bud-line{margin-top:0;font-size:13px}
+.house-budget .bud-line{margin-top:0}
 /* Status dot in the summary table. */
 .bud-dot{
   display:inline-block;width:9px;height:9px;border-radius:50%;
@@ -1656,16 +1657,25 @@ function varianceText(v){
   return v.variance >= 0 ? `יתרה ${fmt(v.variance)}` : `חריגה ${fmt(-v.variance)}`;
 }
 
+// Binary budget-compliance color for the read-only budget line and the
+// מדריכים sub-row: green when cost is within budget, red when over — so an
+// overage reads red end-to-end (percent included), not just in parts. This
+// is deliberately coarser than BUDGET_STATUS (which keeps the ok/warn/over
+// gradient for the status column); any overage here is red.
+function complianceCls(v){
+  if (v.status === 'none') return 'bud-none';
+  return v.variance < 0 ? 'bud-over' : 'bud-ok';
+}
+
 // Compact read-only budget line for a house card / house view. `cost` is
 // the already-computed month total for the house.
 function budgetLineHtml(houseId, cost){
   const budget = calcBudgetForHouse(BUDGETS, houseId, ensureMonth());
   const v = calcBudgetVariance(budget, cost);
-  const meta = BUDGET_STATUS[v.status];
   if (v.status === 'none'){
-    return `<div class="bud-line ${meta.cls}">תקציב: לא הוגדר</div>`;
+    return `<div class="bud-line bud-none">תקציב: לא הוגדר</div>`;
   }
-  return `<div class="bud-line ${meta.cls}">תקציב ${fmt(v.budget)} · ${varianceText(v)} · ${pctText(v.pct)}</div>`;
+  return `<div class="bud-line ${complianceCls(v)}">תקציב ${fmt(v.budget)} · ${varianceText(v)} · ${pctText(v.pct)}</div>`;
 }
 
 // Indented "מדריכים" sub-row for a house, shown only when that house has an
@@ -1679,14 +1689,15 @@ function instructorsSubRow(houseId, month){
   const ic = calcHouseMonthlyInstructorsCost(ASSIGNMENTS, ACTUALS_INDEX, houseId, month);
   const v = calcBudgetVariance(instBudget, ic.cost);
   const meta = BUDGET_STATUS[v.status];
+  const cCls = complianceCls(v);
   const costCell = `${fmt(ic.cost)}${ic.isEstimate ? estBadge() : ''}`;
   return `
-    <tr class="bud-sub ${meta.cls}-row">
+    <tr class="bud-sub ${cCls}-row">
       <td class="bud-sub-label">מדריכים</td>
-      <td class="money">${fmt(v.budget)}</td>
-      <td class="money">${costCell}</td>
-      <td class="money ${meta.cls}">${varianceText(v)}</td>
-      <td class="money ${meta.cls}">${pctText(v.pct)}</td>
+      <td class="money ${cCls}">${fmt(v.budget)}</td>
+      <td class="money ${cCls}">${costCell}</td>
+      <td class="money ${cCls}">${varianceText(v)}</td>
+      <td class="money ${cCls}">${pctText(v.pct)}</td>
       <td><span class="bud-dot ${meta.cls}" title="${escapeHtml(meta.label)}"></span>${escapeHtml(meta.label)}</td>
       <td></td>
     </tr>`;

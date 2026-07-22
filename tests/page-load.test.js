@@ -967,6 +967,45 @@ test('budgets: cost over budget by >10% shows the red (bud-over) status', async 
   dom.window.close();
 });
 
+test('budgets: house card budget line reads red end-to-end on any overage', async () => {
+  const { dom } = loadPage();
+  const month = dom.window.EZONE_CALC.currentMonth();
+  await authAndBoot(dom, {
+    workers: [wk()],
+    assignments: [hourlyAsg()],                        // 6000 estimate
+    budgets: [budgetRow({ house: 'ramot', month, amount: 5900 })],  // over by <10%
+  });
+  const doc = dom.window.document;
+  // The ramot card is the one carrying a real budget line (others show
+  // "תקציב: לא הוגדר").
+  const cardLine = [...doc.querySelectorAll('.house-grid .bud-line')]
+    .find(el => /יתרה|חריגה/.test(el.textContent));
+  assert.ok(cardLine, 'expected a house-card budget line');
+  // A small overage is still red (binary compliance), not amber, and the
+  // whole line carries the color — percent included.
+  assert.ok(cardLine.classList.contains('bud-over'),
+    'even a small overage colors the entire card line red');
+  assert.ok(!cardLine.classList.contains('bud-warn') && !cardLine.classList.contains('bud-ok'),
+    'no amber/green split — the line is uniformly red');
+  dom.window.close();
+});
+
+test('budgets: house card budget line reads green when within budget', async () => {
+  const { dom } = loadPage();
+  const month = dom.window.EZONE_CALC.currentMonth();
+  await authAndBoot(dom, {
+    workers: [wk()],
+    assignments: [hourlyAsg()],                        // 6000 estimate
+    budgets: [budgetRow({ house: 'ramot', month, amount: 100000 })],
+  });
+  const doc = dom.window.document;
+  const cardLine = [...doc.querySelectorAll('.house-grid .bud-line')]
+    .find(el => /יתרה|חריגה/.test(el.textContent));
+  assert.ok(cardLine, 'expected a house-card budget line');
+  assert.ok(cardLine.classList.contains('bud-ok'), 'within budget colors the card line green');
+  dom.window.close();
+});
+
 test('budgets: house view shows a budget line + edit control', async () => {
   const { dom } = loadPage();
   const month = dom.window.EZONE_CALC.currentMonth();
@@ -1065,6 +1104,42 @@ test('budgets: house without an instructors budget renders no sub-row', async ()
   const doc = dom.window.document;
   assert.equal(doc.querySelector('.budget-table .bud-sub'), null,
     'no instructors budget → no מדריכים sub-row');
+  dom.window.close();
+});
+
+test('budgets: מדריכים sub-row reads red when instructor cost exceeds its budget', async () => {
+  const { dom } = loadPage();
+  const month = dom.window.EZONE_CALC.currentMonth();
+  await authAndBoot(dom, {
+    workers: [wk()],
+    assignments: [hourlyAsg()],   // מדריך/ה, 6000 estimate
+    budgets: [budgetRow({ house: 'ramot', month, amount: 100000, instructorsAmount: 5000 })],
+  });
+  const doc = dom.window.document;
+  const sub = doc.querySelector('.budget-table .bud-sub');
+  assert.ok(sub, 'expected an indented מדריכים sub-row');
+  // The whole numeric line — budget, cost, variance and percent — is red.
+  assert.equal(sub.querySelectorAll('.money.bud-over').length, 4,
+    'every numeric cell in the sub-row is red when over the instructors budget');
+  assert.equal(sub.querySelectorAll('.money.bud-warn').length, 0, 'no amber cells');
+  // אומדן badge behavior unchanged.
+  assert.match(sub.textContent, /אומדן/, 'estimate instructor cost still shows the אומדן badge');
+  dom.window.close();
+});
+
+test('budgets: מדריכים sub-row reads green when within its budget', async () => {
+  const { dom } = loadPage();
+  const month = dom.window.EZONE_CALC.currentMonth();
+  await authAndBoot(dom, {
+    workers: [wk()],
+    assignments: [hourlyAsg()],   // 6000 estimate
+    budgets: [budgetRow({ house: 'ramot', month, amount: 100000, instructorsAmount: 50000 })],
+  });
+  const doc = dom.window.document;
+  const sub = doc.querySelector('.budget-table .bud-sub');
+  assert.ok(sub, 'expected an indented מדריכים sub-row');
+  assert.equal(sub.querySelectorAll('.money.bud-ok').length, 4,
+    'every numeric cell in the sub-row is green when within the instructors budget');
   dom.window.close();
 });
 
