@@ -1,7 +1,7 @@
 # E-ZONE Ecosystem Status — updated July 22, 2026
 
-Add this file to the knowledge of EVERY E-Zone app Project (all six), replacing
-the July 4 version, so any future chat/session starts from the true state.
+Add this file to the knowledge of EVERY E-Zone app Project (all eight), replacing
+the July 15 version, so any future chat/session starts from the true state.
 
 ## Deployment ground truth (branches re-verified July 22, 2026)
 
