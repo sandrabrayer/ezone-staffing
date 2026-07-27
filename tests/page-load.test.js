@@ -228,6 +228,40 @@ test('every view (incl. archive) is gated by the PIN — no token shows the PIN 
   assert.equal(errors.length, 0, errors.length ? JSON.stringify(errors) : '');
 });
 
+// ---------- topbar brand tests ----------
+// The topbar brand dropped the "E-ZONE" wordmark: it is now the E-ZONE
+// letter-E emblem (gold monogram, existing accent tokens — no new asset)
+// followed by the app's Hebrew name only. These pin the new structure so
+// the wordmark can't drift back in and the emblem can't get lost.
+
+test('topbar brand shows the letter-E emblem + Hebrew name, and no "E-ZONE" wordmark', async () => {
+  const { dom, errors } = loadPage();
+  // The brand markup is static in the DOM regardless of auth state.
+  const brand = dom.window.document.querySelector('.topbar .brand');
+  assert.ok(brand, 'topbar should contain a .brand element');
+
+  // The "E-ZONE" wordmark is gone from the topbar brand.
+  assert.ok(!/E-?ZONE/i.test(brand.textContent),
+    'topbar brand must not render the "E-ZONE" wordmark anymore');
+
+  // Emblem: the letter-E monogram, marked decorative so screen readers
+  // announce the Hebrew name (the accessible label), not a stray "E".
+  const emblem = brand.querySelector('.brand-emblem');
+  assert.ok(emblem, 'brand should render a .brand-emblem');
+  assert.equal(emblem.textContent.trim(), 'E', 'emblem is the letter-E monogram');
+  assert.equal(emblem.getAttribute('aria-hidden'), 'true',
+    'emblem is decorative — aria-hidden so the name is the accessible label');
+
+  // Name: the app's Hebrew name only.
+  const name = brand.querySelector('.brand-name');
+  assert.ok(name, 'brand should render a .brand-name');
+  assert.equal(name.textContent.trim(), 'ניהול כוח אדם',
+    'brand name is the app\'s Hebrew name only');
+
+  dom.window.close();
+  assert.equal(errors.length, 0, errors.length ? JSON.stringify(errors) : '');
+});
+
 // ---------- dashboard join view ("היעדרויות פעילות ברשת") ----------
 // Pins: (1) the section renders one row per active absence; (2) linked
 // rows show the covering worker + the arrow; (3) orphan rows get the
