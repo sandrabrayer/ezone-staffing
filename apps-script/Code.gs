@@ -11,6 +11,9 @@
    Script properties written by this script:
      - V3_MIGRATION_DONE = 'true' once migrateToV3 has succeeded.
        Cleared by rollbackV3.
+     - DIGEST_SHEET_ID = id of the standalone NewGuides digest
+       spreadsheet this app creates and solely writes. Set once by
+       setupDigestSpreadsheet(). See DIGEST-CONTRACT.md.
 
    Data model (v3) — see CHANGELOG.md and MIGRATION.md.
 
@@ -267,26 +270,33 @@ function doGet(e) {
 function doPost(e) {
   return handle(e, function () {
     const body = parseBody(e);
+    let result;
     switch (body.action) {
-      case 'createWorker':         return createWorker(body);
-      case 'updateWorker':         return updateWorker(body);
-      case 'deleteWorker':         return deleteWorker(body);
-      case 'addAssignment':        return addAssignment(body);
-      case 'updateAssignment':     return updateAssignment(body);
-      case 'deleteAssignment':     return deleteAssignment(body);
-      case 'moveAssignment':       return moveAssignment(body);
-      case 'terminateAssignment':  return terminateAssignment(body);
-      case 'logAbsence':           return logAbsence(body);
-      case 'endAbsence':           return endAbsence(body);
-      case 'deleteAbsence':        return deleteAbsence(body);
-      case 'addCoverage':          return addCoverage(body);
-      case 'deleteCoverage':       return deleteCoverage(body);
-      case 'upsertMonthlyActuals': return upsertMonthlyActuals(body);
+      case 'createWorker':         result = createWorker(body); break;
+      case 'updateWorker':         result = updateWorker(body); break;
+      case 'deleteWorker':         result = deleteWorker(body); break;
+      case 'addAssignment':        result = addAssignment(body); break;
+      case 'updateAssignment':     result = updateAssignment(body); break;
+      case 'deleteAssignment':     result = deleteAssignment(body); break;
+      case 'moveAssignment':       result = moveAssignment(body); break;
+      case 'terminateAssignment':  result = terminateAssignment(body); break;
+      case 'logAbsence':           result = logAbsence(body); break;
+      case 'endAbsence':           result = endAbsence(body); break;
+      case 'deleteAbsence':        result = deleteAbsence(body); break;
+      case 'addCoverage':          result = addCoverage(body); break;
+      case 'deleteCoverage':       result = deleteCoverage(body); break;
+      case 'upsertMonthlyActuals': result = upsertMonthlyActuals(body); break;
       case 'getMonthlyActuals':    return getMonthlyActuals(body);
-      case 'setBudget':            return setBudget(body);
+      case 'setBudget':            result = setBudget(body); break;
       case 'getBudgets':           return getBudgets(body);
       default: throw httpError(400, 'unknown action');
     }
+    // Rebuild the NewGuides digest after any write that can change a guide's
+    // name / house / role / start date. Best-effort — a digest failure must
+    // never fail the user's mutation (see rebuildDigestSafe). The periodic
+    // trigger installed by installDigestTrigger() is the backstop.
+    if (DIGEST_REBUILD_ACTIONS.indexOf(body.action) >= 0) rebuildDigestSafe();
+    return result;
   });
 }
 
@@ -2055,4 +2065,253 @@ function active(startDate, endDate, today) {
 
 function datesOverlap(aStart, aEnd, bStart, bEnd) {
   return aStart <= bEnd && bStart <= aEnd;
+}
+
+/* ============================================================
+   Digest export — the "NewGuides" tab
+   ------------------------------------------------------------
+   A read-only feed for the coordinators app (same pattern proven
+   by logistics + kitchen). This app is the SOLE writer of a small,
+   standalone spreadsheet it creates and owns; the coordinators app
+   only reads it. See DIGEST-CONTRACT.md at the repo root for the
+   frozen schema.
+
+   What it contains: one row per (guide/employee × house) whose
+   start date falls in the current week or the next two weeks — the
+   arrivals a house coordinator should prepare for.
+
+   HARD RULE: NO financial fields. Only names, dates, and roles are
+   ever read or written here — never salary, cost, rate, or budget.
+   ============================================================ */
+
+// The digest spreadsheet id is stored here (script property), written once
+// by setupDigestSpreadsheet(). Kept separate from the main SHEET_ID so this
+// app can be the digest's sole writer without touching the roster book.
+const DIGEST_SHEET_ID_PROP = 'DIGEST_SHEET_ID';
+
+// The single tab in the digest spreadsheet.
+const DIGEST_TAB = 'NewGuides';
+
+// FROZEN CONTRACT — append-only. Never reorder, rename, or remove a column;
+// any new column goes on the END only (the coordinators app maps by header).
+// NO financial fields, ever. See DIGEST-CONTRACT.md.
+//   house      — canonical house id (see DIGEST_HOUSE_CANONICAL)
+//   guideName  — the guide/employee display name
+//   startDate  — YYYY-MM-DD, the date the guide is placed at the house
+//   role       — Hebrew role text, optional (may be '')
+//   updatedAt  — ISO 8601 UTC, when this digest row was last rebuilt
+const DIGEST_HEADERS = ['house', 'guideName', 'startDate', 'role', 'updatedAt'];
+
+// The digest spreadsheet is shared read-only with this address.
+const DIGEST_READER_EMAIL = 'brayersandra@gmail.com';
+
+// Internal house id → canonical digest house id. Ids NOT in this map are
+// EXCLUDED from the digest: `pardes` (איזון רעננה - פרדס / "הפרדס") and
+// `sde_eliezer` (שדה אליעזר) are pre-opening houses, and `hq` (מטה) is the
+// admin pseudo-house — none is a physical house a coordinator prepares
+// arrivals for.
+const DIGEST_HOUSE_CANONICAL = {
+  ramot:  'ramot',    // רמות השבים
+  asher:  'raanana',  // רעננה אשר
+  ofroni: 'efroni',   // קיסריה עפרוני
+  rehab:  'rehab',    // קיסריה ריהאב
+};
+
+// How many full weeks past the current week the look-ahead window covers.
+const DIGEST_WEEKS_AHEAD = 2;
+
+// POST actions that can change a guide's name / house / role / start date and
+// therefore require a digest rebuild. Read-only + purely-financial actions
+// (getMonthlyActuals, getBudgets, setBudget, upsertMonthlyActuals, absence /
+// coverage actions) are intentionally absent — they never touch the digest.
+const DIGEST_REBUILD_ACTIONS = [
+  'createWorker', 'updateWorker', 'deleteWorker',
+  'addAssignment', 'updateAssignment', 'deleteAssignment',
+  'moveAssignment', 'terminateAssignment',
+];
+
+// ---------- digest date window ----------
+
+// 'YYYY-MM-DD' → a UTC Date anchored at noon (avoids DST edge cases when we
+// only ever do whole-day arithmetic and re-format back to 'YYYY-MM-DD').
+function digestYmdToUtcNoon_(ymd) {
+  const p = String(ymd).split('-');
+  return new Date(Date.UTC(Number(p[0]), Number(p[1]) - 1, Number(p[2]), 12, 0, 0));
+}
+
+// A UTC-noon-anchored Date → 'YYYY-MM-DD'.
+function digestUtcNoonToYmd_(d) {
+  const y = d.getUTCFullYear();
+  const m = ('0' + (d.getUTCMonth() + 1)).slice(-2);
+  const day = ('0' + d.getUTCDate()).slice(-2);
+  return y + '-' + m + '-' + day;
+}
+
+// The look-ahead window { start, end } as 'YYYY-MM-DD', inclusive: the Sunday
+// of the current week through the Saturday DIGEST_WEEKS_AHEAD weeks later
+// (weeks start Sunday — Israel). "today" is taken in the script timezone so it
+// matches the sheet's local dates. Pass todayYmd to make it deterministic.
+function digestWindow_(todayYmd) {
+  const anchor = digestYmdToUtcNoon_(todayYmd || todayLocal());
+  const dow = anchor.getUTCDay(); // 0=Sun .. 6=Sat
+  const start = new Date(anchor.getTime() - dow * 86400000);
+  const days = 7 * (DIGEST_WEEKS_AHEAD + 1) - 1; // 21-day span → last Saturday
+  const end = new Date(start.getTime() + days * 86400000);
+  return { start: digestUtcNoonToYmd_(start), end: digestUtcNoonToYmd_(end) };
+}
+
+// An ISO/date-ish string → its 'YYYY-MM-DD' date part, or '' if none.
+function digestIsoToYmd_(v) {
+  const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(v || '').trim());
+  return m ? m[1] : '';
+}
+
+// ---------- digest rows ----------
+
+// Builds the digest rows (arrays matching DIGEST_HEADERS) from the live
+// roster. One row per active (worker × house) assignment whose startDate is
+// in the look-ahead window and whose house maps to a canonical digest id.
+//
+// startDate = the date the guide was placed at the house (the assignment's
+// created_at). This app has no separate future-dated "planned start" field,
+// so in practice this lists guides added during the current week; the forward
+// window is retained so any future-dated start would surface automatically.
+//
+// NO financial fields are read or emitted — name, house, role, dates only.
+function computeDigestRows_(updatedAtIso, todayYmd) {
+  const win = digestWindow_(todayYmd);
+  const nameById = {};
+  readWorkersSafe().forEach(function (w) { nameById[w.id] = w.name; });
+
+  const rows = [];
+  readAssignmentsSafe().forEach(function (a) {
+    const house = DIGEST_HOUSE_CANONICAL[a.house];
+    if (!house) return; // excluded / unknown house
+    const startDate = digestIsoToYmd_(a.createdAt);
+    if (!startDate || startDate < win.start || startDate > win.end) return;
+    const guideName = nameById[a.workerId];
+    if (!guideName) return; // orphaned assignment — skip
+    rows.push([house, guideName, startDate, a.role || '', updatedAtIso]);
+  });
+
+  // Stable, human-friendly order: house, then startDate, then name.
+  rows.sort(function (x, y) {
+    return (x[0] + ' ' + x[2] + ' ' + x[1])
+      .localeCompare(y[0] + ' ' + y[2] + ' ' + y[1]);
+  });
+  return rows;
+}
+
+// ---------- digest rebuild ----------
+
+// Rebuilds the entire NewGuides tab from scratch (clear + rewrite). This app
+// is the SOLE writer. No-op (returns skipped) if setup hasn't run yet.
+// Serialized with the script lock so a write-triggered rebuild and the
+// periodic trigger can't clobber each other. Target of installDigestTrigger().
+function rebuildDigest() {
+  const id = PropertiesService.getScriptProperties().getProperty(DIGEST_SHEET_ID_PROP);
+  if (!id) {
+    return { ok: false, skipped: 'DIGEST_SHEET_ID not set — run setupDigestSpreadsheet() first' };
+  }
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const book = SpreadsheetApp.openById(id);
+    let sh = book.getSheetByName(DIGEST_TAB);
+    if (!sh) sh = book.insertSheet(DIGEST_TAB);
+    const updatedAt = new Date().toISOString(); // ISO 8601, UTC (Z)
+    const rows = computeDigestRows_(updatedAt);
+    const out = [DIGEST_HEADERS].concat(rows);
+    sh.clearContents();
+    sh.getRange(1, 1, out.length, DIGEST_HEADERS.length).setValues(out);
+    sh.setFrozenRows(1);
+    return { ok: true, tab: DIGEST_TAB, count: rows.length, updatedAt: updatedAt };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// Best-effort wrapper for the write path: never throws, so a digest failure
+// can't fail the user's actual mutation. Logs and swallows.
+function rebuildDigestSafe() {
+  try {
+    return rebuildDigest();
+  } catch (err) {
+    Logger.log('rebuildDigest failed: %s', (err && err.message) || err);
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+}
+
+// ---------- one-time setup + trigger install ----------
+
+// ONE-TIME setup. Creates the standalone digest spreadsheet this app owns,
+// adds the NewGuides tab with the frozen header, shares it read-only with
+// DIGEST_READER_EMAIL, stores its id in the DIGEST_SHEET_ID script property,
+// does a first rebuild, and LOGS the spreadsheet id + URL. Idempotent: if the
+// property already points at a spreadsheet we can open, it is reused (no
+// duplicate created). Run from the Apps Script editor:
+//   Run ▸ setupDigestSpreadsheet   → read the id from the execution log.
+function setupDigestSpreadsheet() {
+  const props = PropertiesService.getScriptProperties();
+  const existing = props.getProperty(DIGEST_SHEET_ID_PROP);
+  if (existing) {
+    try {
+      SpreadsheetApp.openById(existing); // throws if stale / inaccessible
+      rebuildDigest();
+      Logger.log('Digest spreadsheet already exists (reused). ID: %s', existing);
+      Logger.log('Tab: %s', DIGEST_TAB);
+      Logger.log('Columns: %s', DIGEST_HEADERS.join(', '));
+      return {
+        ok: true, reused: true, spreadsheetId: existing,
+        tab: DIGEST_TAB, headers: DIGEST_HEADERS,
+      };
+    } catch (err) {
+      Logger.log('Stored DIGEST_SHEET_ID not accessible (%s) — creating a new spreadsheet.',
+        (err && err.message) || err);
+    }
+  }
+
+  const book = SpreadsheetApp.create('E-ZONE Staffing — NewGuides digest');
+  const sh = book.getSheets()[0];
+  sh.setName(DIGEST_TAB);
+  sh.getRange(1, 1, 1, DIGEST_HEADERS.length).setValues([DIGEST_HEADERS]);
+  sh.setFrozenRows(1);
+
+  const id = book.getId();
+  props.setProperty(DIGEST_SHEET_ID_PROP, id);
+
+  // Share read-only. The coordinator reads; this app is the only writer.
+  try {
+    book.addViewer(DIGEST_READER_EMAIL);
+  } catch (err) {
+    Logger.log('addViewer(%s) failed: %s — share manually as Viewer.',
+      DIGEST_READER_EMAIL, (err && err.message) || err);
+  }
+
+  rebuildDigest();
+
+  Logger.log('Digest spreadsheet created.');
+  Logger.log('  ID:      %s', id);
+  Logger.log('  URL:     %s', book.getUrl());
+  Logger.log('  Tab:     %s', DIGEST_TAB);
+  Logger.log('  Columns: %s', DIGEST_HEADERS.join(', '));
+  Logger.log('  Shared read-only with: %s', DIGEST_READER_EMAIL);
+  return {
+    ok: true, reused: false, spreadsheetId: id, url: book.getUrl(),
+    tab: DIGEST_TAB, headers: DIGEST_HEADERS, sharedWith: DIGEST_READER_EMAIL,
+  };
+}
+
+// Installs the periodic backstop trigger: a time-based trigger that runs
+// rebuildDigest every 6 hours, catching any write that slipped past the inline
+// rebuild and picking up dates that roll into/out of the window with no write.
+// Run ONCE from the editor. Idempotent — clears any existing rebuildDigest
+// triggers first so re-running never stacks duplicates.
+function installDigestTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'rebuildDigest') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('rebuildDigest').timeBased().everyHours(6).create();
+  Logger.log('Installed periodic trigger: rebuildDigest every 6 hours.');
+  return { ok: true, trigger: 'rebuildDigest', schedule: 'every 6 hours' };
 }
