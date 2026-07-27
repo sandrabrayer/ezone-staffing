@@ -229,12 +229,12 @@ test('every view (incl. archive) is gated by the PIN — no token shows the PIN 
 });
 
 // ---------- topbar brand tests ----------
-// The topbar brand dropped the "E-ZONE" wordmark: it is now the E-ZONE
-// letter-E emblem (gold monogram, existing accent tokens — no new asset)
-// followed by the app's Hebrew name only. These pin the new structure so
-// the wordmark can't drift back in and the emblem can't get lost.
+// The topbar brand dropped the "E-ZONE" wordmark: it is now the app's real
+// circular emblem image (public/emblem.png) followed by the Hebrew app name
+// only. These pin the new structure so the wordmark can't drift back in and
+// the emblem <img> can't be lost or swapped for a text placeholder.
 
-test('topbar brand shows the letter-E emblem + Hebrew name, and no "E-ZONE" wordmark', async () => {
+test('topbar brand shows the emblem image + Hebrew name, and no "E-ZONE" wordmark', async () => {
   const { dom, errors } = loadPage();
   // The brand markup is static in the DOM regardless of auth state.
   const brand = dom.window.document.querySelector('.topbar .brand');
@@ -244,13 +244,13 @@ test('topbar brand shows the letter-E emblem + Hebrew name, and no "E-ZONE" word
   assert.ok(!/E-?ZONE/i.test(brand.textContent),
     'topbar brand must not render the "E-ZONE" wordmark anymore');
 
-  // Emblem: the letter-E monogram, marked decorative so screen readers
-  // announce the Hebrew name (the accessible label), not a stray "E".
-  const emblem = brand.querySelector('.brand-emblem');
-  assert.ok(emblem, 'brand should render a .brand-emblem');
-  assert.equal(emblem.textContent.trim(), 'E', 'emblem is the letter-E monogram');
-  assert.equal(emblem.getAttribute('aria-hidden'), 'true',
-    'emblem is decorative — aria-hidden so the name is the accessible label');
+  // Emblem: the real image asset, not a lettered text placeholder.
+  const emblem = brand.querySelector('img.brand-emblem');
+  assert.ok(emblem, 'brand should render an <img class="brand-emblem">');
+  assert.equal(emblem.tagName, 'IMG', 'emblem must be an image, not a text tile');
+  assert.equal(emblem.getAttribute('src'), '/emblem.png',
+    'emblem should point at the app icon asset public/emblem.png');
+  assert.equal(emblem.textContent.trim(), '', 'emblem carries no placeholder text');
 
   // Name: the app's Hebrew name only.
   const name = brand.querySelector('.brand-name');
@@ -260,6 +260,16 @@ test('topbar brand shows the letter-E emblem + Hebrew name, and no "E-ZONE" word
 
   dom.window.close();
   assert.equal(errors.length, 0, errors.length ? JSON.stringify(errors) : '');
+});
+
+test('the topbar emblem asset (public/emblem.png) exists and is a real PNG', () => {
+  // Guards the <img src="/emblem.png"> against a dangling reference — the
+  // file must ship in public/ (served at /emblem.png) and be a valid PNG.
+  const buf = fs.readFileSync(path.join(ROOT, 'public', 'emblem.png'));
+  assert.ok(buf.length > 512, 'emblem.png should be a non-trivial file');
+  // PNG magic number.
+  assert.deepEqual([...buf.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+    'emblem.png should have a valid PNG signature');
 });
 
 // ---------- dashboard join view ("היעדרויות פעילות ברשת") ----------
