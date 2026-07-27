@@ -50,9 +50,17 @@ body{
   border-bottom:1px solid var(--line);
 }
 .topbar .wrap{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap}
-.brand{display:flex;align-items:baseline;gap:10px}
-.brand b{font-family:'Frank Ruhl Libre',serif;font-weight:900;font-size:22px;letter-spacing:.5px;color:var(--ink)}
-.brand span{font-size:12px;color:var(--muted);font-weight:500}
+.brand{display:flex;align-items:center;gap:10px;flex-wrap:nowrap;min-width:0}
+/* E-ZONE brand mark: the letter-E monogram (ecosystem convention) rendered in
+   the app's existing gold gradient — no new icon asset, no recolor. */
+.brand-emblem{
+  flex:0 0 auto;
+  display:inline-flex;align-items:center;justify-content:center;
+  width:30px;height:30px;border-radius:8px;
+  background:var(--grad);color:var(--accent-deep);
+  font-family:'Frank Ruhl Libre',serif;font-weight:900;font-size:19px;line-height:1;
+}
+.brand-name{font-family:'Frank Ruhl Libre',serif;font-weight:700;font-size:18px;color:var(--ink);white-space:nowrap}
 .house-switch{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
 .house-switch button{
   background:transparent;
@@ -832,6 +840,8 @@ tbody tr:hover{
 @media(max-width:640px){
   .stats{grid-template-columns:1fr}
   .house-grid{grid-template-columns:1fr}
+  .brand-emblem{width:28px;height:28px;font-size:18px}
+  .brand-name{font-size:16px}
   .head{padding:24px 0 8px}
   .modal{border-radius:16px}
   .modal-head{padding:20px 22px 0}
@@ -859,7 +869,7 @@ tbody tr:hover{
 
 <div class="topbar" id="topbar" style="display:none">
   <div class="wrap">
-    <div class="brand"><b>E-ZONE</b><span>ניהול כוח אדם</span></div>
+    <div class="brand"><span class="brand-emblem" aria-hidden="true">E</span><span class="brand-name">ניהול כוח אדם</span></div>
     <div class="house-switch" id="houseSwitch"></div>
   </div>
 </div>
