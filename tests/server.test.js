@@ -70,6 +70,7 @@ function makeFakeUpstream() {
           name: b.worker.name,
           notes: b.worker.notes || '',
           createdAt: nowIso(),
+          startDate: b.worker.startDate || '',
         };
         state.workers.push(w);
         return { status: 200, json: { _status: 200, ok: true, worker: w } };
@@ -79,7 +80,19 @@ function makeFakeUpstream() {
         if (!w) return { status: 200, json: { _status: 404, error: 'worker not found' } };
         w.name = b.worker.name;
         w.notes = b.worker.notes || '';
-        return { status: 200, json: { _status: 200, ok: true, worker: { id: w.id, name: w.name, notes: w.notes } } };
+        w.startDate = b.worker.startDate || '';
+        return { status: 200, json: { _status: 200, ok: true, worker: { id: w.id, name: w.name, notes: w.notes, startDate: w.startDate } } };
+      }
+      case 'setWorkerStartDates': {
+        const saved = [];
+        const missing = [];
+        for (const u of b.updates) {
+          const w = state.workers.find(x => x.id === u.id);
+          if (!w) { missing.push(u.id); continue; }
+          w.startDate = u.startDate || '';
+          saved.push({ id: u.id, startDate: w.startDate });
+        }
+        return { status: 200, json: { _status: 200, ok: true, saved, count: saved.length, missing } };
       }
       case 'deleteWorker': {
         if (state.assignments.some(a => a.workerId === b.id)) {
@@ -545,6 +558,76 @@ test('createWorker: rejects empty name (validator)', async () => {
     const token = await login(base);
     const r = await post(base, token, {
       action: 'createWorker', worker: { name: '   ' },
+    });
+    assert.equal(r.status, 400);
+  } finally { await close(srv); }
+});
+
+test('worker startDate round-trips through create + update + read', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+
+    // Create with a start date.
+    let r = await post(base, token, {
+      action: 'createWorker', worker: { name: 'שירה', startDate: '2024-11-03' },
+    });
+    assert.equal(r.status, 200);
+    const id = r.json.worker.id;
+    assert.equal(r.json.worker.startDate, '2024-11-03');
+
+    r = await get(base, token);
+    assert.equal(r.json.workers[0].startDate, '2024-11-03');
+
+    // Clear it via update (blank allowed).
+    r = await post(base, token, {
+      action: 'updateWorker', id, worker: { name: 'שירה', startDate: '' },
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.worker.startDate, '');
+  } finally { await close(srv); }
+});
+
+test('createWorker: rejects a malformed startDate (validator)', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    const r = await post(base, token, {
+      action: 'createWorker', worker: { name: 'שירה', startDate: '03/11/2024' },
+    });
+    assert.equal(r.status, 400);
+  } finally { await close(srv); }
+});
+
+test('setWorkerStartDates: bulk-sets dates, allows blanks, rejects bad dates', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    const a = await createWorker(base, token, 'עובד א');
+    const b = await createWorker(base, token, 'עובד ב');
+
+    // Batch save: one dated, one left blank.
+    let r = await post(base, token, {
+      action: 'setWorkerStartDates',
+      updates: [{ id: a, startDate: '2023-02-01' }, { id: b, startDate: '' }],
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.count, 2);
+
+    r = await get(base, token);
+    const byId = Object.fromEntries(r.json.workers.map(w => [w.id, w.startDate]));
+    assert.equal(byId[a], '2023-02-01');
+    assert.equal(byId[b], '');
+
+    // A malformed date fails the proxy validator (whole batch rejected).
+    r = await post(base, token, {
+      action: 'setWorkerStartDates', updates: [{ id: a, startDate: 'nope' }],
+    });
+    assert.equal(r.status, 400);
+
+    // A missing id also fails validation.
+    r = await post(base, token, {
+      action: 'setWorkerStartDates', updates: [{ startDate: '2023-02-01' }],
     });
     assert.equal(r.status, 400);
   } finally { await close(srv); }

@@ -9,11 +9,11 @@ const {
   isHouse, isRole, isEmploymentType,
   COMMITMENT_VALUES, validateShiftCommitment,
   clampPct, clampMoney, clampInt,
-  validateWorker, validateAssignment, validateAbsence, validateCoverage,
+  validateWorker, validateWorkerStartDates, validateAssignment, validateAbsence, validateCoverage,
   validateMonth, validateMonthlyActualsItem, validateMonthlyActuals,
   validateBudget,
   ACTUAL_HOURS_MAX, ACTUAL_SESSIONS_MAX, MONTHLY_ACTUALS_MAX_ITEMS, BUDGET_MAX,
-  validateAction,
+  validateAction, validateOptionalDate,
 } = require('../lib/validate');
 
 // ---------- constants ----------
@@ -151,6 +151,74 @@ test('validateAction createWorker/updateWorker carry shift_commitment through', 
   assert.equal(created.worker.shift_commitment, '5+1');
   const updated = validateAction({ action: 'updateWorker', id: 'w1', worker: { name: 'רון', shift_commitment: '3+1' } });
   assert.equal(updated.worker.shift_commitment, '3+1');
+});
+
+// ---------- start_date (worker-level, optional) ----------
+
+test('validateWorker: omitting startDate yields empty string, not undefined', () => {
+  const w = validateWorker({ name: 'שחר' });
+  assert.equal(w.startDate, '');
+});
+
+test('validateWorker: accepts a valid YYYY-MM-DD startDate', () => {
+  const w = validateWorker({ name: 'שחר', startDate: '2025-03-01' });
+  assert.equal(w.startDate, '2025-03-01');
+});
+
+test('validateWorker: blank / null / whitespace startDate normalizes to empty (not entered)', () => {
+  [undefined, null, '', '   '].forEach(v => {
+    const w = validateWorker({ name: 'שחר', startDate: v });
+    assert.equal(w.startDate, '', String(v));
+  });
+});
+
+test('validateWorker: rejects a malformed startDate', () => {
+  // Format-only check (same as the other date validators): the shape must be
+  // YYYY-MM-DD. Semantic month/day ranges are not enforced here.
+  ['01/03/2025', '2025-3-1', 'today', '2025-03-01T00:00:00Z', '20250301'].forEach(v => {
+    assert.throws(() => validateWorker({ name: 'שחר', startDate: v }), /bad startDate/, String(v));
+  });
+});
+
+test('validateOptionalDate: blank passes, valid passes, junk throws', () => {
+  assert.equal(validateOptionalDate('', 'd'), '');
+  assert.equal(validateOptionalDate('  ', 'd'), '');
+  assert.equal(validateOptionalDate('2025-01-31', 'd'), '2025-01-31');
+  assert.throws(() => validateOptionalDate('nope', 'd'), /bad d/);
+});
+
+// ---------- setWorkerStartDates (bulk) ----------
+
+test('validateWorkerStartDates: maps items, allows blank dates, requires id', () => {
+  const out = validateWorkerStartDates([
+    { id: 'w1', startDate: '2025-01-01' },
+    { id: 'w2', startDate: '' },        // clears / not entered
+    { id: 'w3' },                       // missing startDate → ''
+  ]);
+  assert.deepEqual(out, [
+    { id: 'w1', startDate: '2025-01-01' },
+    { id: 'w2', startDate: '' },
+    { id: 'w3', startDate: '' },
+  ]);
+});
+
+test('validateWorkerStartDates: rejects non-array, missing id, and bad date', () => {
+  assert.throws(() => validateWorkerStartDates(null), /updates required/);
+  assert.throws(() => validateWorkerStartDates([{ startDate: '2025-01-01' }]), /missing id/);
+  assert.throws(() => validateWorkerStartDates([{ id: 'w1', startDate: '1/1/25' }]), /bad startDate/);
+});
+
+test('validateAction setWorkerStartDates passes updates through', () => {
+  const out = validateAction({ action: 'setWorkerStartDates', updates: [{ id: 'w1', startDate: '2025-06-15' }] });
+  assert.equal(out.action, 'setWorkerStartDates');
+  assert.deepEqual(out.updates, [{ id: 'w1', startDate: '2025-06-15' }]);
+});
+
+test('validateAction createWorker/updateWorker carry startDate through', () => {
+  const created = validateAction({ action: 'createWorker', worker: { name: 'רון', startDate: '2024-09-01' } });
+  assert.equal(created.worker.startDate, '2024-09-01');
+  const updated = validateAction({ action: 'updateWorker', id: 'w1', worker: { name: 'רון' } });
+  assert.equal(updated.worker.startDate, '', 'omitted startDate stays empty on update');
 });
 
 test('the proxy whitelist is exactly the shift-compliance enum — no drift', () => {

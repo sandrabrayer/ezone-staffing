@@ -897,6 +897,16 @@ tbody tr:hover{
         <div class="hint" id="w_nameDupWarning" style="display:none;color:var(--warning)">⚠️ עובד/ת בשם זהה כבר קיים/ת — שמירה תיצור רשומה נפרדת</div>
       </div>
 
+      <!-- Employment start date (תאריך תחילת עבודה). WORKER-LEVEL — one date
+           per employee, alongside name + notes. Optional: blank until entered
+           (existing employees start empty; a wrong date is worse than none).
+           Feeds the roster column and the GuidesRoster digest tab. -->
+      <div class="field">
+        <label>תאריך תחילת עבודה</label>
+        <input id="w_startDate" type="date"/>
+        <div class="hint">לא חובה — ניתן להשלים מאוחר יותר</div>
+      </div>
+
       <!-- Contractual weekly shift commitment. WORKER-LEVEL, not per-house:
            a madrich has one contract even when he covers at two houses, so
            this sits on the worker payload alongside name + notes. Placed
@@ -2074,6 +2084,8 @@ function openWorker(workerId, house){
   // Identity fields.
   document.getElementById('w_name').value = editingWorker.name;
   document.getElementById('w_notes').value = editingWorker.notes;
+  // Employment start date — worker-level, blank until entered.
+  document.getElementById('w_startDate').value = w && w.startDate ? w.startDate : '';
 
   // Worker-level shift commitment: read straight off the worker (never the
   // assignment). onWorkerRoleChange below hides + clears it if this house's
@@ -2242,6 +2254,10 @@ async function saveWorker(){
   const notes = document.getElementById('w_notes').value.trim();
   if (!name){ toast('יש להזין שם', true); return; }
 
+  // Employment start date — optional; a native date input already yields
+  // 'YYYY-MM-DD' (or '' when empty), which the backend accepts as "not entered".
+  const startDate = document.getElementById('w_startDate').value;
+
   // Worker-level shift commitment. Optional; when present it must be a
   // whitelisted enum value. The field is cleared for non-instructors, so a
   // blank here is the normal case.
@@ -2305,8 +2321,8 @@ async function saveWorker(){
     // 1) Worker identity (create or update).
     let workerId = editingWorker.id;
     const workerPayload = wasEdit
-      ? { action: 'updateWorker', id: workerId, worker: { name, notes, shift_commitment: shiftCommitment } }
-      : { action: 'createWorker', worker: { name, notes, shift_commitment: shiftCommitment } };
+      ? { action: 'updateWorker', id: workerId, worker: { name, notes, shift_commitment: shiftCommitment, startDate } }
+      : { action: 'createWorker', worker: { name, notes, shift_commitment: shiftCommitment, startDate } };
     const wRes = await doAction(workerPayload);
     if (wRes && wRes.worker && wRes.worker.id){
       upsertById(WORKERS, wRes.worker);
@@ -3020,6 +3036,7 @@ function renderSwitch(){
   HOUSES.forEach(h=>{
     html+=`<button class="${view===h.id?'on':''}" onclick="go('${h.id}')">${escapeHtml(h.name)}</button>`;
   });
+  html += `<button class="topbar-link ${view==='startdates'?'on':''}" onclick="go('startdates')">תאריכי תחילה</button>`;
   html += `<button class="topbar-link ${view==='archive'?'on':''}" onclick="go('archive')">ארכיב עובדים</button>`;
   html += `<button class="logout" onclick="logout()">יציאה</button>`;
   el.innerHTML=html;
@@ -3036,6 +3053,7 @@ function render(){
   const app=document.getElementById('app');
   if (view === 'central')      app.innerHTML = centralView();
   else if (view === 'archive') app.innerHTML = archiveView();
+  else if (view === 'startdates') app.innerHTML = startDatesView();
   else                         app.innerHTML = houseView(view);
 }
 
@@ -3214,6 +3232,7 @@ function rosterRow(a){
       <span class="role-tag">${roleLabel(a)}</span>
       <span class="type-tag">${escapeHtml(typeLabelShort(a.employmentType))}</span>
     </td>
+    <td>${workerStartDateCell(a.workerId)}</td>
     <td>${termsHtml(a)}</td>
     <td class="money">${monthCostCellInner(a)}</td>
     <td class="note-cell">${a.notes?escapeHtml(a.notes):'<span style="color:#B6B0A0">—</span>'}</td>
@@ -3234,17 +3253,156 @@ function rosterRow(a){
 function rosterTableInner(rows){
   const body = rows.length
     ? rows.map(rosterRow).join('')
-    : `<tr><td colspan="6"><div class="empty-soft">אין שיבוצים בקטגוריה זו</div></td></tr>`;
+    : `<tr><td colspan="7"><div class="empty-soft">אין שיבוצים בקטגוריה זו</div></td></tr>`;
   return `
   <div class="table-scroll">
     <table>
       <thead><tr>
-        <th>שם</th><th>תפקיד / סוג העסקה</th><th>תנאים</th>
+        <th>שם</th><th>תפקיד / סוג העסקה</th><th>תחילת עבודה</th><th>תנאים</th>
         <th>עלות חודשית</th><th>הערות</th><th>פעולות</th>
       </tr></thead>
       <tbody>${body}</tbody>
     </table>
   </div>`;
+}
+
+// Roster cell for a worker's employment start date (worker-level). Shows
+// DD/MM/YYYY, or a muted dash when not yet entered.
+function workerStartDateCell(workerId){
+  const w = workerById(workerId);
+  const sd = w && w.startDate ? w.startDate : '';
+  return sd ? escapeHtml(fmtDate(sd)) : '<span style="color:#B6B0A0">—</span>';
+}
+
+/* ---------- bulk start-date entry view ----------
+   A flat list of EVERY employee with an inline date input per row, so מורן can
+   fill in ~130 existing start dates without opening each worker dialog. Save a
+   single row, or batch-save every changed row in one request
+   (action: setWorkerStartDates). Only the start_date column is written. */
+
+// The house(s) an employee is currently placed at, for context in the list.
+function sdWorkerHouses(workerId){
+  const names = [];
+  ASSIGNMENTS.forEach(a => {
+    if (a.workerId === workerId){
+      const n = houseName(a.house);
+      if (names.indexOf(n) < 0) names.push(n);
+    }
+  });
+  return names.length ? names.join(', ') : '—';
+}
+
+function startDatesView(){
+  const workers = WORKERS.slice().sort((a,b) => String(a.name||'').localeCompare(String(b.name||''), 'he'));
+  const filled = workers.filter(w => w.startDate).length;
+  const rows = workers.map(w => {
+    const id = escapeHtml(w.id);
+    const sd = w.startDate ? escapeHtml(w.startDate) : '';
+    const nameKey = escapeHtml(String(w.name||'').toLowerCase());
+    return `
+    <tr id="sdrow_${id}" data-name="${nameKey}">
+      <td>${escapeHtml(w.name)}</td>
+      <td class="note-cell">${escapeHtml(sdWorkerHouses(w.id))}</td>
+      <td><input type="date" id="sd_${id}" value="${sd}" style="max-width:170px"/></td>
+      <td><button class="btn btn-sm btn-accent-hover" id="sdbtn_${id}" onclick="saveWorkerStartDate('${id}')">שמירה</button></td>
+    </tr>`;
+  }).join('');
+  const body = workers.length
+    ? rows
+    : `<tr><td colspan="4"><div class="empty">אין עובדים</div></td></tr>`;
+  return `
+  <div class="head">
+    <h1>תאריכי תחילת עבודה</h1>
+    <p>מילוי תאריך תחילת עבודה לעובדים קיימים. ניתן לשמור שורה בודדת או את כל השינויים יחד. שדה ריק = טרם הוזן.</p>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <input type="text" placeholder="חיפוש לפי שם…" oninput="filterStartDates(this.value)" style="flex:1;min-width:200px"/>
+      <span class="count-pill" id="sdProgress">${filled} מתוך ${workers.length} הוזנו</span>
+      <button class="btn btn-primary" id="sdSaveAllBtn" onclick="saveAllStartDates()">שמירת כל השינויים</button>
+    </div>
+    <div class="tablecard">
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>שם</th><th>בית</th><th>תאריך תחילת עבודה</th><th>פעולה</th></tr></thead>
+          <tbody>${body}</tbody>
+        </table>
+      </div>
+    </div>
+  </div>`;
+}
+
+// Client-side name filter: hide non-matching rows in place so unsaved date
+// entries and focus survive (no innerHTML rebuild).
+function filterStartDates(q){
+  const needle = String(q||'').trim().toLowerCase();
+  WORKERS.forEach(w => {
+    const row = document.getElementById('sdrow_' + w.id);
+    if (!row) return;
+    const name = row.getAttribute('data-name') || '';
+    row.style.display = (!needle || name.indexOf(needle) >= 0) ? '' : 'none';
+  });
+}
+
+// Save one employee's start date. Reuses the batch action with a single item.
+async function saveWorkerStartDate(workerId){
+  const inp = document.getElementById('sd_' + workerId);
+  if (!inp) return;
+  const startDate = inp.value; // '' clears; native input is already YYYY-MM-DD
+  const btnId = 'sdbtn_' + workerId;
+  setBusy(btnId, true);
+  try {
+    const res = await doAction({ action: 'setWorkerStartDates', updates: [{ id: workerId, startDate }] });
+    applyStartDateSaves(res, [{ id: workerId, startDate }]);
+    updateStartDateProgress();
+    toast('התאריך נשמר');
+  } catch (err) {
+    toast(err.message || 'שגיאה בשמירה', true);
+  } finally {
+    setBusy(btnId, false);
+  }
+}
+
+// Batch-save every row whose date input differs from the stored value.
+async function saveAllStartDates(){
+  const updates = [];
+  WORKERS.forEach(w => {
+    const inp = document.getElementById('sd_' + w.id);
+    if (!inp) return;
+    const val = inp.value;
+    if (val !== (w.startDate || '')) updates.push({ id: w.id, startDate: val });
+  });
+  if (!updates.length){ toast('אין שינויים לשמירה'); return; }
+  setBusy('sdSaveAllBtn', true);
+  try {
+    const res = await doAction({ action: 'setWorkerStartDates', updates });
+    applyStartDateSaves(res, updates);
+    updateStartDateProgress();
+    toast('נשמרו ' + updates.length + ' תאריכים');
+  } catch (err) {
+    toast(err.message || 'שגיאה בשמירה', true);
+  } finally {
+    setBusy('sdSaveAllBtn', false);
+  }
+}
+
+// Patch the in-memory WORKERS cache from a setWorkerStartDates result. The
+// server echoes { saved:[{id,startDate}] }; fall back to the sent updates so a
+// save still reflects locally even on a thin response.
+function applyStartDateSaves(res, sent){
+  const saved = (res && Array.isArray(res.saved) && res.saved.length) ? res.saved : sent;
+  saved.forEach(s => {
+    const w = workerById(s.id);
+    if (w) w.startDate = s.startDate || '';
+  });
+}
+
+function updateStartDateProgress(){
+  const el = document.getElementById('sdProgress');
+  if (!el) return;
+  const filled = WORKERS.filter(w => w.startDate).length;
+  el.textContent = filled + ' מתוך ' + WORKERS.length + ' הוזנו';
 }
 
 function rosterTable(rows){

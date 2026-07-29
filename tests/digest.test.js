@@ -27,6 +27,7 @@ const gs = fs.readFileSync(GS_PATH, 'utf8');
 // someone reorders or renames a column in Code.gs, this literal must be
 // updated too, which is exactly the review checkpoint we want.
 const FROZEN_HEADERS = ['house', 'guideName', 'startDate', 'role', 'updatedAt'];
+const FROZEN_ROSTER_HEADERS = ['house', 'guideName', 'startDate', 'updatedAt'];
 const FINANCIAL_WORDS = ['salary', 'cost', 'rate', 'budget', 'retainer', 'allowance', 'pct', 'amount'];
 
 // Evaluate Code.gs once in a bare sandbox. Top-level only runs const/function
@@ -65,6 +66,38 @@ test('the digest header carries NO financial field (hard rule)', () => {
         `header "${col}" must not resemble financial field "${bad}"`);
     }
   }
+});
+
+test('DIGEST_ROSTER_HEADERS is exactly the frozen GuidesRoster contract, in order', () => {
+  const m = /const DIGEST_ROSTER_HEADERS = \[([^\]]*)\]/.exec(gs);
+  assert.ok(m, 'DIGEST_ROSTER_HEADERS should be declared');
+  const cols = m[1].split(',').map(s => s.trim().replace(/^'|'$/g, '')).filter(Boolean);
+  assert.deepStrictEqual(cols, FROZEN_ROSTER_HEADERS,
+    'GuidesRoster columns are an append-only contract — never reorder/rename/remove');
+});
+
+test('the GuidesRoster header carries NO financial field (hard rule)', () => {
+  for (const col of FROZEN_ROSTER_HEADERS) {
+    for (const bad of FINANCIAL_WORDS) {
+      assert.ok(!col.toLowerCase().includes(bad),
+        `header "${col}" must not resemble financial field "${bad}"`);
+    }
+  }
+});
+
+test('the GuidesRoster tab is named and written on every rebuild', () => {
+  assert.ok(/const DIGEST_ROSTER_TAB = 'GuidesRoster'/.test(gs),
+    'GuidesRoster tab name is part of the contract');
+  // rebuildDigest must write BOTH tabs.
+  assert.ok(/writeDigestTab_\(book, DIGEST_TAB,/.test(gs), 'NewGuides tab is written');
+  assert.ok(/writeDigestTab_\(book, DIGEST_ROSTER_TAB,/.test(gs), 'GuidesRoster tab is written');
+});
+
+test('setWorkerStartDates triggers a digest rebuild', () => {
+  const m = /const DIGEST_REBUILD_ACTIONS = \[([^\]]*)\]/.exec(gs);
+  assert.ok(m, 'DIGEST_REBUILD_ACTIONS should be declared');
+  assert.ok(/setWorkerStartDates/.test(m[1]),
+    'the bulk start-date action must rebuild the digest so GuidesRoster picks up new dates');
 });
 
 test('DIGEST_HOUSE_CANONICAL maps internal ids to canonical ids and excludes pre-opening/pseudo houses', () => {
@@ -205,4 +238,78 @@ test('computeDigestRows_ skips assignments whose worker is missing, and sorts by
   assert.strictEqual(rows.length, 2, 'orphan assignment is skipped');
   // ramot sorts before rehab.
   assert.deepStrictEqual(rows.map(r => r[0]), ['ramot', 'rehab']);
+});
+
+// ---------------------------------------------------------------------------
+// computeRosterRows_ — the GuidesRoster tab (readers overridden)
+// ---------------------------------------------------------------------------
+
+test('computeRosterRows_ emits house/guideName/startDate/updatedAt — NEVER financial data', () => {
+  const ctx = withRoster(
+    [{ id: 'w1', name: 'דנה', startDate: '2025-01-15' }],
+    [{
+      id: 'a1', workerId: 'w1', house: 'asher', role: 'מדריך/ה',
+      createdAt: '2026-07-27T08:00:00.000Z',
+      // Financial fields present on the source row must be ignored:
+      salary: 99999, hourlyRate: 80, retainerAmount: 5000, allowance: 6000, pct: 50,
+    }],
+  );
+  const rows = plain(ctx.computeRosterRows_('2026-07-27T12:00:00.000Z'));
+  assert.strictEqual(rows.length, 1);
+  // startDate is the WORKER's employment start date, not the assignment's createdAt.
+  assert.deepStrictEqual(rows[0], ['raanana', 'דנה', '2025-01-15', '2026-07-27T12:00:00.000Z']);
+  const flat = JSON.stringify(rows);
+  for (const bad of ['99999', '80', '5000', '6000']) {
+    assert.ok(!flat.includes(bad), `financial value ${bad} must not appear in the roster`);
+  }
+});
+
+test('computeRosterRows_ includes ALL active guides regardless of date window; empty startDate allowed', () => {
+  const ctx = withRoster(
+    [{ id: 'w1', name: 'ותיק', startDate: '2019-03-01' },   // long-tenured
+     { id: 'w2', name: 'חדש', startDate: '' }],              // not yet entered
+    [
+      { id: 'a1', workerId: 'w1', house: 'ramot', role: 'מדריך/ה', createdAt: '2019-03-01T00:00:00Z' },
+      { id: 'a2', workerId: 'w2', house: 'ramot', role: 'מדריך/ה', createdAt: '2026-07-27T00:00:00Z' },
+    ],
+  );
+  const rows = plain(ctx.computeRosterRows_('2026-07-27T12:00:00Z'));
+  assert.strictEqual(rows.length, 2, 'no date-window filter — both guides appear');
+  const byName = {};
+  rows.forEach(r => { byName[r[1]] = r[2]; });
+  assert.strictEqual(byName['ותיק'], '2019-03-01');
+  assert.strictEqual(byName['חדש'], '', 'a guide with no start date entered yet is still listed');
+});
+
+test('computeRosterRows_ maps houses, excludes pre-opening/pseudo houses, skips orphans, sorts by house/name', () => {
+  const ctx = withRoster(
+    [{ id: 'w1', name: 'B', startDate: '' }, { id: 'w2', name: 'A', startDate: '' },
+     { id: 'w3', name: 'C', startDate: '' }, { id: 'w4', name: 'D', startDate: '' }],
+    [
+      { id: 'a1', workerId: 'w1', house: 'ramot',  role: '', createdAt: '2026-07-27T00:00:00Z' },
+      { id: 'a2', workerId: 'w2', house: 'ramot',  role: '', createdAt: '2026-07-27T00:00:00Z' },
+      { id: 'a3', workerId: 'w3', house: 'rehab',  role: '', createdAt: '2026-07-27T00:00:00Z' },
+      { id: 'a4', workerId: 'w4', house: 'pardes', role: '', createdAt: '2026-07-27T00:00:00Z' }, // excluded
+      { id: 'a5', workerId: 'ghost', house: 'ramot', role: '', createdAt: '2026-07-27T00:00:00Z' }, // orphan
+    ],
+  );
+  const rows = plain(ctx.computeRosterRows_('2026-07-27T12:00:00Z'));
+  // pardes excluded + orphan skipped → 3 rows; ramot (A then B) before rehab (C).
+  assert.deepStrictEqual(rows.map(r => [r[0], r[1]]),
+    [['ramot', 'A'], ['ramot', 'B'], ['rehab', 'C']]);
+});
+
+test('computeRosterRows_ lists a guide once per house when placed at several', () => {
+  const ctx = withRoster(
+    [{ id: 'w1', name: 'משה', startDate: '2020-06-01' }],
+    [
+      { id: 'a1', workerId: 'w1', house: 'ramot', role: 'מדריך/ה', createdAt: '2020-06-01T00:00:00Z' },
+      { id: 'a2', workerId: 'w1', house: 'rehab', role: 'מדריך/ה', createdAt: '2026-07-01T00:00:00Z' },
+    ],
+  );
+  const rows = plain(ctx.computeRosterRows_('2026-07-27T12:00:00Z'));
+  assert.deepStrictEqual(rows, [
+    ['ramot', 'משה', '2020-06-01', '2026-07-27T12:00:00Z'],
+    ['rehab', 'משה', '2020-06-01', '2026-07-27T12:00:00Z'],
+  ]);
 });
