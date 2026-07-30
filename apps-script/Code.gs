@@ -405,9 +405,17 @@ function validateWorker(w) {
   if (!name) throw httpError(400, 'name required');
   const notes = String(w.notes || '').trim().slice(0, 500);
   const shiftCommitment = validateShiftCommitment(w.shift_commitment);
-  // Employment start date — optional (blank until entered).
+  // Employment start date — תאריך תחילת עבודה. Tracked by KEY PRESENCE, not
+  // by value. hasStartDate tells updateWorker whether the caller actually
+  // sent the field: absent means "leave the stored date alone", an explicit
+  // '' means "clear it". Defence in depth — the proxy already strips the key
+  // when it wasn't sent, but Apps Script must not depend on that.
+  const hasStartDate = Object.prototype.hasOwnProperty.call(w, 'startDate');
   const startDate = validateOptionalDate(w.startDate, 'startDate');
-  return { name: name, notes: notes, shiftCommitment: shiftCommitment, startDate: startDate };
+  return {
+    name: name, notes: notes, shiftCommitment: shiftCommitment,
+    startDate: startDate, hasStartDate: hasStartDate,
+  };
 }
 
 // Batch of { id, startDate } for setWorkerStartDates. id required; startDate
@@ -991,8 +999,15 @@ function updateWorker(body) {
     // Column 5 = shift_commitment (HEADERS_WORKERS index 4, 1-based col 5).
     sh.getRange(row, 5).setValue(w.shiftCommitment);
     // Column 6 = start_date (HEADERS_WORKERS index 5, 1-based col 6).
-    sh.getRange(row, 6).setValue(w.startDate);
-    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, shift_commitment: w.shiftCommitment, startDate: w.startDate } };
+    // Written ONLY when the payload carried the key, so a caller that doesn't
+    // know about the field cannot blank a date somebody entered by hand.
+    let startDate = w.startDate;
+    if (w.hasStartDate) {
+      sh.getRange(row, 6).setValue(w.startDate);
+    } else {
+      startDate = formatDateCell(sh.getRange(row, 6).getValue());
+    }
+    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, shift_commitment: w.shiftCommitment, startDate: startDate } };
   } finally {
     lock.releaseLock();
   }
