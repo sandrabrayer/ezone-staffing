@@ -8,13 +8,21 @@ Staffing is the **sole writer** of a standalone spreadsheet it creates and
 owns. The coordinators app (and `brayersandra@gmail.com`) read it; nobody
 else writes it.
 
-The digest spreadsheet has **two tabs**, both rebuilt together on every
+The digest spreadsheet has **four tabs**, all rebuilt together on every
 relevant roster write and by the periodic trigger:
 
 - **`NewGuides`** — the near-term arrivals window (guides whose start date
   falls in the current week or the next two weeks).
 - **`GuidesRoster`** — the **full** active-guide roster with each guide's
-  employment start date, independent of any date window.
+  employment start date, status, and end date, independent of any date window.
+- **`NewlyHired`** — guides whose employment **start date** falls in the last
+  30 days (intakes; lets coordinators compute seniority for trainings).
+- **`NewlyDeparted`** — guides whose employment **end date** falls in the last
+  30 days (departures, from the archive).
+
+`NewGuides` and `GuidesRoster` use the **canonical house id**; `NewlyHired` and
+`NewlyDeparted` use the **human-readable Hebrew house display name** (same
+mapping as the app).
 
 ---
 
@@ -45,10 +53,14 @@ house.
 
 | column      | type                    | notes                                                        |
 |-------------|-------------------------|--------------------------------------------------------------|
+| column      | type                    | notes                                                        |
+|-------------|-------------------------|--------------------------------------------------------------|
 | `house`     | text (canonical id)     | one of `ramot` / `raanana` / `efroni` / `rehab` (same mapping as `NewGuides`) |
 | `guideName` | text                    | the guide/employee display name                              |
 | `startDate` | date `YYYY-MM-DD`, may be empty | the guide's **employment start date** (תאריך תחילת עבודה); `''` when not yet entered |
 | `updatedAt` | ISO 8601, UTC (`…Z`)    | when the roster row was last rebuilt                         |
+| `status`    | text — `active` / `chld` / `chlt` | **APPENDED (column 5).** the worker's assignment status |
+| `endDate`   | date `YYYY-MM-DD`, may be empty | **APPENDED (column 6).** the date the worker left active duty (leave `status_date`) when not active; `''` while active |
 
 Notes:
 
@@ -57,6 +69,11 @@ Notes:
   is entered per employee (edit dialog or the bulk fill-in view) and starts
   **empty** for existing employees — an empty `startDate` is valid and expected
   until a date is filled in.
+- **`status` / `endDate` were appended to the END** (append-only) — the original
+  four columns keep their positions. `endDate` is populated only for guides who
+  are on the roster but no longer active (on `chld` / `chlt` leave). A
+  **terminated** guide is archived and drops off this roster entirely, so their
+  end date appears in `NewlyDeparted`, not here.
 - **All active guides** are listed regardless of when they started; a guide
   placed at two houses appears once per house.
 - Same rows as the roster minus excluded houses (see mapping below) and
@@ -67,11 +84,33 @@ rename, or remove a column; any new column is added on the **end** only.
 
 ---
 
-## HARD RULE — no financial fields (both tabs)
+## Schema — `NewlyHired` / `NewlyDeparted` (frozen, append-only)
 
-The digest carries **names, dates, and roles only**. No `salary`, `cost`,
-`rate`, `budget`, `allowance`, `pct`, `retainer`, or any other financial value
-is ever read into or written to **either** tab — not now, not in any future
+Two activity tabs with an identical shape. Row 1 is the header (frozen). One
+row per (guide × house) whose date falls in the **last 30 days**. The house is
+the **Hebrew display name** (not the canonical id).
+
+| column      | type                    | notes                                                        |
+|-------------|-------------------------|--------------------------------------------------------------|
+| `house`     | text (Hebrew display)   | `רמות השבים` / `רעננה אשר` / `קיסריה עפרוני` / `קיסריה ריהאב` |
+| `guideName` | text                    | the guide/employee display name                              |
+| `date`      | date `YYYY-MM-DD`       | `NewlyHired` = employment **start** date; `NewlyDeparted` = employment **end** date |
+| `updatedAt` | ISO 8601, UTC (`…Z`)    | when the row was last rebuilt                                |
+
+- **`NewlyHired`** is built from the live roster (workers with a `start_date` in
+  the last 30 days). Undated workers and future-dated starts are excluded.
+- **`NewlyDeparted`** is built from the **archive** (workers whose termination
+  date is in the last 30 days). A row with no frozen name is skipped.
+- The window is the trailing 30 days inclusive, evaluated in `Asia/Jerusalem`.
+- Excluded houses (see mapping below) are omitted, same as the other tabs.
+
+---
+
+## HARD RULE — no financial fields (all tabs)
+
+The digest carries **names, dates, roles, and status only**. No `salary`,
+`cost`, `rate`, `budget`, `allowance`, `pct`, `retainer`, or any other financial
+value is ever read into or written to **any** tab — not now, not in any future
 column.
 
 ---
@@ -120,12 +159,14 @@ non-physical / pre-opening houses are **excluded**:
   Its id is stored in the `DIGEST_SHEET_ID` Apps Script property. Shared
   **read-only** (Viewer) with `brayersandra@gmail.com`.
 - **Rebuild on write:** every roster write that can change a guide's name,
-  house, role, or start date — including the bulk `setWorkerStartDates` action —
-  rebuilds **both tabs** from scratch (`doPost` → `rebuildDigestSafe`).
-  Best-effort — a digest failure never fails the write.
+  house, role, start date, status, or termination — including the bulk
+  `setWorkerStartDates` action and `terminateAssignment` (which feeds
+  `NewlyDeparted`) — rebuilds **all four tabs** from scratch (`doPost` →
+  `rebuildDigestSafe`). Best-effort — a digest failure never fails the write.
 - **Periodic backstop:** a time-based trigger reruns `rebuildDigest` every
   6 hours, catching anything the inline rebuild missed and picking up dates
-  that roll into/out of the `NewGuides` window with no write.
+  that roll into/out of the `NewGuides` / `NewlyHired` / `NewlyDeparted` windows
+  with no write.
 
 ---
 
@@ -136,9 +177,13 @@ Run from the Apps Script editor, in order:
 1. **`setupDigestSpreadsheet`** — creates the spreadsheet, adds the
    `NewGuides` tab + frozen header, shares it read-only with
    `brayersandra@gmail.com`, stores the id in `DIGEST_SHEET_ID`, does a first
-   rebuild (which also creates the `GuidesRoster` tab), and logs the
-   spreadsheet id + URL. Idempotent (reuses an existing spreadsheet if the
-   property already points at one).
+   rebuild (which also creates the `GuidesRoster`, `NewlyHired`, and
+   `NewlyDeparted` tabs), and logs the spreadsheet id + URL. Idempotent (reuses
+   an existing spreadsheet if the property already points at one). Because
+   `rebuildDigest` clears + rewrites each tab, running it (or any roster write)
+   also materializes the appended `GuidesRoster` `status`/`endDate` columns and
+   the two new tabs on an existing spreadsheet — **no destructive migration is
+   needed**.
 2. **`installDigestTrigger`** — installs the 6-hour backstop trigger.
    Idempotent (clears any existing `rebuildDigest` triggers first).
 

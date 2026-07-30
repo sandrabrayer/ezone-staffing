@@ -2175,11 +2175,15 @@ function datesOverlap(aStart, aEnd, bStart, bEnd) {
 const DIGEST_SHEET_ID_PROP = 'DIGEST_SHEET_ID';
 
 // The tabs in the digest spreadsheet.
-//   NewGuides    — arrivals in the current-week look-ahead window (below).
-//   GuidesRoster — the full active-guide roster, one row per active
-//                  (guide × house), independent of any date window.
+//   NewGuides     — arrivals in the current-week look-ahead window (below).
+//   GuidesRoster  — the full active-guide roster, one row per active
+//                   (guide × house), independent of any date window.
+//   NewlyHired    — guides whose employment start date is in the last 30 days.
+//   NewlyDeparted — guides whose employment end date is in the last 30 days.
 const DIGEST_TAB = 'NewGuides';
 const DIGEST_ROSTER_TAB = 'GuidesRoster';
+const DIGEST_NEWLY_HIRED_TAB = 'NewlyHired';
+const DIGEST_NEWLY_DEPARTED_TAB = 'NewlyDeparted';
 
 // FROZEN CONTRACT — append-only. Never reorder, rename, or remove a column;
 // any new column goes on the END only (the coordinators app maps by header).
@@ -2200,7 +2204,34 @@ const DIGEST_HEADERS = ['house', 'guideName', 'startDate', 'role', 'updatedAt'];
 //   startDate  — YYYY-MM-DD employment start date (תאריך תחילת עבודה), or ''
 //                when not yet entered
 //   updatedAt  — ISO 8601 UTC, when this roster row was last rebuilt
-const DIGEST_ROSTER_HEADERS = ['house', 'guideName', 'startDate', 'updatedAt'];
+//   status     — worker status: active / chld / chlt (APPENDED — column 5)
+//   endDate    — YYYY-MM-DD employment/assignment end date when the worker is
+//                no longer active, else '' (APPENDED — column 6)
+// The original four columns keep their positions; status + endDate were added
+// on the END only. Never reorder or insert.
+const DIGEST_ROSTER_HEADERS = ['house', 'guideName', 'startDate', 'updatedAt', 'status', 'endDate'];
+
+// FROZEN CONTRACT — the two 30-day activity tabs. Same append-only + no-financial
+// rules. House here is the HUMAN-READABLE Hebrew display name (DIGEST_HOUSE_HEBREW),
+// same mapping as the app, so coordinators read house names directly.
+//   house      — Hebrew house display name
+//   guideName  — the guide/employee display name
+//   date       — YYYY-MM-DD: the start date (NewlyHired) or end date (NewlyDeparted)
+//   updatedAt  — ISO 8601 UTC, when this row was last rebuilt
+const DIGEST_ACTIVITY_HEADERS = ['house', 'guideName', 'date', 'updatedAt'];
+
+// Internal house id → Hebrew display name, the SAME mapping the app shows
+// (public/index.html HOUSES). Only the physical digest houses are listed;
+// pre-opening / hq houses are excluded, exactly like DIGEST_HOUSE_CANONICAL.
+const DIGEST_HOUSE_HEBREW = {
+  ramot:  'רמות השבים',
+  asher:  'רעננה אשר',
+  ofroni: 'קיסריה עפרוני',
+  rehab:  'קיסריה ריהאב',
+};
+
+// Activity window for NewlyHired / NewlyDeparted: the trailing N days.
+const DIGEST_ACTIVITY_DAYS = 30;
 
 // The digest spreadsheet is shared read-only with this address.
 const DIGEST_READER_EMAIL = 'brayersandra@gmail.com';
@@ -2266,6 +2297,31 @@ function digestIsoToYmd_(v) {
   return m ? m[1] : '';
 }
 
+// 'YYYY-MM-DD' shifted by deltaDays → 'YYYY-MM-DD' (UTC-noon anchored, so DST
+// never moves the day). Used for the trailing-N-days activity windows.
+function digestShiftYmd_(todayYmd, deltaDays) {
+  const d = digestYmdToUtcNoon_(todayYmd || todayLocal());
+  return digestUtcNoonToYmd_(new Date(d.getTime() + deltaDays * 86400000));
+}
+
+// Any stored date value → 'YYYY-MM-DD', or '' if unparseable. Handles the
+// clean 'YYYY-MM-DD' string AND a JS Date-string (e.g. a status_date cell the
+// sheet coerced to a Date, read back as "Thu Jul 16 2026 ... (Israel ...)").
+// The Date-string branch only runs in Apps Script, where the runtime tz is the
+// script tz (Asia/Jerusalem), so the local getters yield the intended day.
+function digestAnyDateToYmd_(v) {
+  const s = String(v == null ? '' : v).trim();
+  if (!s) return '';
+  const m = /^(\d{4}-\d{2}-\d{2})/.exec(s);
+  if (m) return m[1];
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return '';
+  const y = d.getFullYear();
+  const mo = ('0' + (d.getMonth() + 1)).slice(-2);
+  const da = ('0' + d.getDate()).slice(-2);
+  return y + '-' + mo + '-' + da;
+}
+
 // ---------- digest rows ----------
 
 // Builds the digest rows (arrays matching DIGEST_HEADERS) from the live
@@ -2310,7 +2366,13 @@ function computeDigestRows_(updatedAtIso, todayYmd) {
 // field), not the assignment's created_at. It may be '' when not yet entered —
 // an empty start date is allowed and expected for guides מורן hasn't filled in.
 //
-// NO financial fields are read or emitted — name, house, date only.
+// status  = the assignment's worker status (active / chld / chlt).
+// endDate = when the worker is no longer active (on leave), the date they left
+//   active duty (the leave start / status_date); '' while active. A terminated
+//   worker is archived and no longer on this roster, so their end date lives in
+//   the NewlyDeparted tab, not here.
+//
+// NO financial fields are read or emitted — name, house, dates, status only.
 function computeRosterRows_(updatedAtIso) {
   const workerById = {};
   readWorkersSafe().forEach(function (w) { workerById[w.id] = w; });
@@ -2322,12 +2384,68 @@ function computeRosterRows_(updatedAtIso) {
     const w = workerById[a.workerId];
     if (!w) return; // orphaned assignment — skip
     const startDate = digestIsoToYmd_(w.startDate); // '' when not yet entered
-    rows.push([house, w.name, startDate, updatedAtIso]);
+    const status = a.status || 'active';
+    const endDate = status === 'active' ? '' : digestAnyDateToYmd_(a.statusDate);
+    rows.push([house, w.name, startDate, updatedAtIso, status, endDate]);
   });
 
   // Stable, human-friendly order: house, then name.
   rows.sort(function (x, y) {
     return (x[0] + ' ' + x[1]).localeCompare(y[0] + ' ' + y[1]);
+  });
+  return rows;
+}
+
+// Builds the NewlyHired rows (arrays matching DIGEST_ACTIVITY_HEADERS): one row
+// per active (worker × house) whose worker START date falls in the last
+// DIGEST_ACTIVITY_DAYS. House is the Hebrew display name. Lets coordinators see
+// recent intakes and compute seniority for trainings. NO financial fields.
+function computeNewlyHiredRows_(updatedAtIso, todayYmd) {
+  const today = todayYmd || todayLocal();
+  const from = digestShiftYmd_(today, -DIGEST_ACTIVITY_DAYS);
+  const workerById = {};
+  readWorkersSafe().forEach(function (w) { workerById[w.id] = w; });
+
+  const rows = [];
+  readAssignmentsSafe().forEach(function (a) {
+    const houseHe = DIGEST_HOUSE_HEBREW[a.house];
+    if (!houseHe) return; // excluded / unknown house
+    const w = workerById[a.workerId];
+    if (!w) return; // orphaned assignment — skip
+    const date = digestIsoToYmd_(w.startDate);
+    if (!date || date < from || date > today) return; // outside the last 30 days
+    rows.push([houseHe, w.name, date, updatedAtIso]);
+  });
+
+  rows.sort(function (x, y) {
+    return (x[0] + ' ' + x[2] + ' ' + x[1])
+      .localeCompare(y[0] + ' ' + y[2] + ' ' + y[1]);
+  });
+  return rows;
+}
+
+// Builds the NewlyDeparted rows (arrays matching DIGEST_ACTIVITY_HEADERS): one
+// row per archived (worker × house) whose employment END (termination) date
+// falls in the last DIGEST_ACTIVITY_DAYS. House is the Hebrew display name.
+// Sourced from the archive — a departed worker is no longer on the live roster.
+// NO financial fields (the archive row carries pay terms; none are read).
+function computeNewlyDepartedRows_(updatedAtIso, todayYmd) {
+  const today = todayYmd || todayLocal();
+  const from = digestShiftYmd_(today, -DIGEST_ACTIVITY_DAYS);
+
+  const rows = [];
+  readArchiveV3Safe().forEach(function (a) {
+    const houseHe = DIGEST_HOUSE_HEBREW[a.house];
+    if (!houseHe) return; // excluded / unknown house
+    const date = digestIsoToYmd_(a.terminationDate);
+    if (!date || date < from || date > today) return; // outside the last 30 days
+    if (!a.name) return; // no frozen name — skip
+    rows.push([houseHe, a.name, date, updatedAtIso]);
+  });
+
+  rows.sort(function (x, y) {
+    return (x[0] + ' ' + x[2] + ' ' + x[1])
+      .localeCompare(y[0] + ' ' + y[2] + ' ' + y[1]);
   });
   return rows;
 }
@@ -2357,10 +2475,18 @@ function rebuildDigest() {
     const rosterRows = computeRosterRows_(updatedAt);
     writeDigestTab_(book, DIGEST_ROSTER_TAB, DIGEST_ROSTER_HEADERS, rosterRows);
 
+    // NewlyHired / NewlyDeparted — trailing 30-day intake + departure activity.
+    const hiredRows = computeNewlyHiredRows_(updatedAt);
+    writeDigestTab_(book, DIGEST_NEWLY_HIRED_TAB, DIGEST_ACTIVITY_HEADERS, hiredRows);
+    const departedRows = computeNewlyDepartedRows_(updatedAt);
+    writeDigestTab_(book, DIGEST_NEWLY_DEPARTED_TAB, DIGEST_ACTIVITY_HEADERS, departedRows);
+
     return {
       ok: true, updatedAt: updatedAt,
       tab: DIGEST_TAB, count: rows.length,
       rosterTab: DIGEST_ROSTER_TAB, rosterCount: rosterRows.length,
+      newlyHiredTab: DIGEST_NEWLY_HIRED_TAB, newlyHiredCount: hiredRows.length,
+      newlyDepartedTab: DIGEST_NEWLY_DEPARTED_TAB, newlyDepartedCount: departedRows.length,
     };
   } finally {
     lock.releaseLock();
@@ -2396,8 +2522,9 @@ function rebuildDigestSafe() {
 // ONE-TIME setup. Creates the standalone digest spreadsheet this app owns,
 // adds the NewGuides tab with the frozen header, shares it read-only with
 // DIGEST_READER_EMAIL, stores its id in the DIGEST_SHEET_ID script property,
-// does a first rebuild (which also creates the GuidesRoster tab), and LOGS the
-// spreadsheet id + URL. Idempotent: if the property already points at a
+// does a first rebuild (which also creates the GuidesRoster / NewlyHired /
+// NewlyDeparted tabs), and LOGS the spreadsheet id + URL. Idempotent: if the
+// property already points at a
 // spreadsheet we can open, it is reused (no duplicate created). Run from the
 // Apps Script editor:
 //   Run ▸ setupDigestSpreadsheet   → read the id from the execution log.
@@ -2407,14 +2534,21 @@ function setupDigestSpreadsheet() {
   if (existing) {
     try {
       SpreadsheetApp.openById(existing); // throws if stale / inaccessible
-      rebuildDigest(); // also creates/refreshes the GuidesRoster tab
+      // rebuildDigest does clear + rewrite per tab, so the two appended
+      // GuidesRoster columns and the NewlyHired / NewlyDeparted tabs all
+      // materialize here — no destructive migration needed.
+      rebuildDigest();
       Logger.log('Digest spreadsheet already exists (reused). ID: %s', existing);
       Logger.log('Tab: %s — columns: %s', DIGEST_TAB, DIGEST_HEADERS.join(', '));
       Logger.log('Tab: %s — columns: %s', DIGEST_ROSTER_TAB, DIGEST_ROSTER_HEADERS.join(', '));
+      Logger.log('Tab: %s — columns: %s', DIGEST_NEWLY_HIRED_TAB, DIGEST_ACTIVITY_HEADERS.join(', '));
+      Logger.log('Tab: %s — columns: %s', DIGEST_NEWLY_DEPARTED_TAB, DIGEST_ACTIVITY_HEADERS.join(', '));
       return {
         ok: true, reused: true, spreadsheetId: existing,
         tab: DIGEST_TAB, headers: DIGEST_HEADERS,
         rosterTab: DIGEST_ROSTER_TAB, rosterHeaders: DIGEST_ROSTER_HEADERS,
+        newlyHiredTab: DIGEST_NEWLY_HIRED_TAB, newlyDepartedTab: DIGEST_NEWLY_DEPARTED_TAB,
+        activityHeaders: DIGEST_ACTIVITY_HEADERS,
       };
     } catch (err) {
       Logger.log('Stored DIGEST_SHEET_ID not accessible (%s) — creating a new spreadsheet.',
@@ -2439,18 +2573,23 @@ function setupDigestSpreadsheet() {
       DIGEST_READER_EMAIL, (err && err.message) || err);
   }
 
-  rebuildDigest(); // fills NewGuides AND creates + fills the GuidesRoster tab
+  // Fills NewGuides AND creates + fills GuidesRoster, NewlyHired, NewlyDeparted.
+  rebuildDigest();
 
   Logger.log('Digest spreadsheet created.');
   Logger.log('  ID:      %s', id);
   Logger.log('  URL:     %s', book.getUrl());
   Logger.log('  Tab:     %s — columns: %s', DIGEST_TAB, DIGEST_HEADERS.join(', '));
   Logger.log('  Tab:     %s — columns: %s', DIGEST_ROSTER_TAB, DIGEST_ROSTER_HEADERS.join(', '));
+  Logger.log('  Tab:     %s — columns: %s', DIGEST_NEWLY_HIRED_TAB, DIGEST_ACTIVITY_HEADERS.join(', '));
+  Logger.log('  Tab:     %s — columns: %s', DIGEST_NEWLY_DEPARTED_TAB, DIGEST_ACTIVITY_HEADERS.join(', '));
   Logger.log('  Shared read-only with: %s', DIGEST_READER_EMAIL);
   return {
     ok: true, reused: false, spreadsheetId: id, url: book.getUrl(),
     tab: DIGEST_TAB, headers: DIGEST_HEADERS,
     rosterTab: DIGEST_ROSTER_TAB, rosterHeaders: DIGEST_ROSTER_HEADERS,
+    newlyHiredTab: DIGEST_NEWLY_HIRED_TAB, newlyDepartedTab: DIGEST_NEWLY_DEPARTED_TAB,
+    activityHeaders: DIGEST_ACTIVITY_HEADERS,
     sharedWith: DIGEST_READER_EMAIL,
   };
 }

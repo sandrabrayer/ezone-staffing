@@ -3266,12 +3266,41 @@ function rosterTableInner(rows){
   </div>`;
 }
 
-// Roster cell for a worker's employment start date (worker-level). Shows
-// DD/MM/YYYY, or a muted dash when not yet entered.
+// Roster cell for a worker's employment start date (worker-level), INLINE
+// EDITABLE. A native date input whose onchange saves just this one worker via
+// setWorkerStartDates; a worker with no date shows a "טרם הוזן" badge. The cell
+// is wrapped in an id'd span so saveRosterStartDate can re-render just this cell
+// (toggling the badge) without a full roster re-render.
 function workerStartDateCell(workerId){
   const w = workerById(workerId);
-  const sd = w && w.startDate ? w.startDate : '';
-  return sd ? escapeHtml(fmtDate(sd)) : '<span style="color:#B6B0A0">—</span>';
+  const id = escapeHtml(workerId);
+  const sd = w && w.startDate ? escapeHtml(w.startDate) : '';
+  const badge = sd ? '' : '<span style="display:inline-block;margin-inline-start:6px;padding:1px 7px;border-radius:6px;background:var(--line-strong);color:var(--ink-soft);font-size:12px;white-space:nowrap">טרם הוזן</span>';
+  return `<span id="rsdcell_${id}" class="rsd-cell" style="display:inline-flex;align-items:center">`
+    + `<input type="date" id="rsd_${id}" value="${sd}" onchange="saveRosterStartDate('${id}')" `
+    + `style="font-size:16px;padding:4px 6px;border:1px solid var(--line-strong);border-radius:6px;max-width:160px"/>`
+    + badge
+    + `</span>`;
+}
+
+// Inline-edit save for a roster start-date cell. Writes only this one worker
+// (setWorkerStartDates, single item), patches the local cache, then re-renders
+// the cell so the טרם הוזן badge appears/disappears.
+async function saveRosterStartDate(workerId){
+  const inp = document.getElementById('rsd_' + workerId);
+  if (!inp) return;
+  const startDate = inp.value; // '' clears; native input is already YYYY-MM-DD
+  inp.disabled = true;
+  try {
+    const res = await doAction({ action: 'setWorkerStartDates', updates: [{ id: workerId, startDate }] });
+    applyStartDateSaves(res, [{ id: workerId, startDate }]);
+    const cell = document.getElementById('rsdcell_' + workerId);
+    if (cell) cell.outerHTML = workerStartDateCell(workerId);
+    toast('התאריך נשמר');
+  } catch (err) {
+    toast(err.message || 'שגיאה בשמירה', true);
+    inp.disabled = false;
+  }
 }
 
 /* ---------- bulk start-date entry view ----------
@@ -3318,7 +3347,7 @@ function startDatesView(){
     const sd = w.startDate ? escapeHtml(w.startDate) : '';
     const nameKey = escapeHtml(String(w.name||'').toLowerCase());
     return `
-    <tr id="sdrow_${id}" data-name="${nameKey}">
+    <tr id="sdrow_${id}" data-name="${nameKey}" data-has-date="${w.startDate ? '1' : '0'}">
       <td>${escapeHtml(w.name)}</td>
       <td class="note-cell">${escapeHtml(sdWorkerHouses(w.id))}</td>
       <td><input type="date" id="sd_${id}" value="${sd}" style="max-width:170px"/></td>
@@ -3333,13 +3362,17 @@ function startDatesView(){
     : `<tr><td colspan="4"><div class="empty">אין עובדים</div></td></tr>`;
   return `
   <div class="head">
-    <h1>תאריכי תחילת עבודה</h1>
+    <h1>וותק ותאריכי קליטה</h1>
     <p>מילוי תאריך תחילת עבודה לעובדים קיימים. ניתן לשמור שורה בודדת או את כל השינויים יחד. שדה ריק = טרם הוזן.</p>
   </div>
 
   <div class="section">
+    <input type="text" id="sdSearch" dir="rtl" placeholder="חיפוש לפי שם…" oninput="applyStartDatesFilter()"
+           style="width:100%;font-size:16px;padding:10px 12px;border:1px solid var(--line-strong);border-radius:8px;margin-bottom:12px;box-sizing:border-box"/>
     <div class="section-head">
-      <input type="text" placeholder="חיפוש לפי שם…" oninput="filterStartDates(this.value)" style="flex:1;min-width:200px"/>
+      <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;font-size:15px">
+        <input type="checkbox" id="sdOnlyMissing" onchange="applyStartDatesFilter()"/> הצג רק ללא תאריך
+      </label>
       <span class="count-pill" id="sdProgress">${filled} מתוך ${workers.length} הוזנו</span>
       <button class="btn btn-primary" id="sdSaveAllBtn" onclick="saveAllStartDates()">שמירת כל השינויים</button>
     </div>
@@ -3354,15 +3387,23 @@ function startDatesView(){
   </div>`;
 }
 
-// Client-side name filter: hide non-matching rows in place so unsaved date
-// entries and focus survive (no innerHTML rebuild).
-function filterStartDates(q){
-  const needle = String(q||'').trim().toLowerCase();
+// Client-side filter: hide non-matching rows in place so unsaved date entries
+// and focus survive (no innerHTML rebuild). Combines the name search with the
+// "הצג רק ללא תאריך" toggle (default off). Each row carries data-has-date so
+// the toggle needs no lookup back into WORKERS.
+function applyStartDatesFilter(){
+  const searchEl = document.getElementById('sdSearch');
+  const onlyMissingEl = document.getElementById('sdOnlyMissing');
+  const needle = searchEl ? String(searchEl.value || '').trim().toLowerCase() : '';
+  const missingOnly = !!(onlyMissingEl && onlyMissingEl.checked);
   WORKERS.forEach(w => {
     const row = document.getElementById('sdrow_' + w.id);
     if (!row) return;
     const name = row.getAttribute('data-name') || '';
-    row.style.display = (!needle || name.indexOf(needle) >= 0) ? '' : 'none';
+    const hasDate = row.getAttribute('data-has-date') === '1';
+    const nameOk = !needle || name.indexOf(needle) >= 0;
+    const missOk = !missingOnly || !hasDate;
+    row.style.display = (nameOk && missOk) ? '' : 'none';
   });
 }
 
@@ -3376,6 +3417,7 @@ async function saveWorkerStartDate(workerId){
   try {
     const res = await doAction({ action: 'setWorkerStartDates', updates: [{ id: workerId, startDate }] });
     applyStartDateSaves(res, [{ id: workerId, startDate }]);
+    syncStartDateRow(workerId);
     updateStartDateProgress();
     toast('התאריך נשמר');
   } catch (err) {
@@ -3383,6 +3425,15 @@ async function saveWorkerStartDate(workerId){
   } finally {
     setBusy(btnId, false);
   }
+}
+
+// Reflect a saved value onto the bulk row's data-has-date, then re-apply the
+// filter so the "הצג רק ללא תאריך" toggle stays truthful after an inline save.
+function syncStartDateRow(workerId){
+  const row = document.getElementById('sdrow_' + workerId);
+  const w = workerById(workerId);
+  if (row) row.setAttribute('data-has-date', (w && w.startDate) ? '1' : '0');
+  applyStartDatesFilter();
 }
 
 // Batch-save every row whose date input differs from the stored value.
@@ -3399,6 +3450,12 @@ async function saveAllStartDates(){
   try {
     const res = await doAction({ action: 'setWorkerStartDates', updates });
     applyStartDateSaves(res, updates);
+    updates.forEach(u => {
+      const row = document.getElementById('sdrow_' + u.id);
+      const w = workerById(u.id);
+      if (row) row.setAttribute('data-has-date', (w && w.startDate) ? '1' : '0');
+    });
+    applyStartDatesFilter();
     updateStartDateProgress();
     toast('נשמרו ' + updates.length + ' תאריכים');
   } catch (err) {
