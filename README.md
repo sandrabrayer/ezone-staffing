@@ -191,3 +191,4 @@ Covers:
 ## Migrating Moran's existing data
 
 The Sheet starts empty (only header rows). Moran will enter the workforce from scratch the first time she logs in.
+
