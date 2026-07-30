@@ -1335,11 +1335,11 @@ tbody tr:hover{
    ============================================================ */
 
 const HOUSES = [
-  {id:'ramot',       name:'בית מאזן רמות השבים',  mgr:'שחר'},
-  {id:'asher',       name:'איזון רעננה - אשר',     mgr:'עידו'},
+  {id:'ramot',       name:'רמות השבים',            mgr:'שחר'},
+  {id:'asher',       name:'רעננה אשר',              mgr:'עידו'},
   {id:'ofroni',      name:'קיסריה עפרוני',          mgr:'חנן'},
   {id:'rehab',       name:'קיסריה ריהאב',           mgr:'רנטה'},
-  {id:'pardes',      name:'איזון רעננה - פרדס',    mgr:''},
+  {id:'pardes',      name:'רעננה הפרדס',            mgr:''},
   {id:'sde_eliezer', name:'שדה אליעזר',              mgr:''},
   {id:'hq',          name:'מטה',                     mgr:''},
 ];
@@ -3292,6 +3292,24 @@ function sdWorkerHouses(workerId){
   return names.length ? names.join(', ') : '—';
 }
 
+// Per-row edit action for the start-dates screen. Opens the EXISTING worker
+// dialog, which already contains the house-transfer control
+// "בית נוסף / מעבר בית" — so one button gives both editing and house move,
+// with no second UI to keep in sync.
+//
+// Deliberately DISABLED for a worker with no assignment: openWorker falls
+// back to HOUSES[0], which would silently open a create-assignment form on
+// רמות השבים for someone who belongs nowhere yet. A disabled button that
+// explains itself beats a form that quietly does the wrong thing.
+function sdEditBtn(workerId){
+  const houses = ASSIGNMENTS.filter(a => a.workerId === workerId).map(a => a.house);
+  const id = escapeHtml(workerId);
+  if (!houses.length){
+    return `<button class="btn btn-sm" disabled title="אין שיבוץ - יש להוסיף שיבוץ מתוך מסך הבית">עריכה</button>`;
+  }
+  return `<button class="btn btn-sm" onclick="openWorker('${id}', '${escapeHtml(houses[0])}')">עריכה</button>`;
+}
+
 function startDatesView(){
   const workers = WORKERS.slice().sort((a,b) => String(a.name||'').localeCompare(String(b.name||''), 'he'));
   const filled = workers.filter(w => w.startDate).length;
@@ -3304,7 +3322,10 @@ function startDatesView(){
       <td>${escapeHtml(w.name)}</td>
       <td class="note-cell">${escapeHtml(sdWorkerHouses(w.id))}</td>
       <td><input type="date" id="sd_${id}" value="${sd}" style="max-width:170px"/></td>
-      <td><button class="btn btn-sm btn-accent-hover" id="sdbtn_${id}" onclick="saveWorkerStartDate('${id}')">שמירה</button></td>
+      <td>
+        <button class="btn btn-sm btn-accent-hover" id="sdbtn_${id}" onclick="saveWorkerStartDate('${id}')">שמירה</button>
+        ${sdEditBtn(w.id)}
+      </td>
     </tr>`;
   }).join('');
   const body = workers.length
