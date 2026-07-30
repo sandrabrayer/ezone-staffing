@@ -155,8 +155,19 @@ test('validateAction createWorker/updateWorker carry shift_commitment through', 
 
 // ---------- start_date (worker-level, optional) ----------
 
-test('validateWorker: omitting startDate yields empty string, not undefined', () => {
+// Presence, not value. Omitting the key must leave it ABSENT rather than
+// defaulting it to '', because Apps Script treats absent as "leave the
+// stored date alone" and '' as "clear it". Defaulting here is what would
+// let a caller that never mentions startDate wipe one.
+test('validateWorker: omitting startDate leaves the key absent, not empty', () => {
   const w = validateWorker({ name: 'שחר' });
+  assert.ok(!Object.prototype.hasOwnProperty.call(w, 'startDate'),
+    'absent means "do not touch the stored date"');
+});
+
+test('validateWorker: an explicit empty startDate is kept, and means "clear it"', () => {
+  const w = validateWorker({ name: 'שחר', startDate: '' });
+  assert.ok(Object.prototype.hasOwnProperty.call(w, 'startDate'));
   assert.equal(w.startDate, '');
 });
 
@@ -218,7 +229,10 @@ test('validateAction createWorker/updateWorker carry startDate through', () => {
   const created = validateAction({ action: 'createWorker', worker: { name: 'רון', startDate: '2024-09-01' } });
   assert.equal(created.worker.startDate, '2024-09-01');
   const updated = validateAction({ action: 'updateWorker', id: 'w1', worker: { name: 'רון' } });
-  assert.equal(updated.worker.startDate, '', 'omitted startDate stays empty on update');
+  assert.ok(!Object.prototype.hasOwnProperty.call(updated.worker, 'startDate'),
+    'an update that never mentions startDate must not carry one — otherwise it blanks the stored value');
+  const cleared = validateAction({ action: 'updateWorker', id: 'w1', worker: { name: 'רון', startDate: '' } });
+  assert.equal(cleared.worker.startDate, '', 'clearing on purpose still works');
 });
 
 test('the proxy whitelist is exactly the shift-compliance enum — no drift', () => {
@@ -890,4 +904,36 @@ test('validateAction: setBudget / getBudgets', () => {
   assert.equal(s2.budget.instructorsAmount, 30000);
   const g = validateAction({ action: 'getBudgets' });
   assert.equal(g.action, 'getBudgets');
+});
+
+// ---------- regression: the backfilled dates must survive a partial update ----------
+
+// July 2026: 46 start dates were imported from מורן's workbook. Before that
+// every date was empty, so an unconditional write to column 6 was harmless.
+// It is not harmless any more — this guards the whole class of bug.
+test('a name-only update cannot blank a start date that is already stored', () => {
+  const rename = validateAction({
+    action: 'updateWorker',
+    id: 'wms5vydbd0zwx',
+    worker: { name: 'נמרוד ליבוביץ' },
+  });
+  assert.ok(!Object.prototype.hasOwnProperty.call(rename.worker, 'startDate'),
+    'renaming a guide must not carry a startDate the caller never set');
+});
+
+test('Code.gs reports startDate presence so it can skip the write', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const gs = fs.readFileSync(path.join(__dirname, '..', 'apps-script', 'Code.gs'), 'utf8');
+  const vw = /function validateWorker\(w\)[\s\S]*?\n}/.exec(gs);
+  assert.ok(vw, 'validateWorker should be defined');
+  assert.ok(/hasOwnProperty\.call\(w, 'startDate'\)/.test(vw[0]),
+    'presence must be detected with hasOwnProperty, not truthiness');
+
+  const uw = /function updateWorker\(body\)[\s\S]*?\n}/.exec(gs);
+  assert.ok(uw, 'updateWorker should be defined');
+  assert.ok(/if \(w\.hasStartDate\)/.test(uw[0]), 'the column-6 write must be conditional');
+  const before = uw[0].slice(0, uw[0].indexOf('if (w.hasStartDate)'));
+  assert.ok(!/getRange\(row, 6\)\.setValue/.test(before),
+    'nothing may write column 6 unconditionally');
 });
