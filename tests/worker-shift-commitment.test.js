@@ -38,14 +38,18 @@ test('shift-compliance SHIFT_COMMITMENTS keys are exactly the enum', () => {
 // Backend: apps-script/Code.gs
 // ---------------------------------------------------------------------------
 
-test('HEADERS_WORKERS appends shift_commitment LAST (append-only invariant)', () => {
+test('HEADERS_WORKERS keeps shift_commitment at index 4 (append-only invariant)', () => {
   const m = /const HEADERS_WORKERS = \[([^\]]*)\]/.exec(gs);
   assert.ok(m, 'HEADERS_WORKERS declaration should be present');
   const cols = m[1].split(',').map(s => s.trim().replace(/^'|'$/g, '')).filter(Boolean);
-  assert.deepStrictEqual(cols, ['id', 'name', 'notes', 'created_at', 'shift_commitment'],
+  // start_date was appended AFTER shift_commitment (append-only): the original
+  // five columns keep their positions so no stored value ever shifts.
+  assert.deepStrictEqual(cols, ['id', 'name', 'notes', 'created_at', 'shift_commitment', 'start_date'],
     'a mid-array insert would shift every stored column and corrupt every row');
-  assert.strictEqual(cols[cols.length - 1], 'shift_commitment',
-    'shift_commitment must be the LAST header');
+  assert.strictEqual(cols[4], 'shift_commitment',
+    'shift_commitment must stay at index 4 (readWorkersSafe reads r[4] for it)');
+  assert.strictEqual(cols[cols.length - 1], 'start_date',
+    'start_date is the newest column and must be LAST');
 });
 
 test('Code.gs whitelist constant matches the enum', () => {

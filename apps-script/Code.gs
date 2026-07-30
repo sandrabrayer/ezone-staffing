@@ -97,9 +97,12 @@ const LEGACY_PREFIX = '_legacy_';
 
 // APPEND-ONLY. _readAll/_writeAll map columns by position, so a mid-array
 // insert would shift every stored value one column right and corrupt every
-// row. 'shift_commitment' (worker-level contractual commitment) must stay
-// last; new columns go after it, never before.
-const HEADERS_WORKERS = ['id', 'name', 'notes', 'created_at', 'shift_commitment'];
+// row. New columns go on the END only, never before an existing one.
+//   4 shift_commitment — worker-level contractual commitment;
+//   5 start_date       — employment start date (תאריך תחילת עבודה), 'YYYY-MM-DD'
+//      or blank. Empty on every legacy row: NOT back-filled with an import /
+//      today date (a wrong start date is worse than a missing one).
+const HEADERS_WORKERS = ['id', 'name', 'notes', 'created_at', 'shift_commitment', 'start_date'];
 // APPEND-ONLY (columns 0-14 are the original v3 shape). Columns 15+ were
 // appended later and MUST stay in this order — read/write map by position:
 //   15 allowance, 16 status, 17 status_date  (fixes the leave-status bug —
@@ -275,6 +278,7 @@ function doPost(e) {
       case 'createWorker':         result = createWorker(body); break;
       case 'updateWorker':         result = updateWorker(body); break;
       case 'deleteWorker':         result = deleteWorker(body); break;
+      case 'setWorkerStartDates':  result = setWorkerStartDates(body); break;
       case 'addAssignment':        result = addAssignment(body); break;
       case 'updateAssignment':     result = updateAssignment(body); break;
       case 'deleteAssignment':     result = deleteAssignment(body); break;
@@ -401,7 +405,22 @@ function validateWorker(w) {
   if (!name) throw httpError(400, 'name required');
   const notes = String(w.notes || '').trim().slice(0, 500);
   const shiftCommitment = validateShiftCommitment(w.shift_commitment);
-  return { name: name, notes: notes, shiftCommitment: shiftCommitment };
+  // Employment start date — optional (blank until entered).
+  const startDate = validateOptionalDate(w.startDate, 'startDate');
+  return { name: name, notes: notes, shiftCommitment: shiftCommitment, startDate: startDate };
+}
+
+// Batch of { id, startDate } for setWorkerStartDates. id required; startDate
+// optional ('' clears). Mirror of lib/validate.js.
+function validateWorkerStartDates(items) {
+  if (!Array.isArray(items)) throw httpError(400, 'updates required');
+  if (items.length > MONTHLY_ACTUALS_MAX_ITEMS) throw httpError(400, 'too many items');
+  return items.map(function (it) {
+    if (!it || typeof it !== 'object') throw httpError(400, 'bad update');
+    const id = String(it.id || '').trim();
+    if (!id) throw httpError(400, 'missing id');
+    return { id: id, startDate: validateOptionalDate(it.startDate, 'startDate') };
+  });
 }
 
 function validateAssignment(a) {
@@ -561,6 +580,15 @@ function validateRequiredDate(d, label) {
   return s;
 }
 
+// A date that may be blank: '' passes through (means "not entered"); a
+// non-empty value must be 'YYYY-MM-DD'. Mirror of lib/validate.js.
+function validateOptionalDate(d, label) {
+  const s = String(d || '').trim();
+  if (!s) return '';
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) throw httpError(400, 'bad ' + label);
+  return s;
+}
+
 // Month key 'YYYY-MM' with a real 01–12 month. Mirror of lib/validate.js.
 function validateMonth(m, label) {
   const s = String(m || '').trim();
@@ -671,6 +699,9 @@ function readWorkersSafe() {
       // Worker-level contractual commitment. Raw value straight off the
       // sheet — key name matches lib/shift-compliance.js worker.shift_commitment.
       shift_commitment: String(r[4] || ''),
+      // Employment start date (תאריך תחילת עבודה). 'YYYY-MM-DD' or '' when not
+      // yet entered — legacy rows are blank until מורן fills them in.
+      startDate: formatDateCell(r[5]),
     };
   });
 }
@@ -938,9 +969,9 @@ function createWorker(body) {
     const sh = sheetByName(WORKERS_TAB);
     const id = newId('w');
     const createdAt = new Date().toISOString();
-    // Column order MUST match HEADERS_WORKERS (append-only): shift_commitment last.
-    sh.appendRow([id, w.name, w.notes, createdAt, w.shiftCommitment]);
-    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, createdAt: createdAt, shift_commitment: w.shiftCommitment } };
+    // Column order MUST match HEADERS_WORKERS (append-only): start_date last.
+    sh.appendRow([id, w.name, w.notes, createdAt, w.shiftCommitment, w.startDate]);
+    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, createdAt: createdAt, shift_commitment: w.shiftCommitment, startDate: w.startDate } };
   } finally {
     lock.releaseLock();
   }
@@ -959,7 +990,9 @@ function updateWorker(body) {
     sh.getRange(row, 3).setValue(w.notes);
     // Column 5 = shift_commitment (HEADERS_WORKERS index 4, 1-based col 5).
     sh.getRange(row, 5).setValue(w.shiftCommitment);
-    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, shift_commitment: w.shiftCommitment } };
+    // Column 6 = start_date (HEADERS_WORKERS index 5, 1-based col 6).
+    sh.getRange(row, 6).setValue(w.startDate);
+    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, shift_commitment: w.shiftCommitment, startDate: w.startDate } };
   } finally {
     lock.releaseLock();
   }
@@ -986,6 +1019,38 @@ function deleteWorker(body) {
     if (row < 0) throw httpError(404, 'worker not found');
     sh.deleteRow(row);
     return { ok: true };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// Batch-set the employment start date (start_date, col 6) on many workers at
+// once — the backend for the bulk fill-in view where מורן enters dates for
+// ~130 existing employees. Each item is { id, startDate }; startDate may be
+// blank (clears the cell). Only the start_date column is touched — name,
+// notes and shift_commitment are never overwritten by this path. One pass over
+// the id column builds the id→row map, so the whole batch is a single read.
+function setWorkerStartDates(body) {
+  const updates = validateWorkerStartDates(body && body.updates);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const sh = sheetByName(WORKERS_TAB);
+    const values = sh.getDataRange().getValues();
+    const rowById = {};
+    for (let i = 1; i < values.length; i++) {
+      const rid = String(values[i][0] || '').trim();
+      if (rid) rowById[rid] = i + 1; // 1-based sheet row
+    }
+    const saved = [];
+    const missing = [];
+    updates.forEach(function (u) {
+      const row = rowById[u.id];
+      if (!row) { missing.push(u.id); return; }
+      sh.getRange(row, 6).setValue(u.startDate); // col 6 = start_date
+      saved.push({ id: u.id, startDate: u.startDate });
+    });
+    return { ok: true, saved: saved, count: saved.length, missing: missing };
   } finally {
     lock.releaseLock();
   }
@@ -2068,7 +2133,7 @@ function datesOverlap(aStart, aEnd, bStart, bEnd) {
 }
 
 /* ============================================================
-   Digest export — the "NewGuides" tab
+   Digest export — the "NewGuides" + "GuidesRoster" tabs
    ------------------------------------------------------------
    A read-only feed for the coordinators app (same pattern proven
    by logistics + kitchen). This app is the SOLE writer of a small,
@@ -2076,9 +2141,14 @@ function datesOverlap(aStart, aEnd, bStart, bEnd) {
    only reads it. See DIGEST-CONTRACT.md at the repo root for the
    frozen schema.
 
-   What it contains: one row per (guide/employee × house) whose
-   start date falls in the current week or the next two weeks — the
-   arrivals a house coordinator should prepare for.
+   Two tabs, both rebuilt together on every roster write + the
+   periodic trigger:
+     NewGuides    — one row per (guide/employee × house) whose start
+                    date falls in the current week or the next two
+                    weeks — the arrivals a coordinator prepares for.
+     GuidesRoster — one row per active (guide × house), the FULL
+                    roster with each guide's employment start date
+                    (blank until entered). No date window.
 
    HARD RULE: NO financial fields. Only names, dates, and roles are
    ever read or written here — never salary, cost, rate, or budget.
@@ -2089,8 +2159,12 @@ function datesOverlap(aStart, aEnd, bStart, bEnd) {
 // app can be the digest's sole writer without touching the roster book.
 const DIGEST_SHEET_ID_PROP = 'DIGEST_SHEET_ID';
 
-// The single tab in the digest spreadsheet.
+// The tabs in the digest spreadsheet.
+//   NewGuides    — arrivals in the current-week look-ahead window (below).
+//   GuidesRoster — the full active-guide roster, one row per active
+//                  (guide × house), independent of any date window.
 const DIGEST_TAB = 'NewGuides';
+const DIGEST_ROSTER_TAB = 'GuidesRoster';
 
 // FROZEN CONTRACT — append-only. Never reorder, rename, or remove a column;
 // any new column goes on the END only (the coordinators app maps by header).
@@ -2101,6 +2175,17 @@ const DIGEST_TAB = 'NewGuides';
 //   role       — Hebrew role text, optional (may be '')
 //   updatedAt  — ISO 8601 UTC, when this digest row was last rebuilt
 const DIGEST_HEADERS = ['house', 'guideName', 'startDate', 'role', 'updatedAt'];
+
+// FROZEN CONTRACT — append-only, same rules as DIGEST_HEADERS. The GuidesRoster
+// tab lists EVERY active guide (not just the look-ahead window), so the
+// coordinators app has the full house roster with each guide's employment
+// start date. NO financial fields, ever. See DIGEST-CONTRACT.md.
+//   house      — canonical house id (see DIGEST_HOUSE_CANONICAL)
+//   guideName  — the guide/employee display name
+//   startDate  — YYYY-MM-DD employment start date (תאריך תחילת עבודה), or ''
+//                when not yet entered
+//   updatedAt  — ISO 8601 UTC, when this roster row was last rebuilt
+const DIGEST_ROSTER_HEADERS = ['house', 'guideName', 'startDate', 'updatedAt'];
 
 // The digest spreadsheet is shared read-only with this address.
 const DIGEST_READER_EMAIL = 'brayersandra@gmail.com';
@@ -2125,7 +2210,7 @@ const DIGEST_WEEKS_AHEAD = 2;
 // (getMonthlyActuals, getBudgets, setBudget, upsertMonthlyActuals, absence /
 // coverage actions) are intentionally absent — they never touch the digest.
 const DIGEST_REBUILD_ACTIONS = [
-  'createWorker', 'updateWorker', 'deleteWorker',
+  'createWorker', 'updateWorker', 'deleteWorker', 'setWorkerStartDates',
   'addAssignment', 'updateAssignment', 'deleteAssignment',
   'moveAssignment', 'terminateAssignment',
 ];
@@ -2202,6 +2287,36 @@ function computeDigestRows_(updatedAtIso, todayYmd) {
   return rows;
 }
 
+// Builds the GuidesRoster rows (arrays matching DIGEST_ROSTER_HEADERS) from the
+// live roster: one row per active (worker × house) assignment whose house maps
+// to a canonical digest id — ALL active guides, with NO date-window filter.
+//
+// startDate here is the worker's EMPLOYMENT start date (the new worker-level
+// field), not the assignment's created_at. It may be '' when not yet entered —
+// an empty start date is allowed and expected for guides מורן hasn't filled in.
+//
+// NO financial fields are read or emitted — name, house, date only.
+function computeRosterRows_(updatedAtIso) {
+  const workerById = {};
+  readWorkersSafe().forEach(function (w) { workerById[w.id] = w; });
+
+  const rows = [];
+  readAssignmentsSafe().forEach(function (a) {
+    const house = DIGEST_HOUSE_CANONICAL[a.house];
+    if (!house) return; // excluded / unknown house
+    const w = workerById[a.workerId];
+    if (!w) return; // orphaned assignment — skip
+    const startDate = digestIsoToYmd_(w.startDate); // '' when not yet entered
+    rows.push([house, w.name, startDate, updatedAtIso]);
+  });
+
+  // Stable, human-friendly order: house, then name.
+  rows.sort(function (x, y) {
+    return (x[0] + ' ' + x[1]).localeCompare(y[0] + ' ' + y[1]);
+  });
+  return rows;
+}
+
 // ---------- digest rebuild ----------
 
 // Rebuilds the entire NewGuides tab from scratch (clear + rewrite). This app
@@ -2217,18 +2332,37 @@ function rebuildDigest() {
   lock.waitLock(15000);
   try {
     const book = SpreadsheetApp.openById(id);
-    let sh = book.getSheetByName(DIGEST_TAB);
-    if (!sh) sh = book.insertSheet(DIGEST_TAB);
     const updatedAt = new Date().toISOString(); // ISO 8601, UTC (Z)
+
+    // NewGuides — the current-week arrivals window.
     const rows = computeDigestRows_(updatedAt);
-    const out = [DIGEST_HEADERS].concat(rows);
-    sh.clearContents();
-    sh.getRange(1, 1, out.length, DIGEST_HEADERS.length).setValues(out);
-    sh.setFrozenRows(1);
-    return { ok: true, tab: DIGEST_TAB, count: rows.length, updatedAt: updatedAt };
+    writeDigestTab_(book, DIGEST_TAB, DIGEST_HEADERS, rows);
+
+    // GuidesRoster — the full active-guide roster (no date window).
+    const rosterRows = computeRosterRows_(updatedAt);
+    writeDigestTab_(book, DIGEST_ROSTER_TAB, DIGEST_ROSTER_HEADERS, rosterRows);
+
+    return {
+      ok: true, updatedAt: updatedAt,
+      tab: DIGEST_TAB, count: rows.length,
+      rosterTab: DIGEST_ROSTER_TAB, rosterCount: rosterRows.length,
+    };
   } finally {
     lock.releaseLock();
   }
+}
+
+// Clear + rewrite one digest tab from scratch (header row + rows), freezing the
+// header. Creates the tab if it doesn't exist yet. Shared by every tab so they
+// stay identical in shape.
+function writeDigestTab_(book, tabName, headers, rows) {
+  let sh = book.getSheetByName(tabName);
+  if (!sh) sh = book.insertSheet(tabName);
+  const out = [headers].concat(rows);
+  sh.clearContents();
+  sh.getRange(1, 1, out.length, headers.length).setValues(out);
+  sh.setFrozenRows(1);
+  return sh;
 }
 
 // Best-effort wrapper for the write path: never throws, so a digest failure
@@ -2247,9 +2381,10 @@ function rebuildDigestSafe() {
 // ONE-TIME setup. Creates the standalone digest spreadsheet this app owns,
 // adds the NewGuides tab with the frozen header, shares it read-only with
 // DIGEST_READER_EMAIL, stores its id in the DIGEST_SHEET_ID script property,
-// does a first rebuild, and LOGS the spreadsheet id + URL. Idempotent: if the
-// property already points at a spreadsheet we can open, it is reused (no
-// duplicate created). Run from the Apps Script editor:
+// does a first rebuild (which also creates the GuidesRoster tab), and LOGS the
+// spreadsheet id + URL. Idempotent: if the property already points at a
+// spreadsheet we can open, it is reused (no duplicate created). Run from the
+// Apps Script editor:
 //   Run ▸ setupDigestSpreadsheet   → read the id from the execution log.
 function setupDigestSpreadsheet() {
   const props = PropertiesService.getScriptProperties();
@@ -2257,13 +2392,14 @@ function setupDigestSpreadsheet() {
   if (existing) {
     try {
       SpreadsheetApp.openById(existing); // throws if stale / inaccessible
-      rebuildDigest();
+      rebuildDigest(); // also creates/refreshes the GuidesRoster tab
       Logger.log('Digest spreadsheet already exists (reused). ID: %s', existing);
-      Logger.log('Tab: %s', DIGEST_TAB);
-      Logger.log('Columns: %s', DIGEST_HEADERS.join(', '));
+      Logger.log('Tab: %s — columns: %s', DIGEST_TAB, DIGEST_HEADERS.join(', '));
+      Logger.log('Tab: %s — columns: %s', DIGEST_ROSTER_TAB, DIGEST_ROSTER_HEADERS.join(', '));
       return {
         ok: true, reused: true, spreadsheetId: existing,
         tab: DIGEST_TAB, headers: DIGEST_HEADERS,
+        rosterTab: DIGEST_ROSTER_TAB, rosterHeaders: DIGEST_ROSTER_HEADERS,
       };
     } catch (err) {
       Logger.log('Stored DIGEST_SHEET_ID not accessible (%s) — creating a new spreadsheet.',
@@ -2288,17 +2424,19 @@ function setupDigestSpreadsheet() {
       DIGEST_READER_EMAIL, (err && err.message) || err);
   }
 
-  rebuildDigest();
+  rebuildDigest(); // fills NewGuides AND creates + fills the GuidesRoster tab
 
   Logger.log('Digest spreadsheet created.');
   Logger.log('  ID:      %s', id);
   Logger.log('  URL:     %s', book.getUrl());
-  Logger.log('  Tab:     %s', DIGEST_TAB);
-  Logger.log('  Columns: %s', DIGEST_HEADERS.join(', '));
+  Logger.log('  Tab:     %s — columns: %s', DIGEST_TAB, DIGEST_HEADERS.join(', '));
+  Logger.log('  Tab:     %s — columns: %s', DIGEST_ROSTER_TAB, DIGEST_ROSTER_HEADERS.join(', '));
   Logger.log('  Shared read-only with: %s', DIGEST_READER_EMAIL);
   return {
     ok: true, reused: false, spreadsheetId: id, url: book.getUrl(),
-    tab: DIGEST_TAB, headers: DIGEST_HEADERS, sharedWith: DIGEST_READER_EMAIL,
+    tab: DIGEST_TAB, headers: DIGEST_HEADERS,
+    rosterTab: DIGEST_ROSTER_TAB, rosterHeaders: DIGEST_ROSTER_HEADERS,
+    sharedWith: DIGEST_READER_EMAIL,
   };
 }
 
