@@ -341,6 +341,19 @@ tbody tr:hover{
   margin-inline-start:6px;
   white-space:nowrap;
 }
+/* Dashboard cross-house worker search results + the row flash on navigation. */
+.dash-results{display:flex;flex-direction:column;gap:8px;margin-bottom:16px}
+.dash-result{
+  display:flex;align-items:center;gap:14px;width:100%;text-align:right;
+  padding:12px 14px;border:1px solid var(--line-strong);border-radius:8px;
+  background:var(--bg-surface);color:var(--ink);cursor:pointer;font-size:15px;
+}
+.dash-result:hover{border-color:var(--accent-deep);background:var(--bg-elevated)}
+.dash-result-name{font-weight:700;min-width:160px}
+.dash-result-house{color:var(--ink-soft)}
+.dash-result-role{color:var(--ink-soft);margin-inline-start:auto}
+@keyframes rowFlash{0%{background:var(--warning)}100%{background:transparent}}
+.row-highlight>td{animation:rowFlash 2.4s ease-out}
 .pct-bar{display:flex;align-items:center;gap:10px}
 .pct-track{width:72px;height:6px;background:var(--line-strong);border-radius:99px;overflow:hidden}
 .pct-fill{height:100%;background:var(--grad);border-radius:99px}
@@ -1434,7 +1447,12 @@ const {
   workerTotalCost: calcWorkerTotalCost,
   activeAbsenceForWorker: calcActiveAbsenceForWorker,
   networkAbsenceCoverageRows: calcNetworkAbsenceCoverageRows,
+  searchWorkers: calcSearchWorkers,
 } = window.EZONE_CALC;
+
+// Set by the dashboard search when a result is clicked → go(house) navigates,
+// then render() flashes the matching roster row. Cleared after it fires.
+let pendingHighlightWorker = '';
 
 // ---------- state ----------
 let WORKERS = [];
@@ -3093,7 +3111,7 @@ function render(){
   if (view === 'central')      app.innerHTML = centralView();
   else if (view === 'archive') app.innerHTML = archiveView();
   else if (view === 'startdates') app.innerHTML = startDatesView();
-  else                         app.innerHTML = houseView(view);
+  else                       { app.innerHTML = houseView(view); highlightWorkerRow(); }
 }
 
 function centralView(){
@@ -3139,9 +3157,11 @@ function centralView(){
     ${monthPickerHtml()}
   </div>
 
-  <input type="text" id="dashSearch" dir="rtl" placeholder="חיפוש עובד/ת לפי שם…" oninput="filterDashboard(this.value)"
+  <input type="text" id="dashSearch" dir="rtl" placeholder="חיפוש עובד/ת לפי שם…" oninput="dashboardSearch(this.value)"
          style="width:100%;font-size:16px;padding:10px 12px;border:1px solid var(--line-strong);border-radius:8px;margin-bottom:16px;box-sizing:border-box"/>
+  <div id="dashResults" class="dash-results" style="display:none"></div>
 
+  <div id="dashBody">
   <div class="stats">
     <div class="stat accent">
       <div class="lbl">סה״כ עובדים/ות</div>
@@ -3182,7 +3202,8 @@ function centralView(){
     <div class="house-grid">${houseBoxes}</div>
   </div>
 
-  ${budgetSummarySection(today)}`;
+  ${budgetSummarySection(today)}
+  </div>`;
 }
 
 // One dashboard JOIN row. Read-only — no buttons, no openX() handlers.
@@ -3193,10 +3214,6 @@ function renderNetworkAbsenceRow(row){
   const a = row.absence;
   const c = row.coverage;
   const dates = `${escapeHtml(fmtDate(a.startDate))}–${escapeHtml(fmtDate(a.endDate))}`;
-  // data-name carries the absent worker's name (and the covering worker's, so a
-  // search finds either) for the dashboard name filter — see filterDashboard.
-  const nameKey = ((a.workerId ? workerName(a.workerId) : '') + ' ' +
-    (c ? workerName(c.coveringWorkerId) : '')).trim().toLowerCase();
   const nameHtml = a.workerId
     ? `<span class="net-name">${escapeHtml(workerName(a.workerId))}</span>`
     : `<span class="net-stub-name">(ללא רישום נעדר/ת)</span>`;
@@ -3207,7 +3224,7 @@ function renderNetworkAbsenceRow(row){
        <span class="net-cover-house">(מ${escapeHtml(houseName(c.coveringHouse))})</span>`
     : `<span class="net-no-cov">⚠️ ללא מחליף</span>`;
   return `
-  <div class="net-absence-row${c ? '' : ' net-orphan'}" data-name="${escapeHtml(nameKey)}">
+  <div class="net-absence-row${c ? '' : ' net-orphan'}">
     ${nameHtml}
     <span class="net-house">(${escapeHtml(houseName(a.house))})</span>
     <span class="net-sep">—</span>
@@ -3216,15 +3233,56 @@ function renderNetworkAbsenceRow(row){
   </div>`;
 }
 
-// Dashboard (מבט כללי) worker-name filter. Hides network-absence rows whose
-// worker(s) don't match — filtered in place so typing stays snappy and keeps
-// focus; the term resets naturally when the view re-renders.
-function filterDashboard(q){
-  const needle = String(q || '').trim().toLowerCase();
-  document.querySelectorAll('.net-absence-row').forEach(row => {
-    const name = row.getAttribute('data-name') || '';
-    row.style.display = (!needle || name.indexOf(needle) >= 0) ? '' : 'none';
-  });
+// Dashboard (מבט כללי) cross-house worker search. Typing matches workers by
+// name across EVERY house (calcSearchWorkers over WORKERS × ASSIGNMENTS) and
+// shows a results list — name, house display name, role — in #dashResults,
+// hiding the normal dashboard body. Empty query restores the dashboard.
+// Clicking a result navigates to that worker's house tab and flashes their row.
+function dashboardSearch(q){
+  const results = document.getElementById('dashResults');
+  const body = document.getElementById('dashBody');
+  if (!results || !body) return;
+  const needle = String(q || '').trim();
+  if (!needle){
+    results.style.display = 'none';
+    results.innerHTML = '';
+    body.style.display = '';
+    return;
+  }
+  body.style.display = 'none';
+  results.style.display = '';
+  const matches = calcSearchWorkers(needle, WORKERS, ASSIGNMENTS);
+  if (!matches.length){
+    results.innerHTML = `<div class="empty">לא נמצאו עובדים/ות בשם זה</div>`;
+    return;
+  }
+  results.innerHTML = matches.map(m => `
+    <button type="button" class="dash-result" onclick="goToWorker('${escapeHtml(m.workerId)}','${escapeHtml(m.house)}')">
+      <span class="dash-result-name">${escapeHtml(m.name)}</span>
+      <span class="dash-result-house">${escapeHtml(houseName(m.house))}</span>
+      <span class="dash-result-role">${escapeHtml(m.role || '—')}</span>
+    </button>`).join('');
+}
+
+// Navigate to a worker's house tab and flash their roster row. go() re-renders
+// synchronously, so we stash the id and let render() apply the highlight after
+// the house view is in the DOM (the worker may sit in either roster subtable).
+function goToWorker(workerId, house){
+  pendingHighlightWorker = workerId;
+  go(house);
+}
+
+// Flash the roster row(s) for a worker, then clear the pending id. Called from
+// render() after a house view is built. Scrolls the first match into view.
+function highlightWorkerRow(){
+  if (!pendingHighlightWorker) return;
+  const id = pendingHighlightWorker;
+  pendingHighlightWorker = '';
+  const rows = document.querySelectorAll('tr[data-worker="' + (window.CSS && CSS.escape ? CSS.escape(id) : id) + '"]');
+  if (!rows.length) return;
+  rows.forEach(r => r.classList.add('row-highlight'));
+  rows[0].scrollIntoView({ block: 'center' });
+  setTimeout(() => rows.forEach(r => r.classList.remove('row-highlight')), 2600);
 }
 
 function archiveView(){
@@ -3280,7 +3338,7 @@ function rosterRow(a){
   const aId = escapeHtml(a.id);
   const hId = escapeHtml(a.house);
   return `
-  <tr${calcIsOnLeave(a) ? ' style="opacity:.72"' : ''}>
+  <tr data-worker="${wId}"${calcIsOnLeave(a) ? ' style="opacity:.72"' : ''}>
     <td>
       <button class="link-name" onclick="openWorker('${wId}', '${hId}')">${escapeHtml(workerName(a.workerId))}</button>
       ${leaveBadge(a)}

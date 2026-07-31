@@ -132,19 +132,4 @@ test('source: no display path stringifies a Date object for rendering', () => {
   }
 });
 
-// ---------------------------------------------------------------------------
-// Dashboard worker-name search (מבט כללי)
-// ---------------------------------------------------------------------------
-
-test('source: dashboard has a prominent RTL worker-name search wired to filterDashboard', () => {
-  const m = /<input type="text" id="dashSearch"[^>]*>/.exec(html);
-  assert.ok(m, 'a search input with id dashSearch must exist on the dashboard');
-  const tag = m[0];
-  assert.ok(/dir="rtl"/.test(tag), 'RTL preserved');
-  assert.ok(/width:100%/.test(tag), 'full-row width');
-  assert.ok(/font-size:16px/.test(tag), '16px font');
-  assert.ok(/oninput="filterDashboard\(this\.value\)"/.test(tag), 'typing filters the dashboard');
-  assert.ok(/function filterDashboard/.test(html), 'filterDashboard must be defined');
-  assert.ok(/data-name="\$\{escapeHtml\(nameKey\)\}"/.test(html),
-    'network rows must carry data-name for the filter');
-});
+// Dashboard search wiring lives in tests/dashboard-search.test.js.
