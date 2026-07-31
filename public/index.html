@@ -321,6 +321,26 @@ tbody tr:hover{
   letter-spacing:0.02em;
   margin-inline-start:6px;
 }
+/* Leave status: a compact label-only pill (חל"ד / חל"ט) with the start date
+   as plain small text beside it, on one line — never wrapped inside the pill. */
+.leave-badge{
+  display:inline-block;
+  font-size:11px;
+  font-weight:700;
+  background:var(--warning);
+  color:#1a1200;
+  padding:3px 10px;
+  border-radius:999px;
+  letter-spacing:0.02em;
+  margin-inline-start:6px;
+  white-space:nowrap;
+}
+.leave-since{
+  font-size:12px;
+  color:var(--ink-soft);
+  margin-inline-start:6px;
+  white-space:nowrap;
+}
 .pct-bar{display:flex;align-items:center;gap:10px}
 .pct-track{width:72px;height:6px;background:var(--line-strong);border-radius:99px;overflow:hidden}
 .pct-fill{height:100%;background:var(--grad);border-radius:99px}
@@ -1551,13 +1571,29 @@ async function submitPin(){
 /* ---------- helpers ---------- */
 
 const fmt = n => '₪'+Number(n||0).toLocaleString('he-IL');
-// fmtDate: server stores ISO YYYY-MM-DD; UI displays DD/MM/YYYY. Plain string
-// reformat (no Date parsing) so timezone never shifts the day.
+// The ONE date formatter for the whole UI → DD/MM/YYYY. Every displayed date
+// must go through this; nothing renders a raw Date object / Date string.
+// Handles, in order: a Date object; an ISO 'YYYY-MM-DD' prefix (reformatted by
+// string surgery so the timezone never shifts the day); an already-formatted
+// 'DD/MM/YYYY'; and — the bug this closes — a stored value the Sheet coerced to
+// a JS Date, read back as e.g. "Thu Jul 16 2026 00:00:00 GMT+0300 (Israel
+// Daylight Time)". Anything unparseable renders as '' rather than leaking a raw
+// Date string into the page.
+function fmtDateParts(d, m, y){
+  return `${('0'+d).slice(-2)}/${('0'+m).slice(-2)}/${y}`;
+}
 function fmtDate(s){
+  if (s instanceof Date){
+    return isNaN(s.getTime()) ? '' : fmtDateParts(s.getDate(), s.getMonth()+1, s.getFullYear());
+  }
   const str = String(s||'').trim();
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(str);
-  if (!m) return str;
-  return `${m[3]}/${m[2]}/${m[1]}`;
+  if (!str) return '';
+  let m = /^(\d{4})-(\d{2})-(\d{2})/.exec(str);        // ISO — no Date parse, tz-safe
+  if (m) return `${m[3]}/${m[2]}/${m[1]}`;
+  if (/^\d{2}\/\d{2}\/\d{4}$/.test(str)) return str;    // already DD/MM/YYYY
+  const d = new Date(str);                              // JS Date-string (coerced status_date etc.)
+  if (!isNaN(d.getTime())) return fmtDateParts(d.getDate(), d.getMonth()+1, d.getFullYear());
+  return '';                                            // never render a raw Date string
 }
 const houseName = id => (HOUSES.find(h=>h.id===id)||{}).name||id;
 const houseMgr  = id => (HOUSES.find(h=>h.id===id)||{}).mgr||'';
@@ -1878,8 +1914,11 @@ const STATUS_LABELS = { chld: 'חל"ד', chlt: 'חל"ט' };
 function leaveBadge(a){
   if (!calcIsOnLeave(a)) return '';
   const label = STATUS_LABELS[String(a.status)] || 'חופשה';
-  const since = a.statusDate ? ' מ־' + escapeHtml(fmtDate(a.statusDate)) : '';
-  return ` <span class="type-tag" style="background:var(--warning);color:#1a1200">${label}${since}</span>`;
+  // Only the label lives in the pill; the date is plain small text beside it
+  // (fmtDate → DD/MM/YYYY, never a raw Date string), all on one line.
+  const d = a.statusDate ? fmtDate(a.statusDate) : '';
+  const since = d ? ` <span class="leave-since">מ־${escapeHtml(d)}</span>` : '';
+  return ` <span class="leave-badge">${escapeHtml(label)}</span>${since}`;
 }
 
 // Per-assignment terms display: chooses the appropriate string per type
@@ -3100,6 +3139,9 @@ function centralView(){
     ${monthPickerHtml()}
   </div>
 
+  <input type="text" id="dashSearch" dir="rtl" placeholder="חיפוש עובד/ת לפי שם…" oninput="filterDashboard(this.value)"
+         style="width:100%;font-size:16px;padding:10px 12px;border:1px solid var(--line-strong);border-radius:8px;margin-bottom:16px;box-sizing:border-box"/>
+
   <div class="stats">
     <div class="stat accent">
       <div class="lbl">סה״כ עובדים/ות</div>
@@ -3151,6 +3193,10 @@ function renderNetworkAbsenceRow(row){
   const a = row.absence;
   const c = row.coverage;
   const dates = `${escapeHtml(fmtDate(a.startDate))}–${escapeHtml(fmtDate(a.endDate))}`;
+  // data-name carries the absent worker's name (and the covering worker's, so a
+  // search finds either) for the dashboard name filter — see filterDashboard.
+  const nameKey = ((a.workerId ? workerName(a.workerId) : '') + ' ' +
+    (c ? workerName(c.coveringWorkerId) : '')).trim().toLowerCase();
   const nameHtml = a.workerId
     ? `<span class="net-name">${escapeHtml(workerName(a.workerId))}</span>`
     : `<span class="net-stub-name">(ללא רישום נעדר/ת)</span>`;
@@ -3161,13 +3207,24 @@ function renderNetworkAbsenceRow(row){
        <span class="net-cover-house">(מ${escapeHtml(houseName(c.coveringHouse))})</span>`
     : `<span class="net-no-cov">⚠️ ללא מחליף</span>`;
   return `
-  <div class="net-absence-row${c ? '' : ' net-orphan'}">
+  <div class="net-absence-row${c ? '' : ' net-orphan'}" data-name="${escapeHtml(nameKey)}">
     ${nameHtml}
     <span class="net-house">(${escapeHtml(houseName(a.house))})</span>
     <span class="net-sep">—</span>
     <span class="net-reason">${escapeHtml(a.reasonType)}, ${dates}</span>
     ${tail}
   </div>`;
+}
+
+// Dashboard (מבט כללי) worker-name filter. Hides network-absence rows whose
+// worker(s) don't match — filtered in place so typing stays snappy and keeps
+// focus; the term resets naturally when the view re-renders.
+function filterDashboard(q){
+  const needle = String(q || '').trim().toLowerCase();
+  document.querySelectorAll('.net-absence-row').forEach(row => {
+    const name = row.getAttribute('data-name') || '';
+    row.style.display = (!needle || name.indexOf(needle) >= 0) ? '' : 'none';
+  });
 }
 
 function archiveView(){
