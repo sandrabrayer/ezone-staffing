@@ -27,7 +27,10 @@ const gs = fs.readFileSync(GS_PATH, 'utf8');
 // someone reorders or renames a column in Code.gs, this literal must be
 // updated too, which is exactly the review checkpoint we want.
 const FROZEN_HEADERS = ['house', 'guideName', 'startDate', 'role', 'updatedAt'];
-const FROZEN_ROSTER_HEADERS = ['house', 'guideName', 'startDate', 'updatedAt'];
+// GuidesRoster: the original four columns plus the two APPENDED (status, endDate).
+const ROSTER_ORIGINAL_HEADERS = ['house', 'guideName', 'startDate', 'updatedAt'];
+const FROZEN_ROSTER_HEADERS = ['house', 'guideName', 'startDate', 'updatedAt', 'status', 'endDate'];
+const FROZEN_ACTIVITY_HEADERS = ['house', 'guideName', 'date', 'updatedAt'];
 const FINANCIAL_WORDS = ['salary', 'cost', 'rate', 'budget', 'retainer', 'allowance', 'pct', 'amount'];
 
 // Evaluate Code.gs once in a bare sandbox. Top-level only runs const/function
@@ -74,6 +77,56 @@ test('DIGEST_ROSTER_HEADERS is exactly the frozen GuidesRoster contract, in orde
   const cols = m[1].split(',').map(s => s.trim().replace(/^'|'$/g, '')).filter(Boolean);
   assert.deepStrictEqual(cols, FROZEN_ROSTER_HEADERS,
     'GuidesRoster columns are an append-only contract — never reorder/rename/remove');
+});
+
+test('GuidesRoster: status + endDate were APPENDED to the end, not inserted', () => {
+  const m = /const DIGEST_ROSTER_HEADERS = \[([^\]]*)\]/.exec(gs);
+  const cols = m[1].split(',').map(s => s.trim().replace(/^'|'$/g, '')).filter(Boolean);
+  // The original four columns keep their exact positions (0..3).
+  assert.deepStrictEqual(cols.slice(0, ROSTER_ORIGINAL_HEADERS.length), ROSTER_ORIGINAL_HEADERS,
+    'the original GuidesRoster columns must not move — new columns go on the END only');
+  // The two new columns are strictly appended after them, in this order.
+  assert.deepStrictEqual(cols.slice(ROSTER_ORIGINAL_HEADERS.length), ['status', 'endDate'],
+    'status then endDate must be appended after the original columns');
+  assert.strictEqual(cols.length, ROSTER_ORIGINAL_HEADERS.length + 2,
+    'exactly two columns were appended');
+});
+
+test('DIGEST_ACTIVITY_HEADERS is the frozen NewlyHired/NewlyDeparted contract', () => {
+  const m = /const DIGEST_ACTIVITY_HEADERS = \[([^\]]*)\]/.exec(gs);
+  assert.ok(m, 'DIGEST_ACTIVITY_HEADERS should be declared');
+  const cols = m[1].split(',').map(s => s.trim().replace(/^'|'$/g, '')).filter(Boolean);
+  assert.deepStrictEqual(cols, FROZEN_ACTIVITY_HEADERS);
+});
+
+test('the new tabs (GuidesRoster status/endDate + activity) carry NO financial field', () => {
+  for (const col of FROZEN_ROSTER_HEADERS.concat(FROZEN_ACTIVITY_HEADERS)) {
+    for (const bad of FINANCIAL_WORDS) {
+      assert.ok(!col.toLowerCase().includes(bad),
+        `header "${col}" must not resemble financial field "${bad}"`);
+    }
+  }
+});
+
+test('NewlyHired + NewlyDeparted tabs are named and written on every rebuild', () => {
+  assert.ok(/const DIGEST_NEWLY_HIRED_TAB = 'NewlyHired'/.test(gs), 'NewlyHired tab name');
+  assert.ok(/const DIGEST_NEWLY_DEPARTED_TAB = 'NewlyDeparted'/.test(gs), 'NewlyDeparted tab name');
+  assert.ok(/writeDigestTab_\(book, DIGEST_NEWLY_HIRED_TAB,/.test(gs), 'NewlyHired written');
+  assert.ok(/writeDigestTab_\(book, DIGEST_NEWLY_DEPARTED_TAB,/.test(gs), 'NewlyDeparted written');
+});
+
+test('DIGEST_HOUSE_HEBREW maps the four physical houses to their app display names', () => {
+  const m = /const DIGEST_HOUSE_HEBREW = \{([\s\S]*?)\};/.exec(gs);
+  assert.ok(m, 'DIGEST_HOUSE_HEBREW should be declared');
+  const block = m[1];
+  assert.ok(/ramot:\s*'רמות השבים'/.test(block));
+  assert.ok(/asher:\s*'רעננה אשר'/.test(block));
+  assert.ok(/ofroni:\s*'קיסריה עפרוני'/.test(block));
+  assert.ok(/rehab:\s*'קיסריה ריהאב'/.test(block));
+  // Excluded houses must not appear.
+  for (const excluded of ['pardes', 'sde_eliezer', 'hq']) {
+    assert.ok(!new RegExp(excluded + ':').test(block), `${excluded} must be excluded`);
+  }
 });
 
 test('the GuidesRoster header carries NO financial field (hard rule)', () => {
@@ -257,7 +310,9 @@ test('computeRosterRows_ emits house/guideName/startDate/updatedAt — NEVER fin
   const rows = plain(ctx.computeRosterRows_('2026-07-27T12:00:00.000Z'));
   assert.strictEqual(rows.length, 1);
   // startDate is the WORKER's employment start date, not the assignment's createdAt.
-  assert.deepStrictEqual(rows[0], ['raanana', 'דנה', '2025-01-15', '2026-07-27T12:00:00.000Z']);
+  // Appended cols: status defaults to 'active', endDate '' while active.
+  assert.deepStrictEqual(rows[0],
+    ['raanana', 'דנה', '2025-01-15', '2026-07-27T12:00:00.000Z', 'active', '']);
   const flat = JSON.stringify(rows);
   for (const bad of ['99999', '80', '5000', '6000']) {
     assert.ok(!flat.includes(bad), `financial value ${bad} must not appear in the roster`);
@@ -309,7 +364,93 @@ test('computeRosterRows_ lists a guide once per house when placed at several', (
   );
   const rows = plain(ctx.computeRosterRows_('2026-07-27T12:00:00Z'));
   assert.deepStrictEqual(rows, [
-    ['ramot', 'משה', '2020-06-01', '2026-07-27T12:00:00Z'],
-    ['rehab', 'משה', '2020-06-01', '2026-07-27T12:00:00Z'],
+    ['ramot', 'משה', '2020-06-01', '2026-07-27T12:00:00Z', 'active', ''],
+    ['rehab', 'משה', '2020-06-01', '2026-07-27T12:00:00Z', 'active', ''],
   ]);
+});
+
+test('computeRosterRows_ reflects leave status + endDate (status_date) when not active', () => {
+  const ctx = withRoster(
+    [{ id: 'w1', name: 'רות', startDate: '2022-01-01' },
+     { id: 'w2', name: 'גל', startDate: '2023-05-05' }],
+    [
+      // active → status 'active', endDate ''
+      { id: 'a1', workerId: 'w1', house: 'ramot', role: 'מדריך/ה', status: 'active', statusDate: '' },
+      // on חל"ד → status 'chld', endDate = the leave start (status_date)
+      { id: 'a2', workerId: 'w2', house: 'ramot', role: 'מדריך/ה', status: 'chld', statusDate: '2026-07-16' },
+    ],
+  );
+  const rows = plain(ctx.computeRosterRows_('2026-07-27T12:00:00Z'));
+  const byName = {};
+  rows.forEach(r => { byName[r[1]] = { status: r[4], endDate: r[5] }; });
+  assert.deepStrictEqual(byName['רות'], { status: 'active', endDate: '' });
+  assert.deepStrictEqual(byName['גל'], { status: 'chld', endDate: '2026-07-16' });
+});
+
+// ---------------------------------------------------------------------------
+// NewlyHired — trailing-30-day intakes (Hebrew house names)
+// ---------------------------------------------------------------------------
+
+test('computeNewlyHiredRows_ lists start dates in the last 30 days, Hebrew house, NO financials', () => {
+  const ctx = withRoster(
+    [{ id: 'w1', name: 'טרי', startDate: '2026-07-10' },   // 17 days ago — in
+     { id: 'w2', name: 'ותיק', startDate: '2026-01-01' },  // long ago — out
+     { id: 'w3', name: 'קצה', startDate: '2026-06-27' },   // exactly 30 days ago — in
+     { id: 'w4', name: 'עתידי', startDate: '2026-08-20' }], // future — out
+    [
+      { id: 'a1', workerId: 'w1', house: 'asher',  role: 'מדריך/ה', salary: 9999 },
+      { id: 'a2', workerId: 'w2', house: 'ramot',  role: 'מדריך/ה' },
+      { id: 'a3', workerId: 'w3', house: 'rehab',  role: 'מדריך/ה' },
+      { id: 'a4', workerId: 'w4', house: 'ramot',  role: 'מדריך/ה' },
+    ],
+  );
+  const rows = plain(ctx.computeNewlyHiredRows_('2026-07-27T12:00:00Z', '2026-07-27'));
+  assert.deepStrictEqual(rows, [
+    ['קיסריה ריהאב', 'קצה', '2026-06-27', '2026-07-27T12:00:00Z'],
+    ['רעננה אשר', 'טרי', '2026-07-10', '2026-07-27T12:00:00Z'],
+  ]);
+  assert.ok(!JSON.stringify(rows).includes('9999'), 'no financial value leaks');
+});
+
+test('computeNewlyHiredRows_ excludes pre-opening / hq houses and undated workers', () => {
+  const ctx = withRoster(
+    [{ id: 'w1', name: 'A', startDate: '2026-07-10' },
+     { id: 'w2', name: 'B', startDate: '2026-07-10' },
+     { id: 'w3', name: 'C', startDate: '' }],
+    [
+      { id: 'a1', workerId: 'w1', house: 'pardes', role: 'מדריך/ה' }, // excluded
+      { id: 'a2', workerId: 'w2', house: 'hq',     role: 'אחר' },      // excluded
+      { id: 'a3', workerId: 'w3', house: 'ramot',  role: 'מדריך/ה' }, // no start date
+    ],
+  );
+  const rows = plain(ctx.computeNewlyHiredRows_('2026-07-27T12:00:00Z', '2026-07-27'));
+  assert.deepStrictEqual(rows, []);
+});
+
+// ---------------------------------------------------------------------------
+// NewlyDeparted — trailing-30-day departures from the archive (Hebrew house)
+// ---------------------------------------------------------------------------
+
+function withArchive(archiveRows, workers) {
+  const ctx = loadCtx();
+  ctx.readArchiveV3Safe = () => archiveRows;
+  ctx.readWorkersSafe = () => (workers || []);
+  ctx.readAssignmentsSafe = () => [];
+  return ctx;
+}
+
+test('computeNewlyDepartedRows_ lists termination dates in the last 30 days, Hebrew house, NO financials', () => {
+  const ctx = withArchive([
+    { id: 'arc1', name: 'עוזב', house: 'ofroni', terminationDate: '2026-07-20', salary: 12345 }, // in
+    { id: 'arc2', name: 'ישן',  house: 'ramot',  terminationDate: '2026-01-01' },                 // out
+    { id: 'arc3', name: 'קצה',  house: 'rehab',  terminationDate: '2026-06-27' },                 // 30 days — in
+    { id: 'arc4', name: '',     house: 'ramot',  terminationDate: '2026-07-21' },                 // no name — skip
+    { id: 'arc5', name: 'פרדס', house: 'pardes', terminationDate: '2026-07-21' },                 // excluded house
+  ]);
+  const rows = plain(ctx.computeNewlyDepartedRows_('2026-07-27T12:00:00Z', '2026-07-27'));
+  assert.deepStrictEqual(rows, [
+    ['קיסריה עפרוני', 'עוזב', '2026-07-20', '2026-07-27T12:00:00Z'],
+    ['קיסריה ריהאב', 'קצה', '2026-06-27', '2026-07-27T12:00:00Z'],
+  ]);
+  assert.ok(!JSON.stringify(rows).includes('12345'), 'no financial value leaks');
 });
