@@ -108,6 +108,47 @@ jobs:
           fi
           echo "Redeploy confirmed — new version of the EXISTING deployment (same /exec URL)."
 
+      - name: Verify the web app still answers anonymously (JSON, not a sign-in page)
+        # A programmatic redeploy can silently drop the deployment's
+        # "Anyone, even anonymous" access, so the /exec URL starts serving
+        # Google's sign-in HTML instead of JSON (incident 2026-07-30: consumers
+        # got the accounts.google.com login page ~12 min after a green deploy).
+        # This step turns that silent breakage into an immediate, loud failure.
+        #
+        # Anonymous ON PURPOSE: a healthy web app returns JSON even without the
+        # shared secret (e.g. {"error":"unauthorized"}); a broken deployment
+        # redirects to accounts.google.com / ServiceLogin and returns HTML.
+        # The /exec URL is a non-secret repository VARIABLE, not hardcoded.
+        # Propagation can lag the deploy, so we retry up to 3× with 20s gaps.
+        env:
+          EXEC_URL: ${{ vars.APPS_SCRIPT_EXEC_URL }}
+        run: |
+          if [ -z "$EXEC_URL" ]; then
+            echo "::error::Missing repository variable APPS_SCRIPT_EXEC_URL — the web app /exec URL this health check needs. Add it in GitHub → repo Settings → Secrets and variables → Actions → the 'Variables' tab → New repository variable → name it APPS_SCRIPT_EXEC_URL, value = the deployment's /exec URL. The deploy above already succeeded; this post-deploy check just cannot run without the URL."
+            exit 1
+          fi
+          healthy=0
+          for attempt in 1 2 3; do
+            meta="$(curl -sS -L --max-time 30 -o body.txt -w '%{http_code}|%{url_effective}|%{content_type}' "$EXEC_URL" || echo '000||')"
+            code="${meta%%|*}"; rest="${meta#*|}"; eff="${rest%%|*}"; ctype="${rest#*|}"
+            # Healthy = the body parses as JSON AND we did not get redirected to a Google sign-in URL.
+            if node -e "JSON.parse(require('fs').readFileSync('body.txt','utf8'))" >/dev/null 2>&1 \
+               && ! printf '%s' "$eff" | grep -qiE 'accounts\.google\.com|ServiceLogin'; then
+              echo "Attempt ${attempt}/3 OK — anonymous /exec returned JSON (HTTP ${code}, ${ctype})."
+              healthy=1
+              break
+            fi
+            echo "Attempt ${attempt}/3 failed — response was not anonymous JSON (HTTP ${code}, type='${ctype}', final='${eff}'): $(head -c 200 body.txt | tr '\n' ' ')"
+            if [ "$attempt" -lt 3 ]; then
+              echo "Waiting 20s for deploy propagation before retrying…"
+              sleep 20
+            fi
+          done
+          if [ "$healthy" -ne 1 ]; then
+            echo "::error::Apps Script web app is NOT answering anonymously — it is serving Google sign-in HTML instead of JSON, so the deployment lost 'Anyone, even anonymous' access. Recovery: 1) open https://script.google.com  2) open the ezone-staffing project  3) click Deploy  4) click Manage deployments  5) click the pencil (Edit) on the existing deployment  6) set Version to 'New version'  7) set 'Who has access' to 'Anyone'  8) click Deploy."
+            exit 1
+          fi
+
       - name: Remove credentials from the runner
         if: always()
         run: rm -f "$HOME/.clasprc.json"
