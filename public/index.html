@@ -321,6 +321,39 @@ tbody tr:hover{
   letter-spacing:0.02em;
   margin-inline-start:6px;
 }
+/* Leave status: a compact label-only pill (חל"ד / חל"ט) with the start date
+   as plain small text beside it, on one line — never wrapped inside the pill. */
+.leave-badge{
+  display:inline-block;
+  font-size:11px;
+  font-weight:700;
+  background:var(--warning);
+  color:#1a1200;
+  padding:3px 10px;
+  border-radius:999px;
+  letter-spacing:0.02em;
+  margin-inline-start:6px;
+  white-space:nowrap;
+}
+.leave-since{
+  font-size:12px;
+  color:var(--ink-soft);
+  margin-inline-start:6px;
+  white-space:nowrap;
+}
+/* Dashboard cross-house worker search results + the row flash on navigation. */
+.dash-results{display:flex;flex-direction:column;gap:8px;margin-bottom:16px}
+.dash-result{
+  display:flex;align-items:center;gap:14px;width:100%;text-align:right;
+  padding:12px 14px;border:1px solid var(--line-strong);border-radius:8px;
+  background:var(--bg-surface);color:var(--ink);cursor:pointer;font-size:15px;
+}
+.dash-result:hover{border-color:var(--accent-deep);background:var(--bg-elevated)}
+.dash-result-name{font-weight:700;min-width:160px}
+.dash-result-house{color:var(--ink-soft)}
+.dash-result-role{color:var(--ink-soft);margin-inline-start:auto}
+@keyframes rowFlash{0%{background:var(--warning)}100%{background:transparent}}
+.row-highlight>td{animation:rowFlash 2.4s ease-out}
 .pct-bar{display:flex;align-items:center;gap:10px}
 .pct-track{width:72px;height:6px;background:var(--line-strong);border-radius:99px;overflow:hidden}
 .pct-fill{height:100%;background:var(--grad);border-radius:99px}
@@ -1414,7 +1447,12 @@ const {
   workerTotalCost: calcWorkerTotalCost,
   activeAbsenceForWorker: calcActiveAbsenceForWorker,
   networkAbsenceCoverageRows: calcNetworkAbsenceCoverageRows,
+  searchWorkers: calcSearchWorkers,
 } = window.EZONE_CALC;
+
+// Set by the dashboard search when a result is clicked → go(house) navigates,
+// then render() flashes the matching roster row. Cleared after it fires.
+let pendingHighlightWorker = '';
 
 // ---------- state ----------
 let WORKERS = [];
@@ -1551,13 +1589,29 @@ async function submitPin(){
 /* ---------- helpers ---------- */
 
 const fmt = n => '₪'+Number(n||0).toLocaleString('he-IL');
-// fmtDate: server stores ISO YYYY-MM-DD; UI displays DD/MM/YYYY. Plain string
-// reformat (no Date parsing) so timezone never shifts the day.
+// The ONE date formatter for the whole UI → DD/MM/YYYY. Every displayed date
+// must go through this; nothing renders a raw Date object / Date string.
+// Handles, in order: a Date object; an ISO 'YYYY-MM-DD' prefix (reformatted by
+// string surgery so the timezone never shifts the day); an already-formatted
+// 'DD/MM/YYYY'; and — the bug this closes — a stored value the Sheet coerced to
+// a JS Date, read back as e.g. "Thu Jul 16 2026 00:00:00 GMT+0300 (Israel
+// Daylight Time)". Anything unparseable renders as '' rather than leaking a raw
+// Date string into the page.
+function fmtDateParts(d, m, y){
+  return `${('0'+d).slice(-2)}/${('0'+m).slice(-2)}/${y}`;
+}
 function fmtDate(s){
+  if (s instanceof Date){
+    return isNaN(s.getTime()) ? '' : fmtDateParts(s.getDate(), s.getMonth()+1, s.getFullYear());
+  }
   const str = String(s||'').trim();
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(str);
-  if (!m) return str;
-  return `${m[3]}/${m[2]}/${m[1]}`;
+  if (!str) return '';
+  let m = /^(\d{4})-(\d{2})-(\d{2})/.exec(str);        // ISO — no Date parse, tz-safe
+  if (m) return `${m[3]}/${m[2]}/${m[1]}`;
+  if (/^\d{2}\/\d{2}\/\d{4}$/.test(str)) return str;    // already DD/MM/YYYY
+  const d = new Date(str);                              // JS Date-string (coerced status_date etc.)
+  if (!isNaN(d.getTime())) return fmtDateParts(d.getDate(), d.getMonth()+1, d.getFullYear());
+  return '';                                            // never render a raw Date string
 }
 const houseName = id => (HOUSES.find(h=>h.id===id)||{}).name||id;
 const houseMgr  = id => (HOUSES.find(h=>h.id===id)||{}).mgr||'';
@@ -1878,8 +1932,11 @@ const STATUS_LABELS = { chld: 'חל"ד', chlt: 'חל"ט' };
 function leaveBadge(a){
   if (!calcIsOnLeave(a)) return '';
   const label = STATUS_LABELS[String(a.status)] || 'חופשה';
-  const since = a.statusDate ? ' מ־' + escapeHtml(fmtDate(a.statusDate)) : '';
-  return ` <span class="type-tag" style="background:var(--warning);color:#1a1200">${label}${since}</span>`;
+  // Only the label lives in the pill; the date is plain small text beside it
+  // (fmtDate → DD/MM/YYYY, never a raw Date string), all on one line.
+  const d = a.statusDate ? fmtDate(a.statusDate) : '';
+  const since = d ? ` <span class="leave-since">מ־${escapeHtml(d)}</span>` : '';
+  return ` <span class="leave-badge">${escapeHtml(label)}</span>${since}`;
 }
 
 // Per-assignment terms display: chooses the appropriate string per type
@@ -3054,7 +3111,7 @@ function render(){
   if (view === 'central')      app.innerHTML = centralView();
   else if (view === 'archive') app.innerHTML = archiveView();
   else if (view === 'startdates') app.innerHTML = startDatesView();
-  else                         app.innerHTML = houseView(view);
+  else                       { app.innerHTML = houseView(view); highlightWorkerRow(); }
 }
 
 function centralView(){
@@ -3100,6 +3157,11 @@ function centralView(){
     ${monthPickerHtml()}
   </div>
 
+  <input type="text" id="dashSearch" dir="rtl" placeholder="חיפוש עובד/ת לפי שם…" oninput="dashboardSearch(this.value)"
+         style="width:100%;font-size:16px;padding:10px 12px;border:1px solid var(--line-strong);border-radius:8px;margin-bottom:16px;box-sizing:border-box"/>
+  <div id="dashResults" class="dash-results" style="display:none"></div>
+
+  <div id="dashBody">
   <div class="stats">
     <div class="stat accent">
       <div class="lbl">סה״כ עובדים/ות</div>
@@ -3140,7 +3202,8 @@ function centralView(){
     <div class="house-grid">${houseBoxes}</div>
   </div>
 
-  ${budgetSummarySection(today)}`;
+  ${budgetSummarySection(today)}
+  </div>`;
 }
 
 // One dashboard JOIN row. Read-only — no buttons, no openX() handlers.
@@ -3168,6 +3231,58 @@ function renderNetworkAbsenceRow(row){
     <span class="net-reason">${escapeHtml(a.reasonType)}, ${dates}</span>
     ${tail}
   </div>`;
+}
+
+// Dashboard (מבט כללי) cross-house worker search. Typing matches workers by
+// name across EVERY house (calcSearchWorkers over WORKERS × ASSIGNMENTS) and
+// shows a results list — name, house display name, role — in #dashResults,
+// hiding the normal dashboard body. Empty query restores the dashboard.
+// Clicking a result navigates to that worker's house tab and flashes their row.
+function dashboardSearch(q){
+  const results = document.getElementById('dashResults');
+  const body = document.getElementById('dashBody');
+  if (!results || !body) return;
+  const needle = String(q || '').trim();
+  if (!needle){
+    results.style.display = 'none';
+    results.innerHTML = '';
+    body.style.display = '';
+    return;
+  }
+  body.style.display = 'none';
+  results.style.display = '';
+  const matches = calcSearchWorkers(needle, WORKERS, ASSIGNMENTS);
+  if (!matches.length){
+    results.innerHTML = `<div class="empty">לא נמצאו עובדים/ות בשם זה</div>`;
+    return;
+  }
+  results.innerHTML = matches.map(m => `
+    <button type="button" class="dash-result" onclick="goToWorker('${escapeHtml(m.workerId)}','${escapeHtml(m.house)}')">
+      <span class="dash-result-name">${escapeHtml(m.name)}</span>
+      <span class="dash-result-house">${escapeHtml(houseName(m.house))}</span>
+      <span class="dash-result-role">${escapeHtml(m.role || '—')}</span>
+    </button>`).join('');
+}
+
+// Navigate to a worker's house tab and flash their roster row. go() re-renders
+// synchronously, so we stash the id and let render() apply the highlight after
+// the house view is in the DOM (the worker may sit in either roster subtable).
+function goToWorker(workerId, house){
+  pendingHighlightWorker = workerId;
+  go(house);
+}
+
+// Flash the roster row(s) for a worker, then clear the pending id. Called from
+// render() after a house view is built. Scrolls the first match into view.
+function highlightWorkerRow(){
+  if (!pendingHighlightWorker) return;
+  const id = pendingHighlightWorker;
+  pendingHighlightWorker = '';
+  const rows = document.querySelectorAll('tr[data-worker="' + (window.CSS && CSS.escape ? CSS.escape(id) : id) + '"]');
+  if (!rows.length) return;
+  rows.forEach(r => r.classList.add('row-highlight'));
+  rows[0].scrollIntoView({ block: 'center' });
+  setTimeout(() => rows.forEach(r => r.classList.remove('row-highlight')), 2600);
 }
 
 function archiveView(){
@@ -3223,7 +3338,7 @@ function rosterRow(a){
   const aId = escapeHtml(a.id);
   const hId = escapeHtml(a.house);
   return `
-  <tr${calcIsOnLeave(a) ? ' style="opacity:.72"' : ''}>
+  <tr data-worker="${wId}"${calcIsOnLeave(a) ? ' style="opacity:.72"' : ''}>
     <td>
       <button class="link-name" onclick="openWorker('${wId}', '${hId}')">${escapeHtml(workerName(a.workerId))}</button>
       ${leaveBadge(a)}
