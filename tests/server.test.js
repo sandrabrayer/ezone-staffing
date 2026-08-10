@@ -476,6 +476,86 @@ test('GET /api/data without token → 401', async () => {
   } finally { await close(srv); }
 });
 
+test('login: missing / empty pin returns 401', async () => {
+  const { srv, base } = await listen();
+  try {
+    for (const body of ['{}', JSON.stringify({ pin: '' }), '']) {
+      const r = await req(base, '/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      });
+      assert.equal(r.status, 401, `body ${JSON.stringify(body)} must not log in`);
+    }
+  } finally { await close(srv); }
+});
+
+test('login: rate limited with 429 after too many attempts, even with the correct pin', async () => {
+  const { srv, base } = await listen();
+  try {
+    // Burn through the per-IP window (LOGIN_MAX = 8) with wrong pins.
+    for (let i = 0; i < 8; i++) {
+      const r = await req(base, '/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin: '0000' }),
+      });
+      assert.equal(r.status, 401, `attempt ${i + 1} should be 401, not yet limited`);
+    }
+    // Attempt 9 is limited — the CORRECT pin must not slip through.
+    const r9 = await req(base, '/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pin: '4242' }),
+    });
+    assert.equal(r9.status, 429);
+    assert.match(r9.json.error, /יותר מדי ניסיונות/);
+    // Window reset (as time passing would) → login works again.
+    _loginAttempts.clear();
+    const token = await login(base);
+    assert.ok(token);
+  } finally { await close(srv); }
+});
+
+test('requireAuth: non-Bearer Authorization schemes are rejected', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    for (const header of [token, 'Basic ' + token, 'bearer']) {
+      const r = await req(base, '/api/data', { headers: { 'Authorization': header } });
+      assert.equal(r.status, 401, `header "${header.slice(0, 20)}…" must be rejected`);
+    }
+  } finally { await close(srv); }
+});
+
+test('POST /api/action without token → 401, nothing reaches the upstream', async () => {
+  const { srv, base } = await listen();
+  try {
+    let upstreamCalls = 0;
+    const inner = global.fetch;
+    global.fetch = async (...args) => { upstreamCalls++; return inner(...args); };
+    const r = await req(base, '/api/action', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'createWorker', worker: { name: 'פולש' } }),
+    });
+    assert.equal(r.status, 401);
+    assert.equal(upstreamCalls, 0, 'unauthenticated action must never be proxied upstream');
+  } finally { await close(srv); }
+});
+
+test('expired token is rejected by the server routes', async () => {
+  const { srv, base } = await listen();
+  try {
+    const { signToken } = require('../lib/auth');
+    const expired = signToken(process.env.SESSION_SECRET, -1);
+    const r = await req(base, '/api/data', {
+      headers: { 'Authorization': 'Bearer ' + expired },
+    });
+    assert.equal(r.status, 401);
+  } finally { await close(srv); }
+});
+
 test('tampered token is rejected', async () => {
   const { srv, base } = await listen();
   try {
@@ -641,6 +721,32 @@ test('deleteWorker: refuses while worker still has an assignment', async () => {
     await addAssignment(base, token, { workerId });
     const r = await post(base, token, { action: 'deleteWorker', id: workerId });
     assert.equal(r.status, 409);
+  } finally { await close(srv); }
+});
+
+test('deleteWorker: refuses when the worker has archive_v3 history (frozen records survive)', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    const workerId = await createWorker(base, token, 'רות');
+    const asg = await addAssignment(base, token, { workerId });
+    // Terminating snapshots the assignment into archive_v3 and removes it.
+    const t = await post(base, token, {
+      action: 'terminateAssignment',
+      id: asg.json.assignment.id,
+      terminationDate: todayStr(),
+      reasonType: 'התפטרות',
+      reasonDetail: '',
+    });
+    assert.equal(t.status, 200);
+    // The archive row now references the worker — deletion must 409 so the
+    // frozen cost snapshot never loses its FK target.
+    const r = await post(base, token, { action: 'deleteWorker', id: workerId });
+    assert.equal(r.status, 409);
+    // And the archive row is still there.
+    const d = await get(base, token);
+    assert.equal(d.json.archiveV3.length, 1);
+    assert.equal(d.json.archiveV3[0].workerId, workerId);
   } finally { await close(srv); }
 });
 

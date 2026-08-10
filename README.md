@@ -177,14 +177,34 @@ If a secret leaks: rotate `SHARED_SECRET` in both the Apps Script Script Propert
 ## Testing
 
 ```bash
+npm ci
 npm test
 ```
 
+CI runs the same suite automatically on every pull request and every push to
+`main` (`.github/workflows/test.yml`, Node 22). The suite is fully
+self-contained: the Apps Script upstream is an in-process fake (`global.fetch`
+is stubbed), all secrets are dummy values set inside the test files, and page
+tests run in jsdom — no live backend, `/exec` URL, or real credential is ever
+touched, and CI needs no repository secrets.
+
 Covers:
-- `lib/calc` — cost computation, rounding, weighted totals.
-- `lib/auth` — token sign / verify / tamper / expiry; PIN compare.
+- `lib/calc` — cost computation per employment type (`part_time` uses the
+  salary as-is; `pct` is informational only), monthly actuals, budgets,
+  house/network totals, leave statuses.
+- `lib/auth` — token sign / verify / tamper / expiry; constant-time PIN compare.
 - `lib/validate` — input shapes, length caps, date format, reason types, same-house rejection.
-- `server.js` — full HTTP round-trip with a mocked Apps Script upstream, including add/update/delete/move flows and history append on move.
+- `lib/shift-compliance` — shared-lib guard tests (must stay identical to ezone-scheduling's copy).
+- `server.js` — full HTTP round-trip with a mocked Apps Script upstream: PIN
+  login (wrong/missing PIN → 401, per-IP rate limit → 429), Bearer-token gating
+  of `/api/data` and `/api/action` (expired/tampered/absent tokens never reach
+  the upstream), every whitelisted action incl. terminate→`archive_v3`
+  snapshots and the delete-worker FK guards.
+- `public/index.html` (jsdom) — PIN overlay gates every view incl. the archive
+  view, archive page renders `archive_v3` rows newest-first, dashboard
+  absence/coverage join, combined worker form flows, roster search, digest UI.
+- Cross-cutting guards — frontend↔backend action parity, Hebrew spelling,
+  migration, xlsx import.
 
 ---
 
