@@ -1,0 +1,41 @@
+name: Tests
+
+# Runs the full node --test suite on every pull request and every push to
+# main. The suite is fully self-contained: the Apps Script upstream is a
+# fake (global.fetch is stubbed in-process), secrets are dummy values set
+# inside the test files, and jsdom drives the page tests — no live E-Zone
+# backend, Google Apps Script /exec URL, or real credential is ever touched.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies (exact lockfile)
+        run: npm ci
+
+      - name: Run test suite
+        run: npm test
+        env:
+          NODE_ENV: test

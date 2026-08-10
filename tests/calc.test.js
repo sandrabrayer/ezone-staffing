@@ -137,15 +137,17 @@ test('assignmentCost: full_time rounds to int', () => {
   assert.equal(assignmentCost(asg({ employmentType: 'full_time', salary: 24000.6 })), 24001);
 });
 
-test('assignmentCost: part_time weights salary by pct', () => {
-  assert.equal(assignmentCost(asg({ employmentType: 'part_time', salary: 12000, pct: 80 })), 9600);
-  // rounding
-  assert.equal(assignmentCost(asg({ employmentType: 'part_time', salary: 9999, pct: 75 })), 7499);
+test('assignmentCost: part_time uses salary as-is (pct is informational only)', () => {
+  // Since f78f230 the salary field IS the amount for the assignment; `pct`
+  // is a label (e.g. "50% role") and never scales the cost — Moran types
+  // the actual per-house amount herself.
+  assert.equal(assignmentCost(asg({ employmentType: 'part_time', salary: 12000, pct: 80 })), 12000);
+  assert.equal(assignmentCost(asg({ employmentType: 'part_time', salary: 9999, pct: 75 })), 9999);
 });
 
-test('assignmentCost: part_time clamps pct out of range', () => {
+test('assignmentCost: part_time ignores pct even when out of range', () => {
   assert.equal(assignmentCost(asg({ employmentType: 'part_time', salary: 10000, pct: 200 })), 10000);
-  assert.equal(assignmentCost(asg({ employmentType: 'part_time', salary: 10000, pct: -10 })), 0);
+  assert.equal(assignmentCost(asg({ employmentType: 'part_time', salary: 10000, pct: -10 })), 10000);
 });
 
 test('assignmentCost: hourly multiplies rate × estHours', () => {
@@ -229,8 +231,8 @@ test('houseAssignmentsCost: sums per-type costs', () => {
     asg({ house: 'ramot', employmentType: 'hourly', hourlyRate: 100, estHours: 80 }),
     asg({ house: 'asher', employmentType: 'full_time', salary: 99999 }),  // wrong house
   ];
-  // 20000 + 5000 + 8000 = 33000
-  assert.equal(houseAssignmentsCost(list, 'ramot'), 33000);
+  // 20000 + 10000 (part_time salary as-is, pct informational) + 8000 = 38000
+  assert.equal(houseAssignmentsCost(list, 'ramot'), 38000);
 });
 
 test('houseAssignmentsCost: empty list', () => {
@@ -460,11 +462,11 @@ test('pendingTerminations: strictly after today is pending', () => {
 test('pendingHouseCost: filters by house and uses frozen cost', () => {
   const archive = [
     arch({ house: 'ramot', employmentType: 'full_time', salary: 20000, terminationDate: '2026-06-15' }),
-    arch({ house: 'ramot', employmentType: 'part_time', salary: 10000, pct: 50, terminationDate: '2026-06-15' }), // 5000
+    arch({ house: 'ramot', employmentType: 'part_time', salary: 10000, pct: 50, terminationDate: '2026-06-15' }), // 10000 — pct informational
     arch({ house: 'asher', employmentType: 'full_time', salary: 15000, terminationDate: '2026-06-15' }),
     arch({ house: 'ramot', employmentType: 'full_time', salary: 8000, terminationDate: '2026-04-01' }), // past
   ];
-  assert.equal(pendingHouseCost(archive, 'ramot', TODAY), 25000);
+  assert.equal(pendingHouseCost(archive, 'ramot', TODAY), 30000);
   assert.equal(pendingHouseCost(archive, 'asher', TODAY), 15000);
   assert.equal(pendingHouseCost(archive, 'ofroni', TODAY), 0);
 });
@@ -512,7 +514,7 @@ test('houseTotal: empty inputs → 0', () => {
 test('networkTotal: every assignment cost + every active coverage extra + pending term', () => {
   const assignments = [
     asg({ house: 'ramot', employmentType: 'full_time', salary: 20000 }),
-    asg({ house: 'asher', employmentType: 'part_time', salary: 10000, pct: 50 }), // 5000
+    asg({ house: 'asher', employmentType: 'part_time', salary: 10000, pct: 50 }), // 10000 — pct informational
     asg({ house: 'rehab', employmentType: 'fixed_retainer', retainerAmount: 4000 }),
   ];
   const absences = [
@@ -529,8 +531,8 @@ test('networkTotal: every assignment cost + every active coverage extra + pendin
   const archive = [
     arch({ house: 'ramot', employmentType: 'full_time', salary: 8000, terminationDate: '2026-06-15' }),
   ];
-  // 20000 + 5000 + 4000 + 1500 + 8000 = 38500
-  assert.equal(networkTotal(assignments, coverages, absences, archive, HOUSES, TODAY), 38500);
+  // 20000 + 10000 + 4000 + 1500 + 8000 = 43500
+  assert.equal(networkTotal(assignments, coverages, absences, archive, HOUSES, TODAY), 43500);
 });
 
 test('networkTotal equals sum of houseTotal across all houses', () => {

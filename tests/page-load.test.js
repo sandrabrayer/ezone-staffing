@@ -279,11 +279,21 @@ test('the topbar emblem asset (public/emblem.png) exists and is a real PNG', () 
 // before covered absences; (5) the stat sub-line carries the orphan
 // count.
 
+// A date range that is always active on the day the test runs — computed
+// from the real clock, not hardcoded (hardcoded ranges expire and turn
+// green tests red months later).
+function activeRange() {
+  const iso = (offsetDays) => {
+    const d = new Date();
+    d.setDate(d.getDate() + offsetDays);
+    return d.toISOString().slice(0, 10);
+  };
+  return { startDate: iso(-30), endDate: iso(30) };
+}
+
 test('dashboard renders the "היעדרויות פעילות ברשת" join section', async () => {
   const { dom, errors } = loadPage();
-  // Wide date range so isAbsenceActive(today) is true regardless of
-  // when the test runs over the next few months.
-  const wide = { startDate: '2026-05-01', endDate: '2026-07-31' };
+  const wide = activeRange();
   await authAndBoot(dom, {
     workers: [
       { id: 'w1', name: 'עידו',  notes: '', createdAt: '' },
@@ -389,7 +399,7 @@ test('dashboard join: stub absence renders with "(ללא רישום נעדר/ת)
   await authAndBoot(dom, {
     absences: [{
       id: 'abStub', workerId: '', house: 'ramot',
-      startDate: '2026-05-01', endDate: '2026-07-31',
+      ...activeRange(),
       reasonType: 'מחלה', reasonDetail: '', notes: '',
       status: 'active', createdAt: '',
     }],
@@ -402,37 +412,35 @@ test('dashboard join: stub absence renders with "(ללא רישום נעדר/ת)
   assert.equal(errors.length, 0, errors.length ? JSON.stringify(errors) : '');
 });
 
-// ---------- per-house "+ עובד חדש" button ----------
-// Worker creation used to be reachable only through the assignment
-// form's "+ צור עובד/ת חדש/ה" pseudo-option. Moran couldn't find it
-// from the house view. This commit surfaces it as a top-level button
-// alongside "+ שיבוץ חדש".
+// ---------- per-house "+ עובד חדש" button (combined worker form) ----------
+// The separate "+ שיבוץ חדש" assignment dialog was folded into the worker
+// dialog (d04c2fe): each house's roster section exposes a single
+// "+ עובד חדש" button that opens the combined identity+terms form for
+// THAT house, and saving fires createWorker + addAssignment in sequence.
 
-test('house view shows both "+ שיבוץ חדש" and "+ עובד חדש" buttons in the roster section', async () => {
+test('house view shows the single combined "+ עובד חדש" button (no separate "+ שיבוץ חדש")', async () => {
   const { dom, errors } = loadPage();
   await authAndBoot(dom, {});
   dom.window.go('ramot');
   const doc = dom.window.document;
 
-  // Both buttons live in the same section-head as the roster count pill.
   const rosterSection = [...doc.querySelectorAll('.section-head')]
     .find(sh => /צוות הבית/.test(sh.textContent));
   assert.ok(rosterSection, 'expected the "צוות הבית" roster section-head');
 
   const btnTexts = [...rosterSection.querySelectorAll('button')].map(b => b.textContent.trim());
-  assert.ok(btnTexts.some(t => /\+ שיבוץ חדש/.test(t)),
-    'roster section should still expose the "+ שיבוץ חדש" button');
   assert.ok(btnTexts.some(t => /\+ עובד חדש/.test(t)),
-    'roster section should expose the new "+ עובד חדש" button alongside it');
+    'roster section should expose the "+ עובד חדש" button');
+  assert.ok(!btnTexts.some(t => /\+ שיבוץ חדש/.test(t)),
+    'the old separate "+ שיבוץ חדש" button must NOT come back — assignment terms live in the worker form');
 
   dom.window.close();
   assert.equal(errors.length, 0, errors.length ? JSON.stringify(errors) : '');
 });
 
-test('"+ עובד חדש" opens the worker dialog in CREATE mode (no workerId)', async () => {
-  // jsdom doesn't really click — but openWorker() with no arg is the
-  // create path. The button's onclick is `openWorker()` (zero args),
-  // so calling it directly is equivalent to a click for our purposes.
+test('"+ עובד חדש" opens the combined worker dialog in CREATE mode for the house', async () => {
+  // The button's onclick is `openWorker(null, houseId)` — calling it
+  // directly is equivalent to a click for our purposes.
   const { dom, errors } = loadPage();
   await authAndBoot(dom, {});
   dom.window.go('ramot');
@@ -442,66 +450,82 @@ test('"+ עובד חדש" opens the worker dialog in CREATE mode (no workerId)',
   assert.ok(!overlay.classList.contains('show'),
     'worker overlay should be hidden before button click');
 
-  dom.window.openWorker();  // simulates the button's onclick handler
+  dom.window.openWorker(null, 'ramot');
 
   assert.ok(overlay.classList.contains('show'),
     'worker overlay should be visible after open');
   assert.equal(doc.getElementById('workerModalTitle').textContent, 'עובד/ת חדש/ה',
     'title should read create-mode header');
-  // No worker fields beyond name + notes — confirm via the form body.
+  assert.match(doc.getElementById('workerModalSub').textContent, /בית רמות/,
+    'sub-header should name the target house');
+
+  // Combined form: identity fields AND this house's assignment terms.
   const body = overlay.querySelector('.modal-body');
-  const inputs = [...body.querySelectorAll('input, select, textarea')].map(el => el.id);
-  assert.deepEqual(inputs, ['w_name', 'w_notes'],
-    'create dialog should expose only the worker-level fields');
-  // Delete button hidden in create mode.
+  const inputIds = [...body.querySelectorAll('input, select, textarea')].map(el => el.id);
+  for (const id of ['w_name', 'w_notes', 'w_role', 'w_type']) {
+    assert.ok(inputIds.includes(id), `combined create dialog should expose #${id}`);
+  }
+
+  // Both delete buttons hidden in create mode.
   assert.equal(doc.getElementById('workerDeleteBtn').style.display, 'none');
+  assert.equal(doc.getElementById('workerDeleteCascadeBtn').style.display, 'none');
 
   dom.window.close();
   assert.equal(errors.length, 0, errors.length ? JSON.stringify(errors) : '');
 });
 
-test('standalone create flow: fill name → save → toast + worker count increments → modal closed', async () => {
-  // Full integration through saveWorker(). Stubs fetch to handle both
-  // the POST /api/action (createWorker) and the subsequent GET /api/data
-  // refresh that saveWorker awaits before re-rendering.
+test('combined create flow: name + terms → createWorker then addAssignment → toast + count increments → modal closed', async () => {
+  // Full integration through saveWorker(). Stubs fetch to handle the two
+  // POST /api/action calls (createWorker, addAssignment) and the GET
+  // /api/data refresh the render path may issue.
   const { dom, errors } = loadPage();
   await authAndBoot(dom, {});
   dom.window.go('ramot');
 
-  dom.window.openWorker();
-  dom.window.document.getElementById('w_name').value = 'דנה כהן';
+  dom.window.openWorker(null, 'ramot');
+  const doc = dom.window.document;
+  doc.getElementById('w_name').value = 'דנה כהן';
+  // Default employment type is full_time — its one required cost field.
+  doc.getElementById('w_salary').value = '12000';
 
   const newWorker = { id: 'wNew', name: 'דנה כהן', notes: '', createdAt: '' };
+  const newAsg = {
+    id: 'aNew', workerId: 'wNew', house: 'ramot', role: doc.getElementById('w_role').value,
+    roleDetail: '', employmentType: 'full_time', salary: 12000, pct: 0, hourlyRate: 0,
+    estHours: 0, sessionRate: 0, estSessions: 0, retainerAmount: 0, notes: '', createdAt: '',
+  };
   const refreshed = {
-    workers: [newWorker], assignments: [], absences: [], coverages: [], archiveV3: [],
+    workers: [newWorker], assignments: [newAsg], absences: [], coverages: [], archiveV3: [],
     houses: { ramot: [], asher: [], ofroni: [], rehab: [], pardes: [], sde_eliezer: [], hq: [] },
     events: [], archive: [],
   };
+  const actions = [];
   dom.window.fetch = async (url, init) => {
     if (init && init.method === 'POST'){
-      return {
-        ok: true, status: 200,
-        text: async () => JSON.stringify({ ok: true, worker: newWorker }),
-      };
+      const body = JSON.parse(init.body);
+      actions.push(body.action);
+      const json = body.action === 'createWorker'
+        ? { ok: true, worker: newWorker }
+        : { ok: true, assignment: newAsg };
+      return { ok: true, status: 200, text: async () => JSON.stringify(json) };
     }
     return { ok: true, status: 200, text: async () => JSON.stringify(refreshed) };
   };
 
   await dom.window.saveWorker();
 
-  // Modal closed.
-  assert.ok(!dom.window.document.getElementById('workerOverlay').classList.contains('show'),
+  assert.deepEqual(actions, ['createWorker', 'addAssignment'],
+    'save must create the worker first, then the assignment (FK order)');
+
+  // Modal closed + create-mode toast.
+  assert.ok(!doc.getElementById('workerOverlay').classList.contains('show'),
     'worker overlay should close on successful save');
+  assert.match(doc.getElementById('toast').textContent, /העובד\/ת נוסף\/ה/,
+    'create flow should show the documented create toast');
 
-  // Standalone toast — the longer "אפשר להוסיף שיבוץ ידנית" hint.
-  const toast = dom.window.document.getElementById('toast');
-  assert.match(toast.textContent, /העובד נוסף.*אפשר להוסיף שיבוץ ידנית/,
-    'standalone create flow should show the documented toast (different from the in-assignment-form sub-flow toast)');
-
-  // Worker count visibly incremented — the dashboard re-renders after
-  // saveWorker; navigate back to verify.
+  // Worker count visibly incremented on the dashboard.
   dom.window.go('central');
-  const workerStatVal = [...dom.window.document.querySelectorAll('.stat')]
+  const workerStatVal = [...doc.querySelectorAll('.stat')]
     .find(el => /סה״כ עובדים/.test(el.textContent))
     .querySelector('.val');
   assert.equal(workerStatVal.textContent.trim(), '1',

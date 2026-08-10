@@ -133,9 +133,13 @@ test('worker dialog: ONLY assignments → cascade button shown, plain hidden', a
     'plain delete should be hidden when assignments exist');
   assert.notEqual(doc.getElementById('workerDeleteCascadeBtn').style.display, 'none',
     'cascade delete should be visible when the only refs are assignments');
-  // Sub-header should mention the count (2 assignments).
-  assert.match(doc.getElementById('workerModalSub').textContent, /2 השיבוצים/,
-    'sub-header should report how many assignments will be removed');
+  // The sub-header shows house context now (combined per-house form); with
+  // an assignment at another house it carries the multi-house note. The
+  // assignment count moved into the confirm() text (covered by the
+  // deleteWorkerCascade behaviour test below).
+  assert.match(doc.getElementById('workerModalSub').textContent,
+    /בית .+ שיבוצים גם בבתים אחרים/,
+    'sub-header should show the house + multi-house note');
   dom.window.close();
   assert.equal(errors.length, 0, JSON.stringify(errors));
 });
@@ -152,8 +156,11 @@ test('worker dialog: absence history → BOTH delete buttons hidden (deletion bl
   assert.equal(doc.getElementById('workerDeleteBtn').style.display, 'none');
   assert.equal(doc.getElementById('workerDeleteCascadeBtn').style.display, 'none',
     'cascade must be blocked when real absence history exists');
-  assert.match(doc.getElementById('workerModalSub').textContent, /לא אפשרית/,
-    'sub-header should explain deletion is blocked');
+  // The "מחיקה לא אפשרית" explanation moved from the sub-header to the
+  // toast fired on an attempted cascade (see the refusal test below); the
+  // sub-header now shows the house context of the combined form.
+  assert.match(doc.getElementById('workerModalSub').textContent, /בית /,
+    'sub-header should show the house context');
   dom.window.close();
   assert.equal(errors.length, 0, JSON.stringify(errors));
 });
