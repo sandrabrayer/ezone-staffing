@@ -12,6 +12,11 @@ const SHARED_SECRET = process.env.SHARED_SECRET || '';
 const MORAN_PIN = process.env.MORAN_PIN || '';
 const SESSION_SECRET = process.env.SESSION_SECRET || '';
 const SESSION_DAYS = Number(process.env.SESSION_DAYS) || 7;
+// Optional: the hadrachot app's read-only first-hadracha status feed. The
+// browser NEVER calls it directly and never sees the secret — the proxy
+// below adds it server-side. Unset = feature off (the client shows nothing).
+const HADRACHOT_STATUS_URL = process.env.HADRACHOT_STATUS_URL || '';
+const HADRACHOT_STATUS_SECRET = process.env.HADRACHOT_STATUS_SECRET || '';
 
 function fatal(msg) {
   console.error(`[fatal] ${msg}`);
@@ -129,6 +134,40 @@ app.get('/api/data', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('[GET /api/data]', err.status || 500, err.message);
     res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// ---- first-hadracha status (optional, read-only) ----
+// Proxies the hadrachot app's status feed for the dashboard banner. Deliberate
+// contract with the client: when the feature is unconfigured (URL or secret
+// missing) it answers 200 { configured: false }, and any upstream failure is a
+// 5xx — in BOTH cases the client renders nothing rather than false alerts.
+// All flag logic (7-day rule etc.) lives in the frontend; this route only
+// relays the payload verbatim under `data`, never interpreting it.
+app.get('/api/hadrachot-status', requireAuth, async (req, res) => {
+  if (!HADRACHOT_STATUS_URL || !HADRACHOT_STATUS_SECRET) {
+    return res.json({ configured: false });
+  }
+  try {
+    const sep = HADRACHOT_STATUS_URL.includes('?') ? '&' : '?';
+    const url = `${HADRACHOT_STATUS_URL}${sep}secret=${encodeURIComponent(HADRACHOT_STATUS_SECRET)}`;
+    const resp = await fetch(url, { redirect: 'follow' });
+    const text = await resp.text();
+    let parsed;
+    try { parsed = JSON.parse(text); }
+    catch (e) {
+      throw Object.assign(new Error('upstream non-JSON'), { status: 502 });
+    }
+    const status = Number(parsed._status) || (resp.ok ? 200 : resp.status || 502);
+    delete parsed._status;
+    if (status >= 400) {
+      throw Object.assign(new Error('upstream error ' + status), { status: 502 });
+    }
+    res.json({ configured: true, data: parsed });
+  } catch (err) {
+    console.error('[GET /api/hadrachot-status]', err.status || 502, err.message);
+    // Generic body on purpose — never echo upstream details to the browser.
+    res.status(err.status || 502).json({ error: 'hadrachot status unavailable' });
   }
 });
 

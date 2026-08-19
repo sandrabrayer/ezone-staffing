@@ -343,6 +343,11 @@ tbody tr:hover{
 }
 /* Dashboard cross-house worker search results + the row flash on navigation. */
 .dash-results{display:flex;flex-direction:column;gap:8px;margin-bottom:16px}
+/* first-hadracha alert banner (central dashboard) */
+.hadracha-banner{border:1px solid var(--warning);border-radius:10px;
+  background:rgba(239,159,39,.10);padding:12px 14px;margin-bottom:16px}
+.hadracha-banner .hdr-title{font-weight:700;color:var(--warning);margin-bottom:4px}
+.hadracha-banner .hdr-line{font-size:14px;margin-top:4px;line-height:1.5}
 .dash-result{
   display:flex;align-items:center;gap:14px;width:100%;text-align:right;
   padding:12px 14px;border:1px solid var(--line-strong);border-radius:8px;
@@ -1448,6 +1453,8 @@ const {
   activeAbsenceForWorker: calcActiveAbsenceForWorker,
   networkAbsenceCoverageRows: calcNetworkAbsenceCoverageRows,
   searchWorkers: calcSearchWorkers,
+  parseHadrachotStatus: calcParseHadrachotStatus,
+  firstHadrachaFlags: calcFirstHadrachaFlags,
 } = window.EZONE_CALC;
 
 // Set by the dashboard search when a result is clicked → go(house) navigates,
@@ -1462,6 +1469,11 @@ let COVERAGES = [];
 let ARCHIVE_V3 = [];
 let MONTHLY_ACTUALS = [];
 let BUDGETS = [];
+// First-hadracha completions from the hadrachot app, via the server proxy.
+// null = no usable data (unconfigured / unreachable / unrecognized payload)
+// → the dashboard renders NO banner, never a false alert. An array (possibly
+// empty) = real data → the flag logic in lib/calc.js may flag guides.
+let HADRACHOT_COMPLETED = null;
 let view = 'central';
 // Selected month (YYYY-MM) for the cost view. Hourly / per_session costs
 // reflect this month's actuals (falling back to the estimate + an "אומדן"
@@ -1511,6 +1523,25 @@ async function loadData(){
   ARCHIVE_V3  = Array.isArray(d.archiveV3)   ? d.archiveV3   : [];
   MONTHLY_ACTUALS = Array.isArray(d.monthlyActuals) ? d.monthlyActuals : [];
   BUDGETS = Array.isArray(d.budgets) ? d.budgets : [];
+}
+
+// First-hadracha status — fetched THROUGH the server proxy only
+// (GET /api/hadrachot-status): the browser never calls the hadrachot app
+// directly and never holds its secret. Fail-quiet by design: unconfigured,
+// unreachable, or unrecognized payload leaves HADRACHOT_COMPLETED = null and
+// the dashboard shows no banner — nothing rather than false alerts. Kicked
+// off after the first render (boot) so a slow feed never delays the app.
+async function loadHadrachotStatus(){
+  try{
+    const body = await apiFetch('/api/hadrachot-status');
+    if (!body || body.configured !== true) return;
+    const completed = calcParseHadrachotStatus(body.data);
+    if (!completed) return;
+    HADRACHOT_COMPLETED = completed;
+    if (view === 'central') render();
+  } catch(_e){
+    // show nothing rather than false alerts
+  }
 }
 
 /* ---------- local cache mutation (perf) ----------
@@ -3114,6 +3145,34 @@ function render(){
   else                       { app.innerHTML = houseView(view); highlightWorkerRow(); }
 }
 
+// Hebrew UI text for the first-hadracha banner — no parentheses (guarded by
+// tests/hadracha-flags.test.js).
+const HADRACHA_BANNER_TITLE = 'הדרכה ראשונה';
+const HADRACHA_OVERDUE_TEXT = 'מדריכים פעילים שעברו יותר מ־7 ימים מתחילת העבודה וטרם השלימו הדרכה ראשונה';
+const HADRACHA_MISSING_START_TEXT = 'מדריכים פעילים ללא תאריך תחילת עבודה';
+
+// The first-hadracha alert banner. Renders '' — nothing at all — unless real
+// completion data arrived from the hadrachot feed (HADRACHOT_COMPLETED is an
+// array) AND the flag logic found something to say. The flag logic itself
+// (7-day rule, missing start dates) is calcFirstHadrachaFlags in lib/calc.js.
+function hadrachaBannerHtml(){
+  if (!Array.isArray(HADRACHOT_COMPLETED)) return '';
+  const flags = calcFirstHadrachaFlags(WORKERS, ASSIGNMENTS, HADRACHOT_COMPLETED, calcTodayStr());
+  if (!flags.overdue.length && !flags.missingStart.length) return '';
+  const overdueLine = flags.overdue.length
+    ? `<div class="hdr-line">⚠️ ${HADRACHA_OVERDUE_TEXT}: <b>${flags.overdue.map(escapeHtml).join(', ')}</b></div>`
+    : '';
+  const missingLine = flags.missingStart.length
+    ? `<div class="hdr-line">${HADRACHA_MISSING_START_TEXT}: <b>${flags.missingStart.map(escapeHtml).join(', ')}</b></div>`
+    : '';
+  return `
+  <div class="hadracha-banner">
+    <div class="hdr-title">${HADRACHA_BANNER_TITLE}</div>
+    ${overdueLine}
+    ${missingLine}
+  </div>`;
+}
+
 function centralView(){
   const today = calcTodayStr();
   const open = calcOpenAbsences(ABSENCES, today);
@@ -3156,6 +3215,8 @@ function centralView(){
     <p>תמונת מצב מרכזת של מצבת כוח האדם בכל הבתים. ניהול בלעדי — מורן, משאבי אנוש.</p>
     ${monthPickerHtml()}
   </div>
+
+  ${hadrachaBannerHtml()}
 
   <input type="text" id="dashSearch" dir="rtl" placeholder="חיפוש עובד/ת לפי שם…" oninput="dashboardSearch(this.value)"
          style="width:100%;font-size:16px;padding:10px 12px;border:1px solid var(--line-strong);border-radius:8px;margin-bottom:16px;box-sizing:border-box"/>
@@ -3867,6 +3928,9 @@ async function boot(){
     document.getElementById('boot').style.display='none';
     hidePinGate();
     render();
+    // Fire-and-forget: the banner appears on the next render if the feed
+    // answers; any failure leaves the dashboard exactly as it is.
+    loadHadrachotStatus();
   } catch(err){
     document.getElementById('boot').style.display='none';
     if (err.message && err.message.indexOf('פג תוקף') === 0){

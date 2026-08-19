@@ -8,6 +8,12 @@
      - SHARED_SECRET   : must match server.js SHARED_SECRET env var
      - SHEET_ID        : the spreadsheet id (the long string in the
                          Sheet URL between /d/ and /edit)
+   Script properties optional:
+     - HADRACHOT_READ_SECRET : unlocks ONLY the read-only
+       getGuidesForHadrachot feed (doGet?action=getGuidesForHadrachot)
+       for the hadrachot app. Fail-closed: while unset the feed always
+       answers 401. Distinct from SHARED_SECRET on purpose — neither
+       secret ever unlocks the other's surface.
    Script properties written by this script:
      - V3_MIGRATION_DONE = 'true' once migrateToV3 has succeeded.
        Cleared by rollbackV3.
@@ -248,6 +254,13 @@ const MIGRATION_NOTE_COVERAGE = 'יובא ממודל ישן';
 // ---------- entry points ----------
 
 function doGet(e) {
+  // Read-only guide feed for the hadrachot app. Routed BEFORE the main
+  // SHARED_SECRET gate and authorized ONLY by HADRACHOT_READ_SECRET (see
+  // the "Hadrachot read feed" section below) — the roster secret never
+  // unlocks this feed and the hadrachot secret never unlocks the roster.
+  if (e && e.parameter && e.parameter.action === 'getGuidesForHadrachot') {
+    return handleHadrachotRead_(e);
+  }
   return handle(e, function () {
     const houses = {};
     HOUSE_IDS.forEach(function (h) { houses[h] = readLegacyHouseSafe(h); });
@@ -317,12 +330,19 @@ function handle(e, fn) {
 
 function authorized(e) {
   const required = PropertiesService.getScriptProperties().getProperty('SHARED_SECRET');
-  if (!required) return false;
   const provided = (e && e.parameter && e.parameter.secret) || '';
-  if (provided.length !== required.length) return false;
+  return secretMatches_(required, provided);
+}
+
+// Constant-time secret comparison, fail-closed: an unset/empty stored
+// secret matches NOTHING (an unconfigured surface must never open up).
+function secretMatches_(required, provided) {
+  if (!required) return false;
+  const prov = String(provided || '');
+  if (prov.length !== required.length) return false;
   let diff = 0;
   for (let i = 0; i < required.length; i++) {
-    diff |= required.charCodeAt(i) ^ provided.charCodeAt(i);
+    diff |= required.charCodeAt(i) ^ prov.charCodeAt(i);
   }
   return diff === 0;
 }
@@ -2606,4 +2626,80 @@ function installDigestTrigger() {
   ScriptApp.newTrigger('rebuildDigest').timeBased().everyHours(6).create();
   Logger.log('Installed periodic trigger: rebuildDigest every 6 hours.');
   return { ok: true, trigger: 'rebuildDigest', schedule: 'every 6 hours' };
+}
+
+/* ============================================================
+   Hadrachot read feed — getGuidesForHadrachot
+   ------------------------------------------------------------
+   A read-only GET endpoint for the hadrachot app (first-hadracha
+   tracking): doGet?action=getGuidesForHadrachot&secret=<...>.
+
+   Auth: its OWN Script Property secret, HADRACHOT_READ_SECRET,
+   compared in constant time. Fail-closed: property unset, secret
+   missing, or secret wrong → 401 { error }, never data. The main
+   SHARED_SECRET does NOT unlock this feed (and this feed's secret
+   does not unlock the roster doGet/doPost).
+
+   Payload — one entry per guide (role מדריך/ה) placement, ONLY:
+     name      — the worker's full display name
+     house     — internal house id (ramot/asher/ofroni/rehab/...)
+     active    — boolean, the assignment status is 'active'
+                 (false while on חל"ד / חל"ט leave)
+     startDate — 'YYYY-MM-DD' employment start date, '' when not
+                 yet entered (legacy rows — never back-filled)
+
+   HARD RULE: every other field is stripped. No salary, cost, rate,
+   pct, allowance, retainer, budget, notes, or id ever leaves this
+   feed — same no-financial contract as the digest.
+
+   HEADERS_WORKERS is untouched: this feed only READS via the
+   existing position-mapped readers. No schema change.
+   ============================================================ */
+
+const HADRACHOT_READ_SECRET_PROP = 'HADRACHOT_READ_SECRET';
+
+function hadrachotAuthorized_(e) {
+  const required = PropertiesService.getScriptProperties()
+    .getProperty(HADRACHOT_READ_SECRET_PROP);
+  const provided = (e && e.parameter && e.parameter.secret) || '';
+  return secretMatches_(required, provided);
+}
+
+// Entry point for the feed (dispatched from doGet). Auth first — an
+// unauthorized caller gets { error } and nothing else is even read.
+function handleHadrachotRead_(e) {
+  try {
+    if (!hadrachotAuthorized_(e)) return json({ error: 'unauthorized' }, 401);
+    return json({ guides: computeGuidesForHadrachot_() }, 200);
+  } catch (err) {
+    const status = err && err.status ? err.status : 500;
+    return json({ error: (err && err.message) || String(err) }, status);
+  }
+}
+
+// Builds the feed entries: one per (guide × house) assignment whose role is
+// מדריך/ה. Orphaned assignments (no matching worker) are skipped. Reads
+// name / house / status / startDate ONLY — never a financial field.
+function computeGuidesForHadrachot_() {
+  const workerById = {};
+  readWorkersSafe().forEach(function (w) { workerById[w.id] = w; });
+
+  const guides = [];
+  readAssignmentsSafe().forEach(function (a) {
+    if (a.role !== 'מדריך/ה') return; // hadrachot are for guides only
+    const w = workerById[a.workerId];
+    if (!w) return; // orphaned assignment — skip
+    guides.push({
+      name: w.name,
+      house: a.house,
+      active: (a.status || 'active') === 'active',
+      startDate: w.startDate || '',
+    });
+  });
+
+  // Stable, human-friendly order: house, then name.
+  guides.sort(function (x, y) {
+    return (x.house + ' ' + x.name).localeCompare(y.house + ' ' + y.name);
+  });
+  return guides;
 }
