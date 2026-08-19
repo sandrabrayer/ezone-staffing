@@ -1632,3 +1632,32 @@ test('setBudget: bad house / month / negative amount are 400', async () => {
     }
   } finally { await close(srv); }
 });
+
+// ----- first-hadracha status proxy: UNCONFIGURED case -----
+// This process deliberately never sets HADRACHOT_STATUS_URL /
+// HADRACHOT_STATUS_SECRET, so the route must answer { configured: false }
+// and never touch any upstream — the configured cases live in
+// tests/hadrachot-proxy.test.js (its own process, env set before require).
+
+test('GET /api/hadrachot-status without env vars → configured:false, no upstream call', async () => {
+  const { srv, base } = await listen();
+  try {
+    const token = await login(base);
+    let upstreamCalls = 0;
+    const inner = global.fetch;
+    global.fetch = async (...args) => { upstreamCalls++; return inner(...args); };
+    const r = await req(base, '/api/hadrachot-status', { headers: authHeaders(token) });
+    global.fetch = inner;
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.json, { configured: false });
+    assert.equal(upstreamCalls, 0, 'an unconfigured feature must never call out');
+  } finally { await close(srv); }
+});
+
+test('GET /api/hadrachot-status requires a session token', async () => {
+  const { srv, base } = await listen();
+  try {
+    const r = await req(base, '/api/hadrachot-status');
+    assert.equal(r.status, 401);
+  } finally { await close(srv); }
+});
