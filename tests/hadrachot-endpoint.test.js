@@ -8,8 +8,11 @@
 // computeGuidesForHadrachot_ with overridden readers for the field filtering.
 //
 // The two hard rules pinned here:
-//   - FIELD FILTERING: the feed carries name / house / active / startDate and
-//     NOTHING else — no salary, cost, rate, pct, allowance, retainer, id.
+//   - FIELD FILTERING: the feed carries name / house / role / active /
+//     startDate and NOTHING else — no salary, cost, rate, pct, allowance,
+//     retainer, id. `role` is an ASCII value (guide / social_worker /
+//     house_manager / coordinator) and only supervision-relevant placements
+//     are published.
 //   - FAIL-CLOSED AUTH: missing HADRACHOT_READ_SECRET property, missing
 //     secret, wrong secret, or the main SHARED_SECRET → 401 error, never data.
 
@@ -54,15 +57,20 @@ function plain(v) { return JSON.parse(JSON.stringify(v)); }
 
 const FINANCIAL_WORDS = ['salary', 'cost', 'rate', 'budget', 'retainer', 'allowance', 'pct', 'amount'];
 
-// Roster fixture: one guide with every financial field populated, one
-// therapist (must be excluded — hadrachot are for guides), one guide on
-// חל"ד leave (active:false), one orphaned assignment, one undated guide.
+// Roster fixture: one guide with every financial field populated, one social
+// worker (מטפל/ת), one house manager (מנהל/ת), one coordinator (רכז/ת) — all
+// supervision-relevant and published — plus one cook (must be excluded — not
+// a supervision role), one guide on חל"ד leave (active:false), one orphaned
+// assignment, one undated guide.
 function seedReaders(ctx) {
   ctx.readWorkersSafe = () => [
     { id: 'w1', name: 'דנה לוי', notes: 'סודי', startDate: '2026-08-01', shift_commitment: '4+1' },
     { id: 'w2', name: 'יואב כהן', notes: '', startDate: '2026-07-01' },
     { id: 'w3', name: 'רות אשר', notes: '', startDate: '' },
-    { id: 'w4', name: 'מטפלת', notes: '', startDate: '2026-01-01' },
+    { id: 'w4', name: 'נועה ברק', notes: '', startDate: '2026-01-01' },
+    { id: 'w5', name: 'שחר מזרחי', notes: '', startDate: '2026-02-01' },
+    { id: 'w6', name: 'גיל פרץ', notes: '', startDate: '2026-03-01' },
+    { id: 'w7', name: 'אבי כהן', notes: '', startDate: '2026-04-01' },
   ];
   ctx.readAssignmentsSafe = () => [
     { id: 'a1', workerId: 'w1', house: 'ramot', role: 'מדריך/ה', employmentType: 'full_time',
@@ -70,8 +78,11 @@ function seedReaders(ctx) {
       retainerAmount: 5000, allowance: 6000, status: 'active', notes: 'תנאים' },
     { id: 'a2', workerId: 'w2', house: 'asher', role: 'מדריך/ה', status: 'chld', statusDate: '2026-07-20' },
     { id: 'a3', workerId: 'w3', house: 'rehab', role: 'מדריך/ה', status: 'active' },
-    { id: 'a4', workerId: 'w4', house: 'ramot', role: 'מטפל/ת', status: 'active' },
+    { id: 'a4', workerId: 'w4', house: 'ramot', role: 'מטפל/ת', status: 'active', salary: 99999 },
     { id: 'a5', workerId: 'ghost', house: 'ramot', role: 'מדריך/ה', status: 'active' },
+    { id: 'a6', workerId: 'w5', house: 'ofroni', role: 'מנהל/ת', status: 'active', salary: 99999 },
+    { id: 'a7', workerId: 'w6', house: 'rehab', role: 'רכז/ת', status: 'active', retainerAmount: 5000 },
+    { id: 'a8', workerId: 'w7', house: 'ramot', role: 'טבח/ית', status: 'active' },
   ];
 }
 
@@ -79,14 +90,14 @@ function seedReaders(ctx) {
 // Field filtering
 // ---------------------------------------------------------------------------
 
-test('computeGuidesForHadrachot_ emits ONLY name/house/active/startDate', () => {
+test('computeGuidesForHadrachot_ emits ONLY name/house/role/active/startDate', () => {
   const ctx = loadCtx();
   seedReaders(ctx);
   const guides = plain(ctx.computeGuidesForHadrachot_());
   assert.ok(guides.length > 0, 'fixture must produce entries');
   for (const g of guides) {
-    assert.deepStrictEqual(Object.keys(g).sort(), ['active', 'house', 'name', 'startDate'],
-      'every entry carries exactly the four whitelisted fields');
+    assert.deepStrictEqual(Object.keys(g).sort(), ['active', 'house', 'name', 'role', 'startDate'],
+      'every entry carries exactly the five whitelisted fields');
   }
 });
 
@@ -104,13 +115,13 @@ test('salary and every other financial field are ABSENT from the feed', () => {
   }
 });
 
-test('feed filters to guides, maps active status, keeps empty start dates, skips orphans', () => {
+test('feed filters to supervision roles, maps active status, keeps empty start dates, skips orphans', () => {
   const ctx = loadCtx();
   seedReaders(ctx);
   const guides = plain(ctx.computeGuidesForHadrachot_());
-  // w4 is a מטפל/ת (not a guide) and a5 is orphaned — both out.
+  // w7 is a טבח/ית (not a supervision role) and a5 is orphaned — both out.
   assert.deepStrictEqual(guides.map(g => g.name).sort(),
-    ['דנה לוי', 'יואב כהן', 'רות אשר'].sort());
+    ['דנה לוי', 'יואב כהן', 'רות אשר', 'נועה ברק', 'שחר מזרחי', 'גיל פרץ'].sort());
   const byName = {};
   guides.forEach(g => { byName[g.name] = g; });
   assert.strictEqual(byName['דנה לוי'].active, true);
@@ -120,6 +131,26 @@ test('feed filters to guides, maps active status, keeps empty start dates, skips
   assert.strictEqual(byName['יואב כהן'].active, false);
   // Empty start date is a first-class value, passed through as ''.
   assert.strictEqual(byName['רות אשר'].startDate, '');
+});
+
+test('every entry carries the ASCII role value matching its sheet role string', () => {
+  const ctx = loadCtx();
+  seedReaders(ctx);
+  const byName = {};
+  plain(ctx.computeGuidesForHadrachot_()).forEach(g => { byName[g.name] = g; });
+  assert.strictEqual(byName['דנה לוי'].role, 'guide');          // מדריך/ה
+  assert.strictEqual(byName['יואב כהן'].role, 'guide');         // מדריך/ה on leave
+  assert.strictEqual(byName['נועה ברק'].role, 'social_worker'); // מטפל/ת
+  assert.strictEqual(byName['שחר מזרחי'].role, 'house_manager'); // מנהל/ת
+  assert.strictEqual(byName['גיל פרץ'].role, 'coordinator');    // רכז/ת
+  // Non-supervision roles never appear at all.
+  assert.ok(!('אבי כהן' in byName), 'a טבח/ית placement must be excluded');
+  // Only the four ASCII values ever leave the feed.
+  const values = Object.keys(byName).map(n => byName[n].role);
+  for (const v of values) {
+    assert.ok(['guide', 'social_worker', 'house_manager', 'coordinator'].indexOf(v) >= 0,
+      `unexpected role value "${v}"`);
+  }
 });
 
 test('a blank stored status reads as active (matches readAssignmentsSafe normalization)', () => {
@@ -156,7 +187,7 @@ test('missing or wrong secret → 401, correct secret → the guides payload', (
   assert.strictEqual(callFeed(ctx, 'wrong-secret')._status, 401);
   const ok = callFeed(ctx, 'hadr-secret');
   assert.strictEqual(ok._status, 200);
-  assert.ok(Array.isArray(ok.guides) && ok.guides.length === 3);
+  assert.ok(Array.isArray(ok.guides) && ok.guides.length === 6);
 });
 
 test('the two secrets never unlock each other\'s surface', () => {

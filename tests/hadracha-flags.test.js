@@ -38,17 +38,18 @@ test('daysSince: whole-day UTC arithmetic; junk/empty → null', () => {
 });
 
 // ---------------------------------------------------------------------------
-// firstHadrachaFlags — the 7-day rule
+// firstHadrachaFlags — the 30-day rule
 // ---------------------------------------------------------------------------
 
-test('the 7-day boundary is strict: exactly 7 days is NOT flagged, 8 days IS', () => {
+test('the 30-day boundary is strict: exactly 30 days is NOT flagged, 31 days IS', () => {
+  assert.strictEqual(calc.FIRST_HADRACHA_GRACE_DAYS, 30);
   const workers = [
-    guide('w7', 'בדיוק שבעה', '2026-08-12'),  // 7 days → not flagged
-    guide('w8', 'שמונה ימים', '2026-08-11'),  // 8 days → flagged
+    guide('w30', 'בדיוק שלושים', '2026-07-20'),   // 30 days → not flagged
+    guide('w31', 'שלושים ואחד', '2026-07-19'),    // 31 days → flagged
   ];
-  const assignments = [asg('a1', 'w7'), asg('a2', 'w8')];
+  const assignments = [asg('a1', 'w30'), asg('a2', 'w31')];
   const flags = calc.firstHadrachaFlags(workers, assignments, [], TODAY);
-  assert.deepStrictEqual(flags.overdue, ['שמונה ימים']);
+  assert.deepStrictEqual(flags.overdue, ['שלושים ואחד']);
   assert.deepStrictEqual(flags.missingStart, []);
 });
 
@@ -74,20 +75,39 @@ test('empty start_date → the separate missing-start warning, never overdue', (
   assert.deepStrictEqual(flags.missingStart.sort(), ['גם ללא', 'ללא תאריך'].sort());
 });
 
-test('only ACTIVE guides count: leave statuses and non-guide roles are excluded', () => {
+test('only ACTIVE staff count: leave statuses and non-supervision roles are excluded', () => {
   const workers = [
     guide('w1', 'בחל"ד', '2026-01-01'),
-    guide('w2', 'מטפלת ותיקה', '2026-01-01'),
+    guide('w2', 'טבחית ותיקה', '2026-01-01'),
     guide('w3', 'מדריך פעיל', '2026-01-01'),
   ];
   const assignments = [
     asg('a1', 'w1', { status: 'chld' }),
-    asg('a2', 'w2', { role: 'מטפל/ת' }),
+    asg('a2', 'w2', { role: 'טבח/ית' }),
     asg('a3', 'w3'),
   ];
   const flags = calc.firstHadrachaFlags(workers, assignments, [], TODAY);
   assert.deepStrictEqual(flags.overdue, ['מדריך פעיל']);
   assert.deepStrictEqual(flags.missingStart, []);
+});
+
+test('all supervision roles are covered — guide, social worker, house manager, coordinator', () => {
+  const workers = [
+    guide('w1', 'מדריך חדש', '2026-01-01'),
+    guide('w2', 'עובדת סוציאלית', '2026-01-01'),
+    guide('w3', 'מנהלת בית', '2026-01-01'),
+    guide('w4', 'רכזת חדשה', '2026-01-01'),
+  ];
+  const assignments = [
+    asg('a1', 'w1'),                          // מדריך/ה (helper default)
+    asg('a2', 'w2', { role: 'מטפל/ת' }),
+    asg('a3', 'w3', { role: 'מנהל/ת' }),
+    asg('a4', 'w4', { role: 'רכז/ת' }),
+  ];
+  const flags = calc.firstHadrachaFlags(workers, assignments, [], TODAY);
+  assert.deepStrictEqual(flags.overdue.slice().sort(),
+    ['מדריך חדש', 'מנהלת בית', 'עובדת סוציאלית', 'רכזת חדשה'].sort());
+  assert.deepStrictEqual(calc.HADRACHA_ROLES, ['מדריך/ה', 'מטפל/ת', 'מנהל/ת', 'רכז/ת']);
 });
 
 test('a guide at two houses is flagged once; orphan assignments are skipped', () => {
@@ -187,5 +207,16 @@ test('the Hebrew banner strings contain no parentheses', () => {
     assert.ok(m, `${name} must be declared as a plain string const`);
     assert.ok(!/[()]/.test(m[1]), `${name} must not contain parentheses: "${m[1]}"`);
     assert.ok(/[֐-׿]/.test(m[1]), `${name} must be Hebrew text`);
+  }
+});
+
+test('the banner wording matches the 30-day all-roles rule', () => {
+  const overdue = /const HADRACHA_OVERDUE_TEXT = '([^']*)';/.exec(html)[1];
+  const missing = /const HADRACHA_MISSING_START_TEXT = '([^']*)';/.exec(html)[1];
+  assert.ok(overdue.includes('30'), 'overdue line must state the 30-day deadline');
+  assert.ok(!overdue.includes('7 ימים') && !/מ־7/.test(overdue), 'the old 7-day wording must be gone');
+  for (const text of [overdue, missing]) {
+    assert.ok(!text.includes('מדריכים'),
+      'banner lines cover all supervision roles, not only guides: ' + text);
   }
 });
