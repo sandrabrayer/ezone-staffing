@@ -121,6 +121,11 @@ test('all supervision roles are covered — guide, social worker, house manager,
   // Whitespace around either stored cell is trimmed before matching.
   assert.strictEqual(calc.isHadrachaRole(' מטפל/ת ', ' עו"ס '), true);
   assert.strictEqual(calc.isHadrachaRole('מטפל/ת', undefined), false);
+  // Both quote characters match: ASCII " (U+0022) and Hebrew gershayim ״
+  // (U+05F4) are normalized to the same value, trimmed or not.
+  assert.strictEqual(calc.isHadrachaRole('מטפל/ת', 'עו"ס'), true);
+  assert.strictEqual(calc.isHadrachaRole('מטפל/ת', 'עו״ס'), true);
+  assert.strictEqual(calc.isHadrachaRole('מטפל/ת', ' עו״ס '), true);
 });
 
 test('a guide at two houses is flagged once; orphan assignments are skipped', () => {

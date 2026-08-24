@@ -164,9 +164,11 @@ test('social_worker = role מטפל/ת AND role_detail עו"ס: plain מטפל/�
     { id: 'w2', name: 'עוס עם רווחים', startDate: '2026-01-01' },
     { id: 'w3', name: 'מטפלת באמנות', startDate: '2026-01-01' },
     { id: 'w4', name: 'מטפלת בלי פירוט', startDate: '2026-01-01' },
+    { id: 'w5', name: 'עוס גרשיים', startDate: '2026-01-01' },
+    { id: 'w6', name: 'עוס גרשיים ורווחים', startDate: '2026-01-01' },
   ];
   ctx.readAssignmentsSafe = () => [
-    // Exact two-column social worker → included.
+    // Exact two-column social worker, ASCII quote (U+0022) → included.
     { id: 'a1', workerId: 'w1', house: 'ramot', role: 'מטפל/ת', roleDetail: 'עו"ס', status: 'active' },
     // Stray whitespace in either cell is trimmed → still included.
     { id: 'a2', workerId: 'w2', house: 'asher', role: ' מטפל/ת ', roleDetail: ' עו"ס ', status: 'active' },
@@ -174,11 +176,15 @@ test('social_worker = role מטפל/ת AND role_detail עו"ס: plain מטפל/�
     { id: 'a3', workerId: 'w3', house: 'ramot', role: 'מטפל/ת', roleDetail: 'אמנות', status: 'active' },
     // Plain מטפל/ת with an EMPTY detail → excluded.
     { id: 'a4', workerId: 'w4', house: 'ramot', role: 'מטפל/ת', roleDetail: '', status: 'active' },
+    // Hebrew gershayim ״ (U+05F4) variant — normalized to the ASCII quote → included.
+    { id: 'a5', workerId: 'w5', house: 'rehab', role: 'מטפל/ת', roleDetail: 'עו״ס', status: 'active' },
+    // Gershayim + stray whitespace → still included.
+    { id: 'a6', workerId: 'w6', house: 'ofroni', role: 'מטפל/ת', roleDetail: ' עו״ס ', status: 'active' },
   ];
   const guides = plain(ctx.computeGuidesForHadrachot_());
   assert.deepStrictEqual(guides.map(g => g.name).sort(),
-    ['עוס מדויק', 'עוס עם רווחים'].sort(),
-    'exactly the עו"ס placements are published — plain מטפל/ת never is');
+    ['עוס מדויק', 'עוס עם רווחים', 'עוס גרשיים', 'עוס גרשיים ורווחים'].sort(),
+    'the עו"ס placements — either quote character — are published; plain מטפל/ת never is');
   for (const g of guides) assert.strictEqual(g.role, 'social_worker');
 });
 

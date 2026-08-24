@@ -2678,11 +2678,13 @@ const HADRACHOT_FEED_ROLES = {
 
 // A social-worker placement is stored across TWO sheet columns: `role` is
 // plain 'מטפל/ת' and the adjacent `role_detail` column (HEADERS_ASSIGNMENTS
-// index 4, read back as roleDetail) holds 'עו"ס' (ASCII double quote,
-// U+0022). The app UI merely displays the two joined with a dash — no
-// combined string ever exists in the data. Both cells are compared trimmed;
-// a plain 'מטפל/ת' with any other or empty role_detail is a therapist and
-// stays out of the feed.
+// index 4, read back as roleDetail) holds 'עו"ס'. The app UI merely displays
+// the two joined with a dash — no combined string ever exists in the data.
+// Hand-entered cells mix quote characters over time, so the detail is
+// normalized before comparing: trimmed, and the Hebrew gershayim ״ (U+05F4)
+// replaced with the ASCII double quote " (U+0022) — then compared to the
+// ASCII-quoted constant. A plain 'מטפל/ת' with any other or empty
+// role_detail is a therapist and stays out of the feed.
 const HADRACHOT_SOCIAL_WORKER_ROLE = 'מטפל/ת';
 const HADRACHOT_SOCIAL_WORKER_DETAIL = 'עו"ס';
 
@@ -2691,8 +2693,8 @@ const HADRACHOT_SOCIAL_WORKER_DETAIL = 'עו"ס';
 function hadrachotFeedRole_(a) {
   const role = String(a.role || '').trim();
   if (role === HADRACHOT_SOCIAL_WORKER_ROLE) {
-    return String(a.roleDetail || '').trim() === HADRACHOT_SOCIAL_WORKER_DETAIL
-      ? 'social_worker' : '';
+    const detail = String(a.roleDetail || '').trim().replace(/״/g, '"');
+    return detail === HADRACHOT_SOCIAL_WORKER_DETAIL ? 'social_worker' : '';
   }
   return HADRACHOT_FEED_ROLES[role] || '';
 }
