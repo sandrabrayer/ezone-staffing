@@ -97,17 +97,35 @@ test('all supervision roles are covered — guide, social worker, house manager,
     guide('w2', 'עובדת סוציאלית', '2026-01-01'),
     guide('w3', 'מנהלת בית', '2026-01-01'),
     guide('w4', 'רכזת חדשה', '2026-01-01'),
+    guide('w5', 'מטפלת באמנות', '2026-01-01'),
+    guide('w6', 'מטפלת בלי פירוט', '2026-01-01'),
   ];
   const assignments = [
     asg('a1', 'w1'),                          // מדריך/ה (helper default)
-    asg('a2', 'w2', { role: 'מטפל/ת' }),
+    // Social worker is stored across TWO columns: role + role_detail.
+    asg('a2', 'w2', { role: 'מטפל/ת', roleDetail: 'עו"ס' }),
     asg('a3', 'w3', { role: 'מנהל/ת' }),
     asg('a4', 'w4', { role: 'רכז/ת' }),
+    // Plain מטפל/ת with another / empty detail — NOT covered.
+    asg('a5', 'w5', { role: 'מטפל/ת', roleDetail: 'אמנות' }),
+    asg('a6', 'w6', { role: 'מטפל/ת', roleDetail: '' }),
   ];
   const flags = calc.firstHadrachaFlags(workers, assignments, [], TODAY);
   assert.deepStrictEqual(flags.overdue.slice().sort(),
     ['מדריך חדש', 'מנהלת בית', 'עובדת סוציאלית', 'רכזת חדשה'].sort());
-  assert.deepStrictEqual(calc.HADRACHA_ROLES, ['מדריך/ה', 'מטפל/ת', 'מנהל/ת', 'רכז/ת']);
+  assert.ok(flags.overdue.indexOf('מטפלת באמנות') < 0 && flags.overdue.indexOf('מטפלת בלי פירוט') < 0,
+    'a plain מטפל/ת placement must never be flagged');
+  assert.deepStrictEqual(calc.HADRACHA_ROLES, ['מדריך/ה', 'מנהל/ת', 'רכז/ת']);
+  assert.strictEqual(calc.HADRACHA_SOCIAL_WORKER_ROLE, 'מטפל/ת');
+  assert.strictEqual(calc.HADRACHA_SOCIAL_WORKER_DETAIL, 'עו"ס');
+  // Whitespace around either stored cell is trimmed before matching.
+  assert.strictEqual(calc.isHadrachaRole(' מטפל/ת ', ' עו"ס '), true);
+  assert.strictEqual(calc.isHadrachaRole('מטפל/ת', undefined), false);
+  // Both quote characters match: ASCII " (U+0022) and Hebrew gershayim ״
+  // (U+05F4) are normalized to the same value, trimmed or not.
+  assert.strictEqual(calc.isHadrachaRole('מטפל/ת', 'עו"ס'), true);
+  assert.strictEqual(calc.isHadrachaRole('מטפל/ת', 'עו״ס'), true);
+  assert.strictEqual(calc.isHadrachaRole('מטפל/ת', ' עו״ס '), true);
 });
 
 test('a guide at two houses is flagged once; orphan assignments are skipped', () => {
