@@ -58,9 +58,10 @@ function plain(v) { return JSON.parse(JSON.stringify(v)); }
 const FINANCIAL_WORDS = ['salary', 'cost', 'rate', 'budget', 'retainer', 'allowance', 'pct', 'amount'];
 
 // Roster fixture: one guide with every financial field populated, one social
-// worker (מטפל/ת), one house manager (מנהל/ת), one coordinator (רכז/ת) — all
-// supervision-relevant and published — plus one cook (must be excluded — not
-// a supervision role), one guide on חל"ד leave (active:false), one orphaned
+// worker (exact role string מטפל/ת – עו"ס), one house manager (מנהל/ת), one
+// coordinator (רכז/ת) — all supervision-relevant and published — plus one
+// plain-מטפל/ת therapist and one cook (both must be excluded — not
+// supervision roles), one guide on חל"ד leave (active:false), one orphaned
 // assignment, one undated guide.
 function seedReaders(ctx) {
   ctx.readWorkersSafe = () => [
@@ -71,6 +72,7 @@ function seedReaders(ctx) {
     { id: 'w5', name: 'שחר מזרחי', notes: '', startDate: '2026-02-01' },
     { id: 'w6', name: 'גיל פרץ', notes: '', startDate: '2026-03-01' },
     { id: 'w7', name: 'אבי כהן', notes: '', startDate: '2026-04-01' },
+    { id: 'w8', name: 'תמר גל', notes: '', startDate: '2026-05-01' },
   ];
   ctx.readAssignmentsSafe = () => [
     { id: 'a1', workerId: 'w1', house: 'ramot', role: 'מדריך/ה', employmentType: 'full_time',
@@ -78,11 +80,12 @@ function seedReaders(ctx) {
       retainerAmount: 5000, allowance: 6000, status: 'active', notes: 'תנאים' },
     { id: 'a2', workerId: 'w2', house: 'asher', role: 'מדריך/ה', status: 'chld', statusDate: '2026-07-20' },
     { id: 'a3', workerId: 'w3', house: 'rehab', role: 'מדריך/ה', status: 'active' },
-    { id: 'a4', workerId: 'w4', house: 'ramot', role: 'מטפל/ת', status: 'active', salary: 99999 },
+    { id: 'a4', workerId: 'w4', house: 'ramot', role: 'מטפל/ת – עו"ס', status: 'active', salary: 99999 },
     { id: 'a5', workerId: 'ghost', house: 'ramot', role: 'מדריך/ה', status: 'active' },
     { id: 'a6', workerId: 'w5', house: 'ofroni', role: 'מנהל/ת', status: 'active', salary: 99999 },
     { id: 'a7', workerId: 'w6', house: 'rehab', role: 'רכז/ת', status: 'active', retainerAmount: 5000 },
     { id: 'a8', workerId: 'w7', house: 'ramot', role: 'טבח/ית', status: 'active' },
+    { id: 'a9', workerId: 'w8', house: 'asher', role: 'מטפל/ת', status: 'active' },
   ];
 }
 
@@ -119,7 +122,8 @@ test('feed filters to supervision roles, maps active status, keeps empty start d
   const ctx = loadCtx();
   seedReaders(ctx);
   const guides = plain(ctx.computeGuidesForHadrachot_());
-  // w7 is a טבח/ית (not a supervision role) and a5 is orphaned — both out.
+  // w7 (טבח/ית) and w8 (plain מטפל/ת) are not supervision roles and a5 is
+  // orphaned — all out.
   assert.deepStrictEqual(guides.map(g => g.name).sort(),
     ['דנה לוי', 'יואב כהן', 'רות אשר', 'נועה ברק', 'שחר מזרחי', 'גיל פרץ'].sort());
   const byName = {};
@@ -140,7 +144,7 @@ test('every entry carries the ASCII role value matching its sheet role string', 
   plain(ctx.computeGuidesForHadrachot_()).forEach(g => { byName[g.name] = g; });
   assert.strictEqual(byName['דנה לוי'].role, 'guide');          // מדריך/ה
   assert.strictEqual(byName['יואב כהן'].role, 'guide');         // מדריך/ה on leave
-  assert.strictEqual(byName['נועה ברק'].role, 'social_worker'); // מטפל/ת
+  assert.strictEqual(byName['נועה ברק'].role, 'social_worker'); // מטפל/ת – עו"ס
   assert.strictEqual(byName['שחר מזרחי'].role, 'house_manager'); // מנהל/ת
   assert.strictEqual(byName['גיל פרץ'].role, 'coordinator');    // רכז/ת
   // Non-supervision roles never appear at all.
@@ -151,6 +155,19 @@ test('every entry carries the ASCII role value matching its sheet role string', 
     assert.ok(['guide', 'social_worker', 'house_manager', 'coordinator'].indexOf(v) >= 0,
       `unexpected role value "${v}"`);
   }
+});
+
+test('social_worker matches ONLY מטפל/ת – עו"ס: plain מטפל/ת is excluded, עו"ס is included', () => {
+  const ctx = loadCtx();
+  seedReaders(ctx);
+  const guides = plain(ctx.computeGuidesForHadrachot_());
+  const names = guides.map(g => g.name);
+  // w8 תמר גל is a plain מטפל/ת (therapist) — must NOT be published.
+  assert.ok(names.indexOf('תמר גל') < 0, 'a plain מטפל/ת placement must be excluded from the feed');
+  // w4 נועה ברק carries the exact מטפל/ת – עו"ס role string — published as social_worker.
+  const socialWorkers = guides.filter(g => g.role === 'social_worker');
+  assert.deepStrictEqual(socialWorkers.map(g => g.name), ['נועה ברק'],
+    'exactly the עו"ס placement is published as social_worker');
 });
 
 test('a blank stored status reads as active (matches readAssignmentsSafe normalization)', () => {

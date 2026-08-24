@@ -2665,13 +2665,14 @@ function installDigestTrigger() {
 const HADRACHOT_READ_SECRET_PROP = 'HADRACHOT_READ_SECRET';
 
 // Supervision-relevant roles → the ASCII role value published on each feed
-// entry. Keys are the EXACT strings stored in the assignments sheet (the
-// ROLE_OPTIONS values): 'מנהל/ת' is the house-manager role and 'מטפל/ת' is
-// the social-work / therapy role — the sheet has no separate
-// 'עובד/ת סוציאלי/ת' option. Any role not listed here stays excluded.
+// entry. Keys must equal the role string stored in the assignments sheet
+// byte-for-byte: 'מנהל/ת' is the house-manager role, and social_worker
+// matches ONLY the exact string 'מטפל/ת – עו"ס' (en dash, U+2013) — plain
+// 'מטפל/ת' is a therapist and is deliberately NOT in the feed. Any role
+// not listed here stays excluded.
 const HADRACHOT_FEED_ROLES = {
   'מדריך/ה': 'guide',
-  'מטפל/ת': 'social_worker',
+  'מטפל/ת – עו"ס': 'social_worker',
   'מנהל/ת': 'house_manager',
   'רכז/ת': 'coordinator',
 };
