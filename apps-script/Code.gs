@@ -2664,18 +2664,38 @@ function installDigestTrigger() {
 
 const HADRACHOT_READ_SECRET_PROP = 'HADRACHOT_READ_SECRET';
 
-// Supervision-relevant roles → the ASCII role value published on each feed
-// entry. Keys must equal the role string stored in the assignments sheet
-// byte-for-byte: 'מנהל/ת' is the house-manager role, and social_worker
-// matches ONLY the exact string 'מטפל/ת – עו"ס' (en dash, U+2013) — plain
-// 'מטפל/ת' is a therapist and is deliberately NOT in the feed. Any role
-// not listed here stays excluded.
+// Supervision-relevant single-column roles → the ASCII role value published
+// on each feed entry. Keys must equal the role string stored in the
+// assignments sheet's `role` column byte-for-byte ('מנהל/ת' is the
+// house-manager role). The social-worker role is NOT here — the sheet stores
+// it across TWO columns (see hadrachotFeedRole_). Any other role stays
+// excluded.
 const HADRACHOT_FEED_ROLES = {
   'מדריך/ה': 'guide',
-  'מטפל/ת – עו"ס': 'social_worker',
   'מנהל/ת': 'house_manager',
   'רכז/ת': 'coordinator',
 };
+
+// A social-worker placement is stored across TWO sheet columns: `role` is
+// plain 'מטפל/ת' and the adjacent `role_detail` column (HEADERS_ASSIGNMENTS
+// index 4, read back as roleDetail) holds 'עו"ס' (ASCII double quote,
+// U+0022). The app UI merely displays the two joined with a dash — no
+// combined string ever exists in the data. Both cells are compared trimmed;
+// a plain 'מטפל/ת' with any other or empty role_detail is a therapist and
+// stays out of the feed.
+const HADRACHOT_SOCIAL_WORKER_ROLE = 'מטפל/ת';
+const HADRACHOT_SOCIAL_WORKER_DETAIL = 'עו"ס';
+
+// The ASCII feed role for an assignment, or '' when the placement is not
+// supervision-relevant.
+function hadrachotFeedRole_(a) {
+  const role = String(a.role || '').trim();
+  if (role === HADRACHOT_SOCIAL_WORKER_ROLE) {
+    return String(a.roleDetail || '').trim() === HADRACHOT_SOCIAL_WORKER_DETAIL
+      ? 'social_worker' : '';
+  }
+  return HADRACHOT_FEED_ROLES[role] || '';
+}
 
 function hadrachotAuthorized_(e) {
   const required = PropertiesService.getScriptProperties()
@@ -2696,18 +2716,20 @@ function handleHadrachotRead_(e) {
   }
 }
 
-// Builds the feed entries: one per (worker × house) assignment whose role is
-// supervision-relevant (a HADRACHOT_FEED_ROLES key). Orphaned assignments
-// (no matching worker) are skipped. Reads name / house / role / status /
-// startDate ONLY — never a financial field.
+// Builds the feed entries: one per (worker × house) assignment that is
+// supervision-relevant (see hadrachotFeedRole_ — the ASCII role is computed
+// server-side from role + role_detail BEFORE stripping, so role_detail
+// itself never leaves the feed). Orphaned assignments (no matching worker)
+// are skipped. Reads name / house / role / role_detail / status / startDate
+// ONLY — never a financial field.
 function computeGuidesForHadrachot_() {
   const workerById = {};
   readWorkersSafe().forEach(function (w) { workerById[w.id] = w; });
 
   const guides = [];
   readAssignmentsSafe().forEach(function (a) {
-    const role = HADRACHOT_FEED_ROLES[a.role];
-    if (!role) return; // not a supervision-relevant role
+    const role = hadrachotFeedRole_(a);
+    if (!role) return; // not a supervision-relevant placement
     const w = workerById[a.workerId];
     if (!w) return; // orphaned assignment — skip
     guides.push({
