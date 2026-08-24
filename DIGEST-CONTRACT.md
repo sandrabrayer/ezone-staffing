@@ -33,7 +33,7 @@ Tab name: **`NewGuides`**. Row 1 is the header (frozen). One row per
 
 | column      | type                    | notes                                                        |
 |-------------|-------------------------|--------------------------------------------------------------|
-| `house`     | text (canonical id)     | one of `ramot` / `raanana` / `efroni` / `rehab`              |
+| `house`     | text (canonical id)     | one of `ramot` / `raanana` / `efroni` / `rehab` / `pardes`   |
 | `guideName` | text                    | the guide/employee display name                              |
 | `startDate` | date `YYYY-MM-DD`       | the date the guide is placed at the house                    |
 | `role`      | text, optional          | Hebrew role label (e.g. `מדריך/ה`); may be empty             |
@@ -55,7 +55,7 @@ house.
 |-------------|-------------------------|--------------------------------------------------------------|
 | column      | type                    | notes                                                        |
 |-------------|-------------------------|--------------------------------------------------------------|
-| `house`     | text (canonical id)     | one of `ramot` / `raanana` / `efroni` / `rehab` (same mapping as `NewGuides`) |
+| `house`     | text (canonical id)     | one of `ramot` / `raanana` / `efroni` / `rehab` / `pardes` (same mapping as `NewGuides`) |
 | `guideName` | text                    | the guide/employee display name                              |
 | `startDate` | date `YYYY-MM-DD`, may be empty | the guide's **employment start date** (תאריך תחילת עבודה); `''` when not yet entered |
 | `updatedAt` | ISO 8601, UTC (`…Z`)    | when the roster row was last rebuilt                         |
@@ -92,7 +92,7 @@ the **Hebrew display name** (not the canonical id).
 
 | column      | type                    | notes                                                        |
 |-------------|-------------------------|--------------------------------------------------------------|
-| `house`     | text (Hebrew display)   | `רמות השבים` / `רעננה אשר` / `קיסריה עפרוני` / `קיסריה ריהאב` |
+| `house`     | text (Hebrew display)   | `רמות השבים` / `רעננה אשר` / `קיסריה עפרוני` / `קיסריה ריהאב` / `רעננה הפרדס` |
 | `guideName` | text                    | the guide/employee display name                              |
 | `date`      | date `YYYY-MM-DD`       | `NewlyHired` = employment **start** date; `NewlyDeparted` = employment **end** date |
 | `updatedAt` | ISO 8601, UTC (`…Z`)    | when the row was last rebuilt                                |
@@ -147,7 +147,7 @@ non-physical / pre-opening houses are **excluded**:
 | `asher`       | רעננה אשר        | `raanana`  | ✅        |
 | `ofroni`      | קיסריה עפרוני    | `efroni`   | ✅        |
 | `rehab`       | קיסריה ריהאב     | `rehab`    | ✅        |
-| `pardes`      | איזון רעננה - פרדס (הפרדס) | —  | ❌ pre-opening |
+| `pardes`      | רעננה הפרדס      | `pardes`   | ✅ (opened 2026) |
 | `sde_eliezer` | שדה אליעזר       | —          | ❌ pre-opening |
 | `hq`          | מטה              | —          | ❌ admin pseudo-house |
 

@@ -40,7 +40,10 @@ const FINANCIAL_WORDS = ['salary', 'cost', 'rate', 'budget', 'retainer', 'allowa
 // exporter (same lexical scope) that copies the ones we assert on onto `this`.
 function loadCtx() {
   const ctx = vm.createContext({ Logger: { log() {} } });
-  vm.runInContext(gs + '\n;this.__DIGEST_HOUSE_CANONICAL = DIGEST_HOUSE_CANONICAL;', ctx);
+  vm.runInContext(gs
+    + '\n;this.__DIGEST_HOUSE_CANONICAL = DIGEST_HOUSE_CANONICAL;'
+    + '\n;this.__DIGEST_HOUSE_HEBREW = DIGEST_HOUSE_HEBREW;'
+    + '\n;this.__HOUSE_IDS = HOUSE_IDS;', ctx);
   return ctx;
 }
 
@@ -115,7 +118,7 @@ test('NewlyHired + NewlyDeparted tabs are named and written on every rebuild', (
   assert.ok(/writeDigestTab_\(book, DIGEST_NEWLY_DEPARTED_TAB,/.test(gs), 'NewlyDeparted written');
 });
 
-test('DIGEST_HOUSE_HEBREW maps the four physical houses to their app display names', () => {
+test('DIGEST_HOUSE_HEBREW maps the five physical houses to their app display names', () => {
   const m = /const DIGEST_HOUSE_HEBREW = \{([\s\S]*?)\};/.exec(gs);
   assert.ok(m, 'DIGEST_HOUSE_HEBREW should be declared');
   const block = m[1];
@@ -123,8 +126,9 @@ test('DIGEST_HOUSE_HEBREW maps the four physical houses to their app display nam
   assert.ok(/asher:\s*'רעננה אשר'/.test(block));
   assert.ok(/ofroni:\s*'קיסריה עפרוני'/.test(block));
   assert.ok(/rehab:\s*'קיסריה ריהאב'/.test(block));
+  assert.ok(/pardes:\s*'רעננה הפרדס'/.test(block), 'pardes opened — it is a digest house now');
   // Excluded houses must not appear.
-  for (const excluded of ['pardes', 'sde_eliezer', 'hq']) {
+  for (const excluded of ['sde_eliezer', 'hq']) {
     assert.ok(!new RegExp(excluded + ':').test(block), `${excluded} must be excluded`);
   }
 });
@@ -161,11 +165,38 @@ test('DIGEST_HOUSE_CANONICAL maps internal ids to canonical ids and excludes pre
     asher: 'raanana',
     ofroni: 'efroni',
     rehab: 'rehab',
+    pardes: 'pardes',
   });
-  // Pre-opening houses (הפרדס / שדה אליעזר) and the HQ pseudo-house are excluded.
-  for (const excluded of ['pardes', 'sde_eliezer', 'hq']) {
+  // The pre-opening house (שדה אליעזר) and the HQ pseudo-house are excluded.
+  for (const excluded of ['sde_eliezer', 'hq']) {
     assert.ok(!(excluded in map), `${excluded} must be excluded from the digest`);
   }
+});
+
+// The guard that caught the pardes gap: every house id the app knows
+// (lib/validate.js HOUSE_IDS — mirrored by Code.gs HOUSE_IDS) must either be
+// covered by BOTH digest maps or appear on the explicit exclusion list below.
+// Opening a new house means adding it to the digest maps OR consciously adding
+// it here — never silently dropping its guide rows from the digest.
+const DIGEST_EXCLUDED_HOUSES = ['sde_eliezer', 'hq'];
+
+test('digest maps cover every house id except the explicit exclusions (no silent gaps)', () => {
+  const { HOUSE_IDS } = require(path.join(ROOT, 'lib', 'validate.js'));
+  const ctx = loadCtx();
+  const canonical = plain(ctx.__DIGEST_HOUSE_CANONICAL);
+  const hebrew = plain(ctx.__DIGEST_HOUSE_HEBREW);
+  assert.deepStrictEqual(plain(ctx.__HOUSE_IDS), HOUSE_IDS,
+    'Code.gs HOUSE_IDS must mirror lib/validate.js HOUSE_IDS');
+  for (const id of HOUSE_IDS) {
+    const excluded = DIGEST_EXCLUDED_HOUSES.includes(id);
+    assert.strictEqual(id in canonical, !excluded,
+      `house '${id}' must be ${excluded ? 'excluded from' : 'covered by'} DIGEST_HOUSE_CANONICAL`);
+    assert.strictEqual(id in hebrew, !excluded,
+      `house '${id}' must be ${excluded ? 'excluded from' : 'covered by'} DIGEST_HOUSE_HEBREW`);
+  }
+  // The two maps must always cover the exact same set of houses.
+  assert.deepStrictEqual(Object.keys(hebrew).sort(), Object.keys(canonical).sort(),
+    'DIGEST_HOUSE_HEBREW and DIGEST_HOUSE_CANONICAL must cover the same houses');
 });
 
 test('this app owns a SEPARATE digest spreadsheet (distinct from the roster SHEET_ID)', () => {
@@ -261,7 +292,8 @@ test('computeDigestRows_ maps houses and excludes pre-opening/pseudo houses', ()
     ],
   );
   const houses = plain(ctx.computeDigestRows_('2026-07-27T12:00:00Z', '2026-07-27')).map(r => r[0]);
-  assert.deepStrictEqual(houses.sort(), ['efroni', 'raanana', 'ramot', 'rehab']);
+  // pardes is an OPEN house now (canonical id 'pardes'); sde_eliezer + hq stay out.
+  assert.deepStrictEqual(houses.sort(), ['efroni', 'pardes', 'raanana', 'ramot', 'rehab']);
 });
 
 test('computeDigestRows_ keeps only startDates inside the window', () => {
@@ -339,19 +371,21 @@ test('computeRosterRows_ includes ALL active guides regardless of date window; e
 test('computeRosterRows_ maps houses, excludes pre-opening/pseudo houses, skips orphans, sorts by house/name', () => {
   const ctx = withRoster(
     [{ id: 'w1', name: 'B', startDate: '' }, { id: 'w2', name: 'A', startDate: '' },
-     { id: 'w3', name: 'C', startDate: '' }, { id: 'w4', name: 'D', startDate: '' }],
+     { id: 'w3', name: 'C', startDate: '' }, { id: 'w4', name: 'D', startDate: '' },
+     { id: 'w5', name: 'E', startDate: '' }],
     [
       { id: 'a1', workerId: 'w1', house: 'ramot',  role: '', createdAt: '2026-07-27T00:00:00Z' },
       { id: 'a2', workerId: 'w2', house: 'ramot',  role: '', createdAt: '2026-07-27T00:00:00Z' },
       { id: 'a3', workerId: 'w3', house: 'rehab',  role: '', createdAt: '2026-07-27T00:00:00Z' },
-      { id: 'a4', workerId: 'w4', house: 'pardes', role: '', createdAt: '2026-07-27T00:00:00Z' }, // excluded
+      { id: 'a4', workerId: 'w4', house: 'sde_eliezer', role: '', createdAt: '2026-07-27T00:00:00Z' }, // excluded
       { id: 'a5', workerId: 'ghost', house: 'ramot', role: '', createdAt: '2026-07-27T00:00:00Z' }, // orphan
+      { id: 'a6', workerId: 'w5', house: 'pardes', role: '', createdAt: '2026-07-27T00:00:00Z' }, // included (open house)
     ],
   );
   const rows = plain(ctx.computeRosterRows_('2026-07-27T12:00:00Z'));
-  // pardes excluded + orphan skipped → 3 rows; ramot (A then B) before rehab (C).
+  // sde_eliezer excluded + orphan skipped → 4 rows; pardes (E) before ramot (A, B) before rehab (C).
   assert.deepStrictEqual(rows.map(r => [r[0], r[1]]),
-    [['ramot', 'A'], ['ramot', 'B'], ['rehab', 'C']]);
+    [['pardes', 'E'], ['ramot', 'A'], ['ramot', 'B'], ['rehab', 'C']]);
 });
 
 test('computeRosterRows_ lists a guide once per house when placed at several', () => {
@@ -416,15 +450,19 @@ test('computeNewlyHiredRows_ excludes pre-opening / hq houses and undated worker
   const ctx = withRoster(
     [{ id: 'w1', name: 'A', startDate: '2026-07-10' },
      { id: 'w2', name: 'B', startDate: '2026-07-10' },
-     { id: 'w3', name: 'C', startDate: '' }],
+     { id: 'w3', name: 'C', startDate: '' },
+     { id: 'w4', name: 'D', startDate: '2026-07-10' }],
     [
-      { id: 'a1', workerId: 'w1', house: 'pardes', role: 'מדריך/ה' }, // excluded
-      { id: 'a2', workerId: 'w2', house: 'hq',     role: 'אחר' },      // excluded
-      { id: 'a3', workerId: 'w3', house: 'ramot',  role: 'מדריך/ה' }, // no start date
+      { id: 'a1', workerId: 'w1', house: 'sde_eliezer', role: 'מדריך/ה' }, // excluded
+      { id: 'a2', workerId: 'w2', house: 'hq',          role: 'אחר' },      // excluded
+      { id: 'a3', workerId: 'w3', house: 'ramot',       role: 'מדריך/ה' }, // no start date
+      { id: 'a4', workerId: 'w4', house: 'pardes',      role: 'מדריך/ה' }, // included (open house)
     ],
   );
   const rows = plain(ctx.computeNewlyHiredRows_('2026-07-27T12:00:00Z', '2026-07-27'));
-  assert.deepStrictEqual(rows, []);
+  assert.deepStrictEqual(rows, [
+    ['רעננה הפרדס', 'D', '2026-07-10', '2026-07-27T12:00:00Z'],
+  ]);
 });
 
 // ---------------------------------------------------------------------------
@@ -445,12 +483,14 @@ test('computeNewlyDepartedRows_ lists termination dates in the last 30 days, Heb
     { id: 'arc2', name: 'ישן',  house: 'ramot',  terminationDate: '2026-01-01' },                 // out
     { id: 'arc3', name: 'קצה',  house: 'rehab',  terminationDate: '2026-06-27' },                 // 30 days — in
     { id: 'arc4', name: '',     house: 'ramot',  terminationDate: '2026-07-21' },                 // no name — skip
-    { id: 'arc5', name: 'פרדס', house: 'pardes', terminationDate: '2026-07-21' },                 // excluded house
+    { id: 'arc5', name: 'פרדס', house: 'pardes', terminationDate: '2026-07-21' },                 // included (open house)
+    { id: 'arc6', name: 'שדה',  house: 'sde_eliezer', terminationDate: '2026-07-21' },            // excluded house
   ]);
   const rows = plain(ctx.computeNewlyDepartedRows_('2026-07-27T12:00:00Z', '2026-07-27'));
   assert.deepStrictEqual(rows, [
     ['קיסריה עפרוני', 'עוזב', '2026-07-20', '2026-07-27T12:00:00Z'],
     ['קיסריה ריהאב', 'קצה', '2026-06-27', '2026-07-27T12:00:00Z'],
+    ['רעננה הפרדס', 'פרדס', '2026-07-21', '2026-07-27T12:00:00Z'],
   ]);
   assert.ok(!JSON.stringify(rows).includes('12345'), 'no financial value leaks');
 });
