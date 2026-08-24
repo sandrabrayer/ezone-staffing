@@ -2248,6 +2248,7 @@ const DIGEST_HOUSE_HEBREW = {
   asher:  'רעננה אשר',
   ofroni: 'קיסריה עפרוני',
   rehab:  'קיסריה ריהאב',
+  pardes: 'רעננה הפרדס',
 };
 
 // Activity window for NewlyHired / NewlyDeparted: the trailing N days.
@@ -2257,15 +2258,16 @@ const DIGEST_ACTIVITY_DAYS = 30;
 const DIGEST_READER_EMAIL = 'brayersandra@gmail.com';
 
 // Internal house id → canonical digest house id. Ids NOT in this map are
-// EXCLUDED from the digest: `pardes` (איזון רעננה - פרדס / "הפרדס") and
-// `sde_eliezer` (שדה אליעזר) are pre-opening houses, and `hq` (מטה) is the
-// admin pseudo-house — none is a physical house a coordinator prepares
-// arrivals for.
+// EXCLUDED from the digest: `sde_eliezer` (שדה אליעזר) is a pre-opening
+// house, and `hq` (מטה) is the admin pseudo-house — neither is a physical
+// house a coordinator prepares arrivals for. `pardes` (רעננה הפרדס) opened
+// in 2026 and is now a physical digest house.
 const DIGEST_HOUSE_CANONICAL = {
   ramot:  'ramot',    // רמות השבים
   asher:  'raanana',  // רעננה אשר
   ofroni: 'efroni',   // קיסריה עפרוני
   rehab:  'rehab',    // קיסריה ריהאב
+  pardes: 'pardes',   // רעננה הפרדס
 };
 
 // How many full weeks past the current week the look-ahead window covers.
