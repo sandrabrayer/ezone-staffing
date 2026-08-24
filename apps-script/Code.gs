@@ -2640,13 +2640,19 @@ function installDigestTrigger() {
    SHARED_SECRET does NOT unlock this feed (and this feed's secret
    does not unlock the roster doGet/doPost).
 
-   Payload — one entry per guide (role מדריך/ה) placement, ONLY:
+   Payload — one entry per supervision-relevant placement (roles
+   in HADRACHOT_FEED_ROLES), ONLY:
      name      — the worker's full display name
      house     — internal house id (ramot/asher/ofroni/rehab/...)
+     role      — ASCII role value: guide / social_worker /
+                 house_manager / coordinator
      active    — boolean, the assignment status is 'active'
                  (false while on חל"ד / חל"ט leave)
      startDate — 'YYYY-MM-DD' employment start date, '' when not
                  yet entered (legacy rows — never back-filled)
+   The endpoint name, the response key `guides`, and the original
+   four fields are unchanged — the hadrachot app keeps working
+   during rollout; `role` is purely additive.
 
    HARD RULE: every other field is stripped. No salary, cost, rate,
    pct, allowance, retainer, budget, notes, or id ever leaves this
@@ -2657,6 +2663,18 @@ function installDigestTrigger() {
    ============================================================ */
 
 const HADRACHOT_READ_SECRET_PROP = 'HADRACHOT_READ_SECRET';
+
+// Supervision-relevant roles → the ASCII role value published on each feed
+// entry. Keys are the EXACT strings stored in the assignments sheet (the
+// ROLE_OPTIONS values): 'מנהל/ת' is the house-manager role and 'מטפל/ת' is
+// the social-work / therapy role — the sheet has no separate
+// 'עובד/ת סוציאלי/ת' option. Any role not listed here stays excluded.
+const HADRACHOT_FEED_ROLES = {
+  'מדריך/ה': 'guide',
+  'מטפל/ת': 'social_worker',
+  'מנהל/ת': 'house_manager',
+  'רכז/ת': 'coordinator',
+};
 
 function hadrachotAuthorized_(e) {
   const required = PropertiesService.getScriptProperties()
@@ -2677,21 +2695,24 @@ function handleHadrachotRead_(e) {
   }
 }
 
-// Builds the feed entries: one per (guide × house) assignment whose role is
-// מדריך/ה. Orphaned assignments (no matching worker) are skipped. Reads
-// name / house / status / startDate ONLY — never a financial field.
+// Builds the feed entries: one per (worker × house) assignment whose role is
+// supervision-relevant (a HADRACHOT_FEED_ROLES key). Orphaned assignments
+// (no matching worker) are skipped. Reads name / house / role / status /
+// startDate ONLY — never a financial field.
 function computeGuidesForHadrachot_() {
   const workerById = {};
   readWorkersSafe().forEach(function (w) { workerById[w.id] = w; });
 
   const guides = [];
   readAssignmentsSafe().forEach(function (a) {
-    if (a.role !== 'מדריך/ה') return; // hadrachot are for guides only
+    const role = HADRACHOT_FEED_ROLES[a.role];
+    if (!role) return; // not a supervision-relevant role
     const w = workerById[a.workerId];
     if (!w) return; // orphaned assignment — skip
     guides.push({
       name: w.name,
       house: a.house,
+      role: role,
       active: (a.status || 'active') === 'active',
       startDate: w.startDate || '',
     });

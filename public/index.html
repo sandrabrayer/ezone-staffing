@@ -3148,13 +3148,14 @@ function render(){
 // Hebrew UI text for the first-hadracha banner — no parentheses (guarded by
 // tests/hadracha-flags.test.js).
 const HADRACHA_BANNER_TITLE = 'הדרכה ראשונה';
-const HADRACHA_OVERDUE_TEXT = 'מדריכים פעילים שעברו יותר מ־7 ימים מתחילת העבודה וטרם השלימו הדרכה ראשונה';
-const HADRACHA_MISSING_START_TEXT = 'מדריכים פעילים ללא תאריך תחילת עבודה';
+const HADRACHA_OVERDUE_TEXT = 'אנשי צוות פעילים שעברו יותר מ־30 ימים מתחילת העבודה וטרם השלימו הדרכה ראשונה';
+const HADRACHA_MISSING_START_TEXT = 'אנשי צוות פעילים ללא תאריך תחילת עבודה';
 
 // The first-hadracha alert banner. Renders '' — nothing at all — unless real
 // completion data arrived from the hadrachot feed (HADRACHOT_COMPLETED is an
 // array) AND the flag logic found something to say. The flag logic itself
-// (7-day rule, missing start dates) is calcFirstHadrachaFlags in lib/calc.js.
+// (30-day rule over all supervision-relevant roles, missing start dates) is
+// calcFirstHadrachaFlags in lib/calc.js.
 function hadrachaBannerHtml(){
   if (!Array.isArray(HADRACHOT_COMPLETED)) return '';
   const flags = calcFirstHadrachaFlags(WORKERS, ASSIGNMENTS, HADRACHOT_COMPLETED, calcTodayStr());
