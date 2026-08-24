@@ -29,7 +29,7 @@ v3 supports **seven** house codes — the original four plus two new physical ho
 | `asher` | רעננה אשר | original house |
 | `ofroni` | קיסריה עפרוני | original house |
 | `rehab` | קיסריה ריהאב | original house |
-| `pardes` | איזון רעננה - פרדס | new in v3 |
+| `pardes` | רעננה הפרדס | new in v3 |
 | `sde_eliezer` | שדה אליעזר | new in v3 |
 | `hq` | מטה | **pseudo-house** for headquarters / admin staff who don't belong to a specific physical house. Same validation rules as any other house |
 
