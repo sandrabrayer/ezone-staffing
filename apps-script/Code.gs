@@ -90,6 +90,8 @@ const ARCHIVE_V3_TAB = 'archive_v3';
 // replacing the one-time estimate for hourly / per_session cost. Append-only
 // columns; one row per (assignment, month), updated in place on re-upsert.
 const MONTHLY_ACTUALS_TAB = 'monthly_actuals';
+// Hearing events (שימועים) — one row per hearing held for a worker.
+const HEARINGS_TAB = 'hearings';
 // Per-house monthly salary budgets. One row per (house, month) where month
 // is 'YYYY-MM' or the sentinel 'default' (fallback for any month without a
 // specific override). Append-only; upserted in place per (house, month).
@@ -171,6 +173,17 @@ const HEADERS_MONTHLY_ACTUALS = [
 const HEADERS_BUDGETS = [
   'id', 'house', 'month', 'amount', 'created_at', 'updated_at', 'instructors_amount',
 ];
+// APPEND-ONLY (same rule as every other tab — read/write map by position).
+// Hearing events (שימועים). worker_name is a snapshot resolved server-side
+// from the workers tab at write time (so rows survive a later worker
+// delete); result is the ASCII enum 'warning' / 'dismissal' — the Hebrew
+// labels (אזהרה / פיטורין) live in the frontend only.
+const HEADERS_HEARINGS = [
+  'id', 'worker_id', 'worker_name', 'hearing_date', 'reason', 'result', 'created_at',
+];
+// Mirror of HEARING_RESULT_VALUES in lib/validate.js.
+const HEARING_RESULT_VALUES = ['warning', 'dismissal'];
+
 // Legacy headers (only used by setupSheetsV3 to repair partial legacy state
 // during testing; migrateToV3 reads whatever is there regardless of header
 // presence).
@@ -279,6 +292,7 @@ function doGet(e) {
       archiveV3: readArchiveV3Safe(),
       monthlyActuals: readMonthlyActualsSafe(),
       budgets: readBudgetsSafe(),
+      hearings: readHearingsSafe(),
       // legacy passthrough — empty arrays/objects when tabs are missing
       // (e.g. after finalizeV3 or on a fresh v3-only install).
       houses: houses,
@@ -312,6 +326,10 @@ function doPost(e) {
       case 'getMonthlyActuals':    return getMonthlyActuals(body);
       case 'setBudget':            result = setBudget(body); break;
       case 'getBudgets':           return getBudgets(body);
+      case 'getHearings':          return getHearings(body);
+      case 'addHearing':           result = addHearing(body); break;
+      case 'updateHearing':        result = updateHearing(body); break;
+      case 'deleteHearing':        result = deleteHearing(body); break;
       default: throw httpError(400, 'unknown action');
     }
     // Rebuild the NewGuides digest after any write that can change a guide's
@@ -917,6 +935,26 @@ function readBudgetsSafe() {
       createdAt: cellToIso(r[4]),
       updatedAt: cellToIso(r[5]),
       instructorsAmount: budgetInstructorsCell(r[6]),
+    };
+  });
+}
+
+// Hearing events (שימועים). Missing tab → [] (the tab is auto-created by
+// the first write; a fresh install has none). result is normalized to the
+// ASCII enum on read — blank/unknown values fall back to 'warning' so free
+// text in the sheet can never leak into the UI as a badge class.
+function readHearingsSafe() {
+  const sh = sheetByNameOrNull(HEARINGS_TAB);
+  return rowsOf(sh).map(function (r) {
+    const result = String(r[5] || '').trim();
+    return {
+      id: String(r[0]),
+      workerId: String(r[1] || ''),
+      workerName: String(r[2] || ''),
+      hearingDate: formatDateCell(r[3]),
+      reason: String(r[4] || ''),
+      result: HEARING_RESULT_VALUES.indexOf(result) >= 0 ? result : 'warning',
+      createdAt: cellToIso(r[6]),
     };
   });
 }
@@ -1693,6 +1731,122 @@ function setBudget(body) {
 function getBudgets() {
   return { ok: true, budgets: readBudgetsSafe() };
 }
+
+// ---------- hearing actions (שימועים) ----------
+
+// Mirror of validateHearing in lib/validate.js (defense in depth — the
+// Express proxy validates first, but a caller hitting /exec directly must
+// never write free text into the result column). workerId + hearingDate +
+// result required; reason is optional free text, trimmed + capped. The
+// worker_name snapshot is resolved server-side, never taken from the client.
+function validateHearing(h) {
+  if (!h || typeof h !== 'object') throw httpError(400, 'hearing required');
+  const workerId = String(h.workerId || '').trim();
+  if (!workerId) throw httpError(400, 'workerId required');
+  const hearingDate = validateRequiredDate(h.hearingDate, 'hearingDate');
+  const reason = String(h.reason || '').trim().slice(0, 500);
+  const result = String(h.result || '').trim();
+  if (HEARING_RESULT_VALUES.indexOf(result) < 0) throw httpError(400, 'bad result');
+  return { workerId: workerId, hearingDate: hearingDate, reason: reason, result: result };
+}
+
+// The hearings tab is created on demand with its headers. NEVER migrates or
+// reorders existing columns — ensureHeaders only fills in blank header
+// cells, same contract as every other tab.
+function ensureHearingsSheet_() {
+  const book = ss();
+  let sh = book.getSheetByName(HEARINGS_TAB);
+  if (!sh) sh = book.insertSheet(HEARINGS_TAB);
+  ensureHeaders(sh, HEADERS_HEARINGS);
+  return sh;
+}
+
+// Worker-name snapshot for a hearing row: the CURRENT name from the workers
+// tab. Throws 404 when the worker doesn't exist — a hearing must always
+// point at a real worker at write time.
+function hearingWorkerName_(workerId) {
+  const wsh = sheetByName(WORKERS_TAB);
+  const wrow = findRow(wsh, 0, workerId);
+  if (wrow < 0) throw httpError(404, 'worker not found');
+  return String(wsh.getRange(wrow, 2).getValue() || '');
+}
+
+function getHearings() {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    ensureHearingsSheet_();
+    return { ok: true, hearings: readHearingsSafe() };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function addHearing(body) {
+  const h = validateHearing(body.hearing || {});
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const workerName = hearingWorkerName_(h.workerId);
+    const sh = ensureHearingsSheet_();
+    const id = newId('hr');
+    const createdAt = new Date().toISOString();
+    sh.appendRow([id, h.workerId, workerName, h.hearingDate, h.reason, h.result, createdAt]);
+    return {
+      ok: true,
+      hearing: {
+        id: id, workerId: h.workerId, workerName: workerName,
+        hearingDate: h.hearingDate, reason: h.reason, result: h.result,
+        createdAt: createdAt,
+      },
+    };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function updateHearing(body) {
+  const id = requireBodyId(body);
+  const h = validateHearing(body.hearing || {});
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const workerName = hearingWorkerName_(h.workerId);
+    const sh = ensureHearingsSheet_();
+    const row = findRow(sh, 0, id);
+    if (row < 0) throw httpError(404, 'hearing not found');
+    const createdAt = cellToIso(sh.getRange(row, 7).getValue()) || new Date().toISOString();
+    sh.getRange(row, 1, 1, HEADERS_HEARINGS.length).setValues([[
+      id, h.workerId, workerName, h.hearingDate, h.reason, h.result, createdAt,
+    ]]);
+    return {
+      ok: true,
+      hearing: {
+        id: id, workerId: h.workerId, workerName: workerName,
+        hearingDate: h.hearingDate, reason: h.reason, result: h.result,
+        createdAt: createdAt,
+      },
+    };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function deleteHearing(body) {
+  const id = requireBodyId(body);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const sh = ensureHearingsSheet_();
+    const row = findRow(sh, 0, id);
+    if (row < 0) throw httpError(404, 'hearing not found');
+    sh.deleteRow(row);
+    return { ok: true };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 // ---------- setup / migration / rollback / finalize ----------
 
 // Idempotent — safe to re-run. Creates v3 tabs with the right headers,
@@ -1707,6 +1861,7 @@ function setupSheetsV3() {
     { name: ARCHIVE_V3_TAB, headers: HEADERS_ARCHIVE_V3 },
     { name: MONTHLY_ACTUALS_TAB, headers: HEADERS_MONTHLY_ACTUALS },
     { name: BUDGETS_TAB, headers: HEADERS_BUDGETS },
+    { name: HEARINGS_TAB, headers: HEADERS_HEARINGS },
   ];
   wanted.forEach(function (w) {
     let sh = book.getSheetByName(w.name);
