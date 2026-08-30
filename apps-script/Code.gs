@@ -230,7 +230,7 @@ const ALL_COST_FIELDS = [
 // Whitelisted monthly allowance values (₪) — mirror lib/calc.js /
 // lib/validate.js: none / gas-only / car+gas.
 const ALLOWANCE_VALUES = [0, 2000, 6000];
-// Worker status: active (paid) / chld (חל"ד) / chlt (חל"ט). Leave states
+// Worker status: active (paid) / chld (חל"ד) / chlt (חל"ת). Leave states
 // are unpaid and carry a start date.
 const WORKER_STATUS_VALUES = ['active', 'chld', 'chlt'];
 
@@ -470,7 +470,7 @@ function validateAssignment(a) {
   const allowanceRaw = Number(a.allowance);
   const allowance = ALLOWANCE_VALUES.indexOf(allowanceRaw) >= 0 ? allowanceRaw : 0;
 
-  // Worker status: active / chld (חל"ד) / chlt (חל"ט). Leave states are
+  // Worker status: active / chld (חל"ד) / chlt (חל"ת). Leave states are
   // unpaid and REQUIRE a start date; active carries none. Unknown → active.
   const statusRaw = String(a.status || 'active').trim();
   const status = WORKER_STATUS_VALUES.indexOf(statusRaw) >= 0 ? statusRaw : 'active';
@@ -2649,7 +2649,7 @@ function installDigestTrigger() {
      role      — ASCII role value: guide / social_worker /
                  house_manager / coordinator
      active    — boolean, the assignment status is 'active'
-                 (false while on חל"ד / חל"ט leave)
+                 (false while on חל"ד / חל"ת leave)
      startDate — 'YYYY-MM-DD' employment start date, '' when not
                  yet entered (legacy rows — never back-filled)
    The endpoint name, the response key `guides`, and the original

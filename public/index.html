@@ -321,7 +321,7 @@ tbody tr:hover{
   letter-spacing:0.02em;
   margin-inline-start:6px;
 }
-/* Leave status: a compact label-only pill (חל"ד / חל"ט) with the start date
+/* Leave status: a compact label-only pill (חל"ד / חל"ת) with the start date
    as plain small text beside it, on one line — never wrapped inside the pill. */
 .leave-badge{
   display:inline-block;
@@ -1043,20 +1043,20 @@ tbody tr:hover{
             <option value="6000">רכב + דלק – 6,000 ₪</option>
           </select>
         </div>
-        <!-- Worker status. חל"ד / חל"ט are unpaid — the salary stops
+        <!-- Worker status. חל"ד / חל"ת are unpaid — the salary stops
              counting while on leave. A start date is required for those. -->
         <div class="field">
           <label>סטטוס</label>
           <select id="w_status" onchange="onWorkerStatusChange()">
             <option value="active">פעיל/ה</option>
             <option value="chld">חל"ד</option>
-            <option value="chlt">חל"ט</option>
+            <option value="chlt">חל"ת</option>
           </select>
         </div>
         <div class="field hidden" id="w_statusDate_wrap">
           <label>תאריך תחילת החופשה</label>
           <input id="w_statusDate" type="date"/>
-          <div class="hint">בזמן חל"ד/חל"ט השכר אינו נספר בעלויות</div>
+          <div class="hint">בזמן חל"ד/חל"ת השכר אינו נספר בעלויות</div>
         </div>
       </div>
 
@@ -1957,9 +1957,9 @@ function typeLabelShort(employmentType){
   return EMPLOYMENT_TYPE_LABELS_SHORT[employmentType] || employmentType || '—';
 }
 
-// Small badge shown next to a worker's name when on חל"ד / חל"ט. Includes
+// Small badge shown next to a worker's name when on חל"ד / חל"ת. Includes
 // the start date. Empty string for active workers.
-const STATUS_LABELS = { chld: 'חל"ד', chlt: 'חל"ט' };
+const STATUS_LABELS = { chld: 'חל"ד', chlt: 'חל"ת' };
 function leaveBadge(a){
   if (!calcIsOnLeave(a)) return '';
   const label = STATUS_LABELS[String(a.status)] || 'חופשה';
@@ -2310,7 +2310,7 @@ function updateWorkerPerSessionTotal(){
   const el = document.getElementById('w_perSessionTotal');
   if (el) el.textContent = '₪' + Math.round(total).toLocaleString('he-IL');
 }
-// Show the start-date field only for leave statuses (חל"ד / חל"ט).
+// Show the start-date field only for leave statuses (חל"ד / חל"ת).
 function onWorkerStatusChange(){
   const s = document.getElementById('w_status').value;
   const wrap = document.getElementById('w_statusDate_wrap');
@@ -2393,12 +2393,12 @@ async function saveWorker(){
   const allowanceRaw = Number(document.getElementById('w_allowance').value);
   const allowance = [0, 2000, 6000].indexOf(allowanceRaw) >= 0 ? allowanceRaw : 0;
 
-  // Status + leave start date. חל"ד/חל"ט require a start date.
+  // Status + leave start date. חל"ד/חל"ת require a start date.
   const status = document.getElementById('w_status').value;
   let statusDate = '';
   if (status === 'chld' || status === 'chlt'){
     statusDate = document.getElementById('w_statusDate').value;
-    if (!statusDate){ toast('בחל"ד/חל"ט יש להזין תאריך תחילה', true); return; }
+    if (!statusDate){ toast('בחל"ד/חל"ת יש להזין תאריך תחילה', true); return; }
   }
 
   const wasEdit = !!editingWorker.id;
