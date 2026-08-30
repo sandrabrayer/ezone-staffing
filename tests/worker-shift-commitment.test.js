@@ -42,14 +42,17 @@ test('HEADERS_WORKERS keeps shift_commitment at index 4 (append-only invariant)'
   const m = /const HEADERS_WORKERS = \[([^\]]*)\]/.exec(gs);
   assert.ok(m, 'HEADERS_WORKERS declaration should be present');
   const cols = m[1].split(',').map(s => s.trim().replace(/^'|'$/g, '')).filter(Boolean);
-  // start_date was appended AFTER shift_commitment (append-only): the original
-  // five columns keep their positions so no stored value ever shifts.
-  assert.deepStrictEqual(cols, ['id', 'name', 'notes', 'created_at', 'shift_commitment', 'start_date'],
+  // start_date and gmach_month were appended AFTER shift_commitment
+  // (append-only): the original columns keep their positions so no stored
+  // value ever shifts.
+  assert.deepStrictEqual(cols, ['id', 'name', 'notes', 'created_at', 'shift_commitment', 'start_date', 'gmach_month'],
     'a mid-array insert would shift every stored column and corrupt every row');
   assert.strictEqual(cols[4], 'shift_commitment',
     'shift_commitment must stay at index 4 (readWorkersSafe reads r[4] for it)');
-  assert.strictEqual(cols[cols.length - 1], 'start_date',
-    'start_date is the newest column and must be LAST');
+  assert.strictEqual(cols[5], 'start_date',
+    'start_date must stay at index 5 (readWorkersSafe reads r[5] for it)');
+  assert.strictEqual(cols[cols.length - 1], 'gmach_month',
+    'gmach_month is the newest column and must be LAST');
 });
 
 test('Code.gs whitelist constant matches the enum', () => {

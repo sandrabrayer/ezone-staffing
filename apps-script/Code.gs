@@ -108,7 +108,11 @@ const LEGACY_PREFIX = '_legacy_';
 //   5 start_date       — employment start date (תאריך תחילת עבודה), 'YYYY-MM-DD'
 //      or blank. Empty on every legacy row: NOT back-filled with an import /
 //      today date (a wrong start date is worse than a missing one).
-const HEADERS_WORKERS = ['id', 'name', 'notes', 'created_at', 'shift_commitment', 'start_date'];
+//   6 gmach_month      — 'YYYY-MM' the final_settlement (גמ"ח) status was
+//      applied, or blank. Set automatically when an assignment's status is
+//      saved as final_settlement (and cleared when it's reverted); same
+//      key-presence rule as start_date on updateWorker.
+const HEADERS_WORKERS = ['id', 'name', 'notes', 'created_at', 'shift_commitment', 'start_date', 'gmach_month'];
 // APPEND-ONLY (columns 0-14 are the original v3 shape). Columns 15+ were
 // appended later and MUST stay in this order — read/write map by position:
 //   15 allowance, 16 status, 17 status_date  (fixes the leave-status bug —
@@ -167,7 +171,6 @@ const HEADERS_MONTHLY_ACTUALS = [
 const HEADERS_BUDGETS = [
   'id', 'house', 'month', 'amount', 'created_at', 'updated_at', 'instructors_amount',
 ];
-
 // Legacy headers (only used by setupSheetsV3 to repair partial legacy state
 // during testing; migrateToV3 reads whatever is there regardless of header
 // presence).
@@ -230,9 +233,12 @@ const ALL_COST_FIELDS = [
 // Whitelisted monthly allowance values (₪) — mirror lib/calc.js /
 // lib/validate.js: none / gas-only / car+gas.
 const ALLOWANCE_VALUES = [0, 2000, 6000];
-// Worker status: active (paid) / chld (חל"ד) / chlt (חל"ת). Leave states
-// are unpaid and carry a start date.
-const WORKER_STATUS_VALUES = ['active', 'chld', 'chlt'];
+// Worker status: active (paid) / chld (חל"ד) / chlt (חל"ת) /
+// final_settlement (גמ"ח — finished with a final settlement). Leave states
+// are unpaid and carry a start date; final_settlement is unpaid and records
+// its month in the worker-level gmach_month column automatically.
+const WORKER_STATUS_VALUES = ['active', 'chld', 'chlt', 'final_settlement'];
+const FINAL_SETTLEMENT_STATUS = 'final_settlement';
 
 // Per-field caps — must mirror lib/validate.js.
 const SALARY_MAX = 1000000;
@@ -432,9 +438,14 @@ function validateWorker(w) {
   // when it wasn't sent, but Apps Script must not depend on that.
   const hasStartDate = Object.prototype.hasOwnProperty.call(w, 'startDate');
   const startDate = validateOptionalDate(w.startDate, 'startDate');
+  // Final-settlement month (גמ"ח) — same key-presence rule as startDate:
+  // omitted key leaves the stored value alone, explicit '' clears it.
+  const hasGmachMonth = Object.prototype.hasOwnProperty.call(w, 'gmachMonth');
+  const gmachMonth = validateOptionalMonth(w.gmachMonth, 'gmachMonth');
   return {
     name: name, notes: notes, shiftCommitment: shiftCommitment,
     startDate: startDate, hasStartDate: hasStartDate,
+    gmachMonth: gmachMonth, hasGmachMonth: hasGmachMonth,
   };
 }
 
@@ -625,6 +636,14 @@ function validateMonth(m, label) {
   return s;
 }
 
+// A month key that may be blank: '' passes through (clears the stored
+// value); a non-empty value must be 'YYYY-MM'. Mirror of lib/validate.js.
+function validateOptionalMonth(m, label) {
+  const s = String(m || '').trim();
+  if (!s) return '';
+  return validateMonth(s, label);
+}
+
 function validateNonNegative(raw, label, max, decimals) {
   const n = Number(raw);
   if (!isFinite(n)) throw httpError(400, 'bad ' + label);
@@ -730,6 +749,9 @@ function readWorkersSafe() {
       // Employment start date (תאריך תחילת עבודה). 'YYYY-MM-DD' or '' when not
       // yet entered — legacy rows are blank until מורן fills them in.
       startDate: formatDateCell(r[5]),
+      // 'YYYY-MM' the final_settlement (גמ"ח) status was applied, or ''
+      // (blank on every legacy row / every worker never set to גמ"ח).
+      gmachMonth: formatMonthCell(r[6]),
     };
   });
 }
@@ -997,9 +1019,9 @@ function createWorker(body) {
     const sh = sheetByName(WORKERS_TAB);
     const id = newId('w');
     const createdAt = new Date().toISOString();
-    // Column order MUST match HEADERS_WORKERS (append-only): start_date last.
-    sh.appendRow([id, w.name, w.notes, createdAt, w.shiftCommitment, w.startDate]);
-    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, createdAt: createdAt, shift_commitment: w.shiftCommitment, startDate: w.startDate } };
+    // Column order MUST match HEADERS_WORKERS (append-only): gmach_month last.
+    sh.appendRow([id, w.name, w.notes, createdAt, w.shiftCommitment, w.startDate, w.gmachMonth]);
+    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, createdAt: createdAt, shift_commitment: w.shiftCommitment, startDate: w.startDate, gmachMonth: w.gmachMonth } };
   } finally {
     lock.releaseLock();
   }
@@ -1027,7 +1049,16 @@ function updateWorker(body) {
     } else {
       startDate = formatDateCell(sh.getRange(row, 6).getValue());
     }
-    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, shift_commitment: w.shiftCommitment, startDate: startDate } };
+    // Column 7 = gmach_month (HEADERS_WORKERS index 6, 1-based col 7).
+    // Same key-presence rule as start_date: written only when the payload
+    // carried the key, so an older client can't blank the recorded month.
+    let gmachMonth = w.gmachMonth;
+    if (w.hasGmachMonth) {
+      sh.getRange(row, 7).setValue(w.gmachMonth);
+    } else {
+      gmachMonth = formatMonthCell(sh.getRange(row, 7).getValue());
+    }
+    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, shift_commitment: w.shiftCommitment, startDate: startDate, gmachMonth: gmachMonth } };
   } finally {
     lock.releaseLock();
   }
@@ -1093,6 +1124,35 @@ function setWorkerStartDates(body) {
 
 // ---------- assignment actions ----------
 
+// Keeps the worker-level gmach_month column (col 7) in sync with the
+// worker's assignment statuses. Called after every addAssignment /
+// updateAssignment write, so applying the final_settlement (גמ"ח) status
+// records the month AUTOMATICALLY — no manual second step:
+//   - some assignment has status final_settlement and gmach_month is blank
+//     → stamp the current 'YYYY-MM';
+//   - some assignment has it and gmach_month is already set → keep the
+//     recorded month (re-saving must not move it);
+//   - no assignment has it → clear gmach_month (reverting the status fully
+//     restores the worker — the stored salary was never touched).
+// Returns the worker's gmach_month after the sync so actions can echo it.
+function syncWorkerGmachMonth_(workerId) {
+  const anyFinal = readAssignmentsSafe().some(function (a) {
+    return a.workerId === workerId && a.status === FINAL_SETTLEMENT_STATUS;
+  });
+  const wsh = sheetByName(WORKERS_TAB);
+  const row = findRow(wsh, 0, workerId);
+  if (row < 0) return '';
+  const current = formatMonthCell(wsh.getRange(row, 7).getValue());
+  if (anyFinal) {
+    if (current) return current;
+    const month = todayLocal().slice(0, 7);
+    wsh.getRange(row, 7).setValue(month);
+    return month;
+  }
+  if (current) wsh.getRange(row, 7).setValue('');
+  return '';
+}
+
 function addAssignment(body) {
   const a = validateAssignment(body.assignment || {});
   const lock = LockService.getScriptLock();
@@ -1120,7 +1180,12 @@ function addAssignment(body) {
       a.rateGroup, a.sessionsGroup,
       a.rateExternal, a.externalPatients,
     ]);
-    return { ok: true, assignment: Object.assign({ id: id, createdAt: createdAt }, a) };
+    const gmachMonth = syncWorkerGmachMonth_(a.workerId);
+    return {
+      ok: true,
+      assignment: Object.assign({ id: id, createdAt: createdAt }, a),
+      workerGmachMonth: gmachMonth,
+    };
   } finally {
     lock.releaseLock();
   }
@@ -1150,7 +1215,12 @@ function updateAssignment(body) {
       a.rateGroup, a.sessionsGroup,
       a.rateExternal, a.externalPatients,
     ]]);
-    return { ok: true, assignment: Object.assign({ id: id }, a) };
+    const gmachMonth = syncWorkerGmachMonth_(a.workerId);
+    return {
+      ok: true,
+      assignment: Object.assign({ id: id }, a),
+      workerGmachMonth: gmachMonth,
+    };
   } finally {
     lock.releaseLock();
   }
@@ -1623,7 +1693,6 @@ function setBudget(body) {
 function getBudgets() {
   return { ok: true, budgets: readBudgetsSafe() };
 }
-
 // ---------- setup / migration / rollback / finalize ----------
 
 // Idempotent — safe to re-run. Creates v3 tabs with the right headers,
