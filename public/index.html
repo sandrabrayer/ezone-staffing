@@ -321,7 +321,7 @@ tbody tr:hover{
   letter-spacing:0.02em;
   margin-inline-start:6px;
 }
-/* Leave status: a compact label-only pill (חל"ד / חל"ט) with the start date
+/* Leave status: a compact label-only pill (חל"ד / חל"ת) with the start date
    as plain small text beside it, on one line — never wrapped inside the pill. */
 .leave-badge{
   display:inline-block;
@@ -340,6 +340,30 @@ tbody tr:hover{
   color:var(--ink-soft);
   margin-inline-start:6px;
   white-space:nowrap;
+}
+/* Final-settlement (גמ"ח) roster badge — same pill shape as the leave badge,
+   its own color so a finishing worker reads differently from a leave. */
+.gmach-badge{
+  background:var(--danger);
+  color:#fff;
+}
+/* Hearing result badge: פיטורין red, אזהרה amber. */
+.hearing-badge{
+  display:inline-block;
+  font-size:11px;
+  font-weight:700;
+  padding:3px 10px;
+  border-radius:999px;
+  letter-spacing:0.02em;
+  white-space:nowrap;
+}
+.hearing-badge.warning{
+  background:var(--warning);
+  color:#1a1200;
+}
+.hearing-badge.dismissal{
+  background:var(--danger);
+  color:#fff;
 }
 /* Dashboard cross-house worker search results + the row flash on navigation. */
 .dash-results{display:flex;flex-direction:column;gap:8px;margin-bottom:16px}
@@ -1043,20 +1067,25 @@ tbody tr:hover{
             <option value="6000">רכב + דלק – 6,000 ₪</option>
           </select>
         </div>
-        <!-- Worker status. חל"ד / חל"ט are unpaid — the salary stops
-             counting while on leave. A start date is required for those. -->
+        <!-- Worker status. חל"ד / חל"ת are unpaid — the salary stops
+             counting while on leave. A start date is required for those.
+             גמ"ח (final_settlement) is unpaid too: the salary is zeroed at
+             computation only (the stored amount survives a revert) and the
+             month is recorded automatically server-side (gmach_month). -->
         <div class="field">
           <label>סטטוס</label>
           <select id="w_status" onchange="onWorkerStatusChange()">
             <option value="active">פעיל/ה</option>
             <option value="chld">חל"ד</option>
-            <option value="chlt">חל"ט</option>
+            <option value="chlt">חל"ת</option>
+            <option value="final_settlement">גמ"ח</option>
           </select>
+          <div class="hint hidden" id="w_gmach_hint">בסטטוס גמ"ח השכר מפסיק להיספר מיידית. העובד/ת יופיע/תופיע במצבת עד סוף החודש ולאחר מכן יעבור/תעבור לרשימת העובדים שסיימו</div>
         </div>
         <div class="field hidden" id="w_statusDate_wrap">
           <label>תאריך תחילת החופשה</label>
           <input id="w_statusDate" type="date"/>
-          <div class="hint">בזמן חל"ד/חל"ט השכר אינו נספר בעלויות</div>
+          <div class="hint">בזמן חל"ד/חל"ת השכר אינו נספר בעלויות</div>
         </div>
       </div>
 
@@ -1353,6 +1382,44 @@ tbody tr:hover{
   </div>
 </div>
 
+<!-- Hearing modal (שימוע): create / edit a hearing event. Worker picker
+     lists every existing worker; result is a two-value dropdown whose
+     ASCII values (warning / dismissal) are the stored contract — the
+     Hebrew labels אזהרה / פיטורין live only in the UI. -->
+<div class="overlay" id="hearingOverlay">
+  <div class="modal">
+    <div class="modal-head">
+      <h3 id="hearingModalTitle">שימוע חדש</h3>
+      <p id="hearingModalSub"></p>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>עובד/ת</label>
+        <select id="hr_worker"></select>
+      </div>
+      <div class="field">
+        <label>תאריך השימוע</label>
+        <input id="hr_date" type="date"/>
+      </div>
+      <div class="field">
+        <label>סיבה</label>
+        <textarea id="hr_reason" placeholder="פירוט חופשי" maxlength="500"></textarea>
+      </div>
+      <div class="field">
+        <label>תוצאה</label>
+        <select id="hr_result">
+          <option value="warning">אזהרה</option>
+          <option value="dismissal">פיטורין</option>
+        </select>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-primary" id="hearingSaveBtn" onclick="saveHearing()">שמירה</button>
+      <button class="btn btn-ghost" onclick="closeHearing()">ביטול</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script src="/lib/calc.js"></script>
@@ -1411,6 +1478,12 @@ const EMPLOYMENT_TYPE_LABELS_SHORT = {
   fixed_retainer: 'ריטיינר',
 };
 
+// Hearing (שימוע) results. ASCII stored values — must mirror
+// HEARING_RESULT_VALUES in lib/validate.js + apps-script/Code.gs; the
+// Hebrew labels are UI-only.
+const HEARING_RESULT_VALUES = ['warning', 'dismissal'];
+const HEARING_RESULT_LABELS = { warning: 'אזהרה', dismissal: 'פיטורין' };
+
 const TOKEN_KEY = 'ezone_staff_token_v1';
 
 // Every calc.js global is aliased here so the destructure cannot collide
@@ -1422,6 +1495,9 @@ const {
   assignmentCost: calcAssignmentCost,
   perSessionCost: calcPerSessionCost,
   isOnLeave: calcIsOnLeave,
+  isFinalSettlement: calcIsFinalSettlement,
+  filterGmachFinished: calcFilterGmachFinished,
+  gmachFinishedRows: calcGmachFinishedRows,
   assignmentsByHouse: calcAssignmentsByHouse,
   houseAssignmentsCost: calcHouseAssignmentsCost,
   splitByCategory: calcSplitByCategory,
@@ -1469,6 +1545,9 @@ let COVERAGES = [];
 let ARCHIVE_V3 = [];
 let MONTHLY_ACTUALS = [];
 let BUDGETS = [];
+// Hearing events (שימועים). Loaded with the main doGet payload; mutations
+// patch the local array in place like every other entity.
+let HEARINGS = [];
 // First-hadracha completions from the hadrachot app, via the server proxy.
 // null = no usable data (unconfigured / unreachable / unrecognized payload)
 // → the dashboard renders NO banner, never a false alert. An array (possibly
@@ -1523,6 +1602,7 @@ async function loadData(){
   ARCHIVE_V3  = Array.isArray(d.archiveV3)   ? d.archiveV3   : [];
   MONTHLY_ACTUALS = Array.isArray(d.monthlyActuals) ? d.monthlyActuals : [];
   BUDGETS = Array.isArray(d.budgets) ? d.budgets : [];
+  HEARINGS = Array.isArray(d.hearings) ? d.hearings : [];
 }
 
 // First-hadracha status — fetched THROUGH the server proxy only
@@ -1659,8 +1739,13 @@ function workerName(id){
   return w ? w.name : (id || '');
 }
 
+// The active roster at a house. A final_settlement (גמ"ח) worker stays on
+// the roster (with a badge) through the month the status was set
+// (gmach_month) and drops out from the following month — from then on they
+// appear in ארכיב עובדים with the finished workers instead.
 function rosterAt(houseId){
-  return calcAssignmentsByHouse(ASSIGNMENTS, houseId);
+  const visible = calcFilterGmachFinished(ASSIGNMENTS, WORKERS, calcCurrentMonth());
+  return calcAssignmentsByHouse(visible, houseId);
 }
 function rosterCount(houseId){ return rosterAt(houseId).length; }
 function totalWorkers(){ return WORKERS.length; }
@@ -1957,17 +2042,28 @@ function typeLabelShort(employmentType){
   return EMPLOYMENT_TYPE_LABELS_SHORT[employmentType] || employmentType || '—';
 }
 
-// Small badge shown next to a worker's name when on חל"ד / חל"ט. Includes
-// the start date. Empty string for active workers.
-const STATUS_LABELS = { chld: 'חל"ד', chlt: 'חל"ט' };
+// Small badge shown next to a worker's name when on חל"ד / חל"ת (includes
+// the leave start date) or on גמ"ח (includes the recorded month). Empty
+// string for active workers.
+const STATUS_LABELS = { chld: 'חל"ד', chlt: 'חל"ת', final_settlement: 'גמ"ח' };
 function leaveBadge(a){
-  if (!calcIsOnLeave(a)) return '';
-  const label = STATUS_LABELS[String(a.status)] || 'חופשה';
-  // Only the label lives in the pill; the date is plain small text beside it
-  // (fmtDate → DD/MM/YYYY, never a raw Date string), all on one line.
-  const d = a.statusDate ? fmtDate(a.statusDate) : '';
-  const since = d ? ` <span class="leave-since">מ־${escapeHtml(d)}</span>` : '';
-  return ` <span class="leave-badge">${escapeHtml(label)}</span>${since}`;
+  if (calcIsOnLeave(a)){
+    const label = STATUS_LABELS[String(a.status)] || 'חופשה';
+    // Only the label lives in the pill; the date is plain small text beside
+    // it (fmtDate → DD/MM/YYYY, never a raw Date string), all on one line.
+    const d = a.statusDate ? fmtDate(a.statusDate) : '';
+    const since = d ? ` <span class="leave-since">מ־${escapeHtml(d)}</span>` : '';
+    return ` <span class="leave-badge">${escapeHtml(label)}</span>${since}`;
+  }
+  if (calcIsFinalSettlement(a)){
+    // גמ"ח pill + the recorded month (worker-level gmach_month) as plain
+    // small text, mirroring the leave badge's label-outside-date layout.
+    const w = workerById(a.workerId);
+    const m = w && w.gmachMonth ? fmtMonth(w.gmachMonth) : '';
+    const since = m ? ` <span class="leave-since">${escapeHtml(m)}</span>` : '';
+    return ` <span class="leave-badge gmach-badge">${escapeHtml(STATUS_LABELS.final_settlement)}</span>${since}`;
+  }
+  return '';
 }
 
 // Per-assignment terms display: chooses the appropriate string per type
@@ -2206,7 +2302,7 @@ function openWorker(workerId, house){
   document.getElementById('w_allowance').value = allowanceVal;
 
   // Status + leave start date.
-  const statusVal = asg && ['chld', 'chlt'].indexOf(String(asg.status)) >= 0 ? String(asg.status) : 'active';
+  const statusVal = asg && ['chld', 'chlt', 'final_settlement'].indexOf(String(asg.status)) >= 0 ? String(asg.status) : 'active';
   document.getElementById('w_status').value = statusVal;
   document.getElementById('w_statusDate').value = asg && asg.statusDate ? asg.statusDate : '';
   onWorkerStatusChange();
@@ -2310,12 +2406,15 @@ function updateWorkerPerSessionTotal(){
   const el = document.getElementById('w_perSessionTotal');
   if (el) el.textContent = '₪' + Math.round(total).toLocaleString('he-IL');
 }
-// Show the start-date field only for leave statuses (חל"ד / חל"ט).
+// Show the start-date field only for leave statuses (חל"ד / חל"ת); גמ"ח
+// needs no date — the month is recorded automatically server-side.
 function onWorkerStatusChange(){
   const s = document.getElementById('w_status').value;
   const wrap = document.getElementById('w_statusDate_wrap');
   if (s === 'chld' || s === 'chlt') wrap.classList.remove('hidden');
   else { wrap.classList.add('hidden'); document.getElementById('w_statusDate').value = ''; }
+  const gmachHint = document.getElementById('w_gmach_hint');
+  if (gmachHint) gmachHint.classList.toggle('hidden', s !== 'final_settlement');
 }
 
 // Soft duplicate-name detection. Fires on every keystroke. Compares
@@ -2393,12 +2492,12 @@ async function saveWorker(){
   const allowanceRaw = Number(document.getElementById('w_allowance').value);
   const allowance = [0, 2000, 6000].indexOf(allowanceRaw) >= 0 ? allowanceRaw : 0;
 
-  // Status + leave start date. חל"ד/חל"ט require a start date.
+  // Status + leave start date. חל"ד/חל"ת require a start date.
   const status = document.getElementById('w_status').value;
   let statusDate = '';
   if (status === 'chld' || status === 'chlt'){
     statusDate = document.getElementById('w_statusDate').value;
-    if (!statusDate){ toast('בחל"ד/חל"ט יש להזין תאריך תחילה', true); return; }
+    if (!statusDate){ toast('בחל"ד/חל"ת יש להזין תאריך תחילה', true); return; }
   }
 
   const wasEdit = !!editingWorker.id;
@@ -2432,6 +2531,12 @@ async function saveWorker(){
     const aRes = await doAction(asgPayload);
     if (aRes && aRes.assignment && aRes.assignment.id){
       upsertById(ASSIGNMENTS, aRes.assignment);
+      // The server records/clears the worker-level gmach_month automatically
+      // when the status is (un)set to גמ"ח and echoes the value back — keep
+      // the local cache in sync so the roster/badge reflect it immediately.
+      if (Object.prototype.hasOwnProperty.call(aRes, 'workerGmachMonth')){
+        upsertById(WORKERS, { id: workerId, gmachMonth: aRes.workerGmachMonth });
+      }
     } else {
       await reconcile();
     }
@@ -3118,6 +3223,155 @@ async function deleteCoverage(coverageId){
 
 /* ---------- rendering ---------- */
 
+/* ---------- hearing (שימוע) CRUD ---------- */
+
+let editingHearing = null;  // { id? } — null when the modal is closed
+
+// Worker picker for the hearing form: every existing worker, sorted by
+// name. The empty first option forces an explicit choice.
+function fillHearingWorkerDropdown(selectedId){
+  const sel = document.getElementById('hr_worker');
+  const sorted = WORKERS.slice().sort((a,b)=> String(a.name).localeCompare(String(b.name), 'he'));
+  sel.innerHTML = `<option value="">בחר/י עובד/ת</option>` + sorted.map(w =>
+    `<option value="${escapeHtml(w.id)}"${w.id===selectedId?' selected':''}>${escapeHtml(w.name)}</option>`
+  ).join('');
+}
+
+// Open the hearing modal — blank for a new hearing, prefilled when editing
+// an existing row (hearingId set).
+function openHearing(hearingId){
+  const h = hearingId ? HEARINGS.find(x => x.id === hearingId) : null;
+  editingHearing = { id: h ? h.id : undefined };
+  document.getElementById('hearingModalTitle').textContent = h ? 'עריכת שימוע' : 'שימוע חדש';
+  document.getElementById('hearingModalSub').textContent = h ? workerName(h.workerId) : '';
+  fillHearingWorkerDropdown(h ? h.workerId : '');
+  document.getElementById('hr_date').value = h ? (h.hearingDate || '') : '';
+  document.getElementById('hr_reason').value = h ? (h.reason || '') : '';
+  document.getElementById('hr_result').value =
+    h && HEARING_RESULT_VALUES.indexOf(String(h.result)) >= 0 ? String(h.result) : 'warning';
+  document.getElementById('hearingOverlay').classList.add('show');
+}
+
+function closeHearing(){
+  document.getElementById('hearingOverlay').classList.remove('show');
+  editingHearing = null;
+}
+
+async function saveHearing(){
+  if (!editingHearing) return;
+  const workerId = document.getElementById('hr_worker').value;
+  const hearingDate = document.getElementById('hr_date').value;
+  const reason = document.getElementById('hr_reason').value.trim();
+  const result = document.getElementById('hr_result').value;
+  if (!workerId){ toast('יש לבחור עובד/ת', true); return; }
+  if (!hearingDate){ toast('יש להזין תאריך שימוע', true); return; }
+  if (HEARING_RESULT_VALUES.indexOf(result) < 0){ toast('יש לבחור תוצאה', true); return; }
+
+  const hearing = { workerId, hearingDate, reason, result };
+  const payload = editingHearing.id
+    ? { action: 'updateHearing', id: editingHearing.id, hearing }
+    : { action: 'addHearing', hearing };
+
+  setBusy('hearingSaveBtn', true);
+  try {
+    const res = await doAction(payload);
+    if (res && res.hearing && res.hearing.id) upsertById(HEARINGS, res.hearing);
+    else await reconcile();
+    closeHearing();
+    render();
+    toast(payload.action === 'updateHearing' ? 'השימוע עודכן' : 'השימוע נשמר');
+  } catch (err) {
+    toast(err.message || 'שגיאה בשמירה', true);
+  } finally {
+    setBusy('hearingSaveBtn', false);
+  }
+}
+
+async function deleteHearing(hearingId){
+  const h = HEARINGS.find(x => x.id === hearingId);
+  const name = h ? (h.workerName || workerName(h.workerId)) : '';
+  if (!confirm('למחוק את רישום השימוע' + (name ? ' של ' + name : '') + '?')) return;
+  try {
+    await doAction({ action: 'deleteHearing', id: hearingId });
+    removeById(HEARINGS, hearingId);
+    render();
+    toast('השימוע נמחק');
+  } catch (err) {
+    toast(err.message || 'שגיאה במחיקה', true);
+  }
+}
+
+// Result cell: a colored pill — פיטורין red, אזהרה amber (badge classes
+// keyed by the ASCII value).
+function hearingResultBadge(result){
+  const r = HEARING_RESULT_VALUES.indexOf(String(result)) >= 0 ? String(result) : 'warning';
+  return `<span class="hearing-badge ${r}">${escapeHtml(HEARING_RESULT_LABELS[r])}</span>`;
+}
+
+// One row of the hearings table. Worker name prefers the live workers list
+// (renames follow) and falls back to the stored snapshot.
+function hearingRow(h){
+  const hId = escapeHtml(h.id);
+  const name = workerById(h.workerId) ? workerName(h.workerId) : (h.workerName || h.workerId);
+  return `
+  <tr>
+    <td class="emp-name">${escapeHtml(name)}</td>
+    <td class="col-date">${escapeHtml(fmtDate(h.hearingDate))}</td>
+    <td class="note-cell">${h.reason ? escapeHtml(h.reason) : '<span style="color:var(--muted)">—</span>'}</td>
+    <td>${hearingResultBadge(h.result)}</td>
+    <td>
+      <div class="row-actions">
+        <button class="btn btn-sm btn-accent-hover" onclick="openHearing('${hId}')">עריכה</button>
+        <button class="btn btn-sm btn-danger-hover" onclick="deleteHearing('${hId}')">מחיקה</button>
+      </div>
+    </td>
+  </tr>`;
+}
+
+// The שימועים tab: hearing events for the whole network, newest first,
+// plus the add form. Data arrives with the main payload and is patched
+// locally after every save/delete — all through the PIN-gated /api routes
+// like every other tab.
+function hearingsView(){
+  const sorted = HEARINGS.slice().sort((a,b)=> String(b.hearingDate).localeCompare(String(a.hearingDate)));
+  const rows = sorted.length
+    ? sorted.map(hearingRow).join('')
+    : `<tr><td colspan="5"><div class="empty">אין עדיין רישומי שימועים</div></td></tr>`;
+
+  return `
+  <div class="head">
+    <h1>שימועים</h1>
+    <p>רישום אירועי שימוע לעובדים/ות — תאריך, סיבה ותוצאה. ממוין לפי תאריך — חדש ביותר ראשון.</p>
+  </div>
+
+  <div class="stats">
+    <div class="stat accent">
+      <div class="lbl">סה״כ שימועים</div>
+      <div class="val">${HEARINGS.length}</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head">
+      <h2>רישומי שימועים</h2>
+      <div style="display:flex;gap:10px;align-items:center">
+        <span class="count-pill">${HEARINGS.length}</span>
+        <button class="btn btn-primary" onclick="openHearing()">+ שימוע חדש</button>
+      </div>
+    </div>
+    <div class="tablecard">
+      <div class="table-scroll">
+      <table class="archive-table">
+        <thead><tr>
+          <th>שם</th><th>תאריך</th><th>סיבה</th><th>תוצאה</th><th>פעולות</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      </div>
+    </div>
+  </div>`;
+}
+
 function renderSwitch(){
   const el=document.getElementById('houseSwitch');
   let html=`<button class="central ${view==='central'?'on':''}" onclick="go('central')">מבט כללי</button>`;
@@ -3125,6 +3379,7 @@ function renderSwitch(){
     html+=`<button class="${view===h.id?'on':''}" onclick="go('${h.id}')">${escapeHtml(h.name)}</button>`;
   });
   html += `<button class="topbar-link ${view==='startdates'?'on':''}" onclick="go('startdates')">תאריכי תחילה</button>`;
+  html += `<button class="topbar-link ${view==='hearings'?'on':''}" onclick="go('hearings')">שימועים</button>`;
   html += `<button class="topbar-link ${view==='archive'?'on':''}" onclick="go('archive')">ארכיב עובדים</button>`;
   html += `<button class="logout" onclick="logout()">יציאה</button>`;
   el.innerHTML=html;
@@ -3141,6 +3396,7 @@ function render(){
   const app=document.getElementById('app');
   if (view === 'central')      app.innerHTML = centralView();
   else if (view === 'archive') app.innerHTML = archiveView();
+  else if (view === 'hearings') app.innerHTML = hearingsView();
   else if (view === 'startdates') app.innerHTML = startDatesView();
   else                       { app.innerHTML = houseView(view); highlightWorkerRow(); }
 }
@@ -3348,7 +3604,24 @@ function highlightWorkerRow(){
 }
 
 function archiveView(){
-  const rows = ARCHIVE_V3.length
+  // Final-settlement (גמ"ח) workers whose recorded month has passed join the
+  // finished workers here — same place terminated workers show — computed
+  // from current month vs gmach_month, no manual archiving step. Their
+  // assignment rows still exist (status final_settlement), so they render
+  // from live data with the גמ"ח badge as the reason.
+  const gmachRows = calcGmachFinishedRows(ASSIGNMENTS, WORKERS, calcCurrentMonth()).map(g => `
+      <tr>
+        <td class="emp-name">${escapeHtml(g.name || workerName(g.workerId))}</td>
+        <td>${escapeHtml(houseName(g.house))}</td>
+        <td>
+          <span class="role-tag">${escapeHtml(g.role||'—')}${g.roleDetail?` – ${escapeHtml(g.roleDetail)}`:''}</span>
+          <span class="type-tag">${escapeHtml(typeLabelShort(g.employmentType))}</span>
+        </td>
+        <td class="col-date">${escapeHtml(fmtMonth(g.gmachMonth))}</td>
+        <td><span class="leave-badge gmach-badge">${escapeHtml(STATUS_LABELS.final_settlement)}</span></td>
+        <td class="note-cell">סיום עבודה עם גמר חשבון</td>
+      </tr>`).join('');
+  const archiveRows = ARCHIVE_V3.length
     ? ARCHIVE_V3.slice().sort((a,b)=> String(b.terminationDate).localeCompare(String(a.terminationDate))).map(a => `
       <tr>
         <td class="emp-name">${escapeHtml(a.name)}</td>
@@ -3361,18 +3634,21 @@ function archiveView(){
         <td>${a.reasonType ? escapeHtml(a.reasonType) : '<span style="color:var(--muted)">—</span>'}</td>
         <td class="note-cell">${a.reasonDetail ? escapeHtml(a.reasonDetail) : '<span style="color:var(--muted)">—</span>'}</td>
       </tr>`).join('')
-    : `<tr><td colspan="6"><div class="empty">אין עדיין רשומות בארכיב</div></td></tr>`;
+    : '';
+  const rows = (gmachRows + archiveRows)
+    || `<tr><td colspan="6"><div class="empty">אין עדיין רשומות בארכיב</div></td></tr>`;
+  const totalFinished = ARCHIVE_V3.length + calcGmachFinishedRows(ASSIGNMENTS, WORKERS, calcCurrentMonth()).length;
 
   return `
   <div class="head">
     <h1>ארכיב עובדים</h1>
-    <p>רשומות של שיבוצים שהופסקו. ממוין לפי תאריך הסיום — חדש ביותר ראשון.</p>
+    <p>רשומות של שיבוצים שהופסקו וכן עובדים/ות שסיימו בגמ"ח. ממוין לפי תאריך הסיום — חדש ביותר ראשון.</p>
   </div>
 
   <div class="stats">
     <div class="stat accent">
       <div class="lbl">סה״כ רשומות בארכיב</div>
-      <div class="val">${ARCHIVE_V3.length}</div>
+      <div class="val">${totalFinished}</div>
     </div>
   </div>
 
@@ -3400,7 +3676,7 @@ function rosterRow(a){
   const aId = escapeHtml(a.id);
   const hId = escapeHtml(a.house);
   return `
-  <tr data-worker="${wId}"${calcIsOnLeave(a) ? ' style="opacity:.72"' : ''}>
+  <tr data-worker="${wId}"${(calcIsOnLeave(a) || calcIsFinalSettlement(a)) ? ' style="opacity:.72"' : ''}>
     <td>
       <button class="link-name" onclick="openWorker('${wId}', '${hId}')">${escapeHtml(workerName(a.workerId))}</button>
       ${leaveBadge(a)}

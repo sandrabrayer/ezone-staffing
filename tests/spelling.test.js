@@ -50,3 +50,42 @@ test('spelling: dashboard renders "ארכיב עובדים" (correct spelling) a
     'expected the correctly-spelled section header "ארכיב עובדים" in public/index.html',
   );
 });
+
+// The chlt status label. The correct Hebrew is חל"ת (חופשה ללא תשלום);
+// the typo חל"ט shipped in every label map / badge / dropdown. These
+// guards scan the SHIPPED sources only (frontend, Apps Script, lib) —
+// historical CHANGELOG entries and old test names keep their original
+// text. Both quote variants are matched: U+0022 (") and U+05F4 (״).
+const SHIPPED_SOURCES = [
+  path.join('public', 'index.html'),
+  path.join('apps-script', 'Code.gs'),
+  path.join('lib', 'calc.js'),
+  path.join('lib', 'validate.js'),
+  path.join('lib', 'migrate.js'),
+  path.join('lib', 'shift-compliance.js'),
+  path.join('lib', 'auth.js'),
+  path.join('lib', 'import_actuals.js'),
+  path.join('lib', 'xlsx_read.js'),
+  'server.js',
+];
+const CHLT_TYPO_RE = new RegExp('חל["״]ט');
+
+test('spelling: the chlt label typo (tet instead of tav) appears nowhere in shipped sources', () => {
+  const offenders = [];
+  for (const rel of SHIPPED_SOURCES) {
+    const content = fs.readFileSync(path.join(ROOT, rel), 'utf8');
+    if (CHLT_TYPO_RE.test(content)) offenders.push(rel);
+  }
+  assert.deepEqual(
+    offenders, [],
+    `Found the typo (chlt spelled with a tet) in: ${offenders.join(', ') || '(none)'}. The correct label ends with a tav.`,
+  );
+});
+
+test('spelling: the chlt status label renders with the correct spelling (ends with tav)', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8');
+  assert.ok(html.includes('חל"ת'), 'expected the corrected chlt label in public/index.html');
+  // The stored ASCII value is untouched — only the display label changed.
+  assert.match(html, /chlt:\s*'חל"ת'/, 'STATUS_LABELS must map chlt to the corrected label');
+  assert.match(html, /<option value="chlt">חל"ת<\/option>/, 'the status dropdown must show the corrected label');
+});

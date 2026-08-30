@@ -90,6 +90,8 @@ const ARCHIVE_V3_TAB = 'archive_v3';
 // replacing the one-time estimate for hourly / per_session cost. Append-only
 // columns; one row per (assignment, month), updated in place on re-upsert.
 const MONTHLY_ACTUALS_TAB = 'monthly_actuals';
+// Hearing events (שימועים) — one row per hearing held for a worker.
+const HEARINGS_TAB = 'hearings';
 // Per-house monthly salary budgets. One row per (house, month) where month
 // is 'YYYY-MM' or the sentinel 'default' (fallback for any month without a
 // specific override). Append-only; upserted in place per (house, month).
@@ -108,7 +110,11 @@ const LEGACY_PREFIX = '_legacy_';
 //   5 start_date       — employment start date (תאריך תחילת עבודה), 'YYYY-MM-DD'
 //      or blank. Empty on every legacy row: NOT back-filled with an import /
 //      today date (a wrong start date is worse than a missing one).
-const HEADERS_WORKERS = ['id', 'name', 'notes', 'created_at', 'shift_commitment', 'start_date'];
+//   6 gmach_month      — 'YYYY-MM' the final_settlement (גמ"ח) status was
+//      applied, or blank. Set automatically when an assignment's status is
+//      saved as final_settlement (and cleared when it's reverted); same
+//      key-presence rule as start_date on updateWorker.
+const HEADERS_WORKERS = ['id', 'name', 'notes', 'created_at', 'shift_commitment', 'start_date', 'gmach_month'];
 // APPEND-ONLY (columns 0-14 are the original v3 shape). Columns 15+ were
 // appended later and MUST stay in this order — read/write map by position:
 //   15 allowance, 16 status, 17 status_date  (fixes the leave-status bug —
@@ -167,6 +173,16 @@ const HEADERS_MONTHLY_ACTUALS = [
 const HEADERS_BUDGETS = [
   'id', 'house', 'month', 'amount', 'created_at', 'updated_at', 'instructors_amount',
 ];
+// APPEND-ONLY (same rule as every other tab — read/write map by position).
+// Hearing events (שימועים). worker_name is a snapshot resolved server-side
+// from the workers tab at write time (so rows survive a later worker
+// delete); result is the ASCII enum 'warning' / 'dismissal' — the Hebrew
+// labels (אזהרה / פיטורין) live in the frontend only.
+const HEADERS_HEARINGS = [
+  'id', 'worker_id', 'worker_name', 'hearing_date', 'reason', 'result', 'created_at',
+];
+// Mirror of HEARING_RESULT_VALUES in lib/validate.js.
+const HEARING_RESULT_VALUES = ['warning', 'dismissal'];
 
 // Legacy headers (only used by setupSheetsV3 to repair partial legacy state
 // during testing; migrateToV3 reads whatever is there regardless of header
@@ -230,9 +246,12 @@ const ALL_COST_FIELDS = [
 // Whitelisted monthly allowance values (₪) — mirror lib/calc.js /
 // lib/validate.js: none / gas-only / car+gas.
 const ALLOWANCE_VALUES = [0, 2000, 6000];
-// Worker status: active (paid) / chld (חל"ד) / chlt (חל"ט). Leave states
-// are unpaid and carry a start date.
-const WORKER_STATUS_VALUES = ['active', 'chld', 'chlt'];
+// Worker status: active (paid) / chld (חל"ד) / chlt (חל"ת) /
+// final_settlement (גמ"ח — finished with a final settlement). Leave states
+// are unpaid and carry a start date; final_settlement is unpaid and records
+// its month in the worker-level gmach_month column automatically.
+const WORKER_STATUS_VALUES = ['active', 'chld', 'chlt', 'final_settlement'];
+const FINAL_SETTLEMENT_STATUS = 'final_settlement';
 
 // Per-field caps — must mirror lib/validate.js.
 const SALARY_MAX = 1000000;
@@ -273,6 +292,7 @@ function doGet(e) {
       archiveV3: readArchiveV3Safe(),
       monthlyActuals: readMonthlyActualsSafe(),
       budgets: readBudgetsSafe(),
+      hearings: readHearingsSafe(),
       // legacy passthrough — empty arrays/objects when tabs are missing
       // (e.g. after finalizeV3 or on a fresh v3-only install).
       houses: houses,
@@ -306,6 +326,10 @@ function doPost(e) {
       case 'getMonthlyActuals':    return getMonthlyActuals(body);
       case 'setBudget':            result = setBudget(body); break;
       case 'getBudgets':           return getBudgets(body);
+      case 'getHearings':          return getHearings(body);
+      case 'addHearing':           result = addHearing(body); break;
+      case 'updateHearing':        result = updateHearing(body); break;
+      case 'deleteHearing':        result = deleteHearing(body); break;
       default: throw httpError(400, 'unknown action');
     }
     // Rebuild the NewGuides digest after any write that can change a guide's
@@ -432,9 +456,14 @@ function validateWorker(w) {
   // when it wasn't sent, but Apps Script must not depend on that.
   const hasStartDate = Object.prototype.hasOwnProperty.call(w, 'startDate');
   const startDate = validateOptionalDate(w.startDate, 'startDate');
+  // Final-settlement month (גמ"ח) — same key-presence rule as startDate:
+  // omitted key leaves the stored value alone, explicit '' clears it.
+  const hasGmachMonth = Object.prototype.hasOwnProperty.call(w, 'gmachMonth');
+  const gmachMonth = validateOptionalMonth(w.gmachMonth, 'gmachMonth');
   return {
     name: name, notes: notes, shiftCommitment: shiftCommitment,
     startDate: startDate, hasStartDate: hasStartDate,
+    gmachMonth: gmachMonth, hasGmachMonth: hasGmachMonth,
   };
 }
 
@@ -470,7 +499,7 @@ function validateAssignment(a) {
   const allowanceRaw = Number(a.allowance);
   const allowance = ALLOWANCE_VALUES.indexOf(allowanceRaw) >= 0 ? allowanceRaw : 0;
 
-  // Worker status: active / chld (חל"ד) / chlt (חל"ט). Leave states are
+  // Worker status: active / chld (חל"ד) / chlt (חל"ת). Leave states are
   // unpaid and REQUIRE a start date; active carries none. Unknown → active.
   const statusRaw = String(a.status || 'active').trim();
   const status = WORKER_STATUS_VALUES.indexOf(statusRaw) >= 0 ? statusRaw : 'active';
@@ -625,6 +654,14 @@ function validateMonth(m, label) {
   return s;
 }
 
+// A month key that may be blank: '' passes through (clears the stored
+// value); a non-empty value must be 'YYYY-MM'. Mirror of lib/validate.js.
+function validateOptionalMonth(m, label) {
+  const s = String(m || '').trim();
+  if (!s) return '';
+  return validateMonth(s, label);
+}
+
 function validateNonNegative(raw, label, max, decimals) {
   const n = Number(raw);
   if (!isFinite(n)) throw httpError(400, 'bad ' + label);
@@ -730,6 +767,9 @@ function readWorkersSafe() {
       // Employment start date (תאריך תחילת עבודה). 'YYYY-MM-DD' or '' when not
       // yet entered — legacy rows are blank until מורן fills them in.
       startDate: formatDateCell(r[5]),
+      // 'YYYY-MM' the final_settlement (גמ"ח) status was applied, or ''
+      // (blank on every legacy row / every worker never set to גמ"ח).
+      gmachMonth: formatMonthCell(r[6]),
     };
   });
 }
@@ -899,6 +939,26 @@ function readBudgetsSafe() {
   });
 }
 
+// Hearing events (שימועים). Missing tab → [] (the tab is auto-created by
+// the first write; a fresh install has none). result is normalized to the
+// ASCII enum on read — blank/unknown values fall back to 'warning' so free
+// text in the sheet can never leak into the UI as a badge class.
+function readHearingsSafe() {
+  const sh = sheetByNameOrNull(HEARINGS_TAB);
+  return rowsOf(sh).map(function (r) {
+    const result = String(r[5] || '').trim();
+    return {
+      id: String(r[0]),
+      workerId: String(r[1] || ''),
+      workerName: String(r[2] || ''),
+      hearingDate: formatDateCell(r[3]),
+      reason: String(r[4] || ''),
+      result: HEARING_RESULT_VALUES.indexOf(result) >= 0 ? result : 'warning',
+      createdAt: cellToIso(r[6]),
+    };
+  });
+}
+
 // Instructors-budget cell → a non-negative number, or null when blank
 // (a legacy row written before the total/instructors split, or a house
 // budget with no instructors sub-line). NaN → null.
@@ -997,9 +1057,9 @@ function createWorker(body) {
     const sh = sheetByName(WORKERS_TAB);
     const id = newId('w');
     const createdAt = new Date().toISOString();
-    // Column order MUST match HEADERS_WORKERS (append-only): start_date last.
-    sh.appendRow([id, w.name, w.notes, createdAt, w.shiftCommitment, w.startDate]);
-    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, createdAt: createdAt, shift_commitment: w.shiftCommitment, startDate: w.startDate } };
+    // Column order MUST match HEADERS_WORKERS (append-only): gmach_month last.
+    sh.appendRow([id, w.name, w.notes, createdAt, w.shiftCommitment, w.startDate, w.gmachMonth]);
+    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, createdAt: createdAt, shift_commitment: w.shiftCommitment, startDate: w.startDate, gmachMonth: w.gmachMonth } };
   } finally {
     lock.releaseLock();
   }
@@ -1027,7 +1087,16 @@ function updateWorker(body) {
     } else {
       startDate = formatDateCell(sh.getRange(row, 6).getValue());
     }
-    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, shift_commitment: w.shiftCommitment, startDate: startDate } };
+    // Column 7 = gmach_month (HEADERS_WORKERS index 6, 1-based col 7).
+    // Same key-presence rule as start_date: written only when the payload
+    // carried the key, so an older client can't blank the recorded month.
+    let gmachMonth = w.gmachMonth;
+    if (w.hasGmachMonth) {
+      sh.getRange(row, 7).setValue(w.gmachMonth);
+    } else {
+      gmachMonth = formatMonthCell(sh.getRange(row, 7).getValue());
+    }
+    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, shift_commitment: w.shiftCommitment, startDate: startDate, gmachMonth: gmachMonth } };
   } finally {
     lock.releaseLock();
   }
@@ -1093,6 +1162,39 @@ function setWorkerStartDates(body) {
 
 // ---------- assignment actions ----------
 
+// Keeps the worker-level gmach_month column (col 7) in sync with the
+// worker's assignment statuses. Called after every addAssignment /
+// updateAssignment write, so applying the final_settlement (גמ"ח) status
+// records the month AUTOMATICALLY — no manual second step:
+//   - some assignment has status final_settlement and gmach_month is blank
+//     → stamp the current 'YYYY-MM';
+//   - some assignment has it and gmach_month is already set → keep the
+//     recorded month (re-saving must not move it);
+//   - no assignment has it → clear gmach_month (reverting the status fully
+//     restores the worker — the stored salary was never touched).
+// Returns the worker's gmach_month after the sync so actions can echo it.
+function syncWorkerGmachMonth_(workerId) {
+  const anyFinal = readAssignmentsSafe().some(function (a) {
+    return a.workerId === workerId && a.status === FINAL_SETTLEMENT_STATUS;
+  });
+  const wsh = sheetByName(WORKERS_TAB);
+  const row = findRow(wsh, 0, workerId);
+  if (row < 0) return '';
+  const current = formatMonthCell(wsh.getRange(row, 7).getValue());
+  if (anyFinal) {
+    if (current) return current;
+    // Make sure the appended gmach_month column carries its header label
+    // before the first value lands in it (ensureHeaders only fills blank
+    // header cells — existing columns are never moved).
+    ensureHeaders(wsh, HEADERS_WORKERS);
+    const month = todayLocal().slice(0, 7);
+    wsh.getRange(row, 7).setValue(month);
+    return month;
+  }
+  if (current) wsh.getRange(row, 7).setValue('');
+  return '';
+}
+
 function addAssignment(body) {
   const a = validateAssignment(body.assignment || {});
   const lock = LockService.getScriptLock();
@@ -1120,7 +1222,12 @@ function addAssignment(body) {
       a.rateGroup, a.sessionsGroup,
       a.rateExternal, a.externalPatients,
     ]);
-    return { ok: true, assignment: Object.assign({ id: id, createdAt: createdAt }, a) };
+    const gmachMonth = syncWorkerGmachMonth_(a.workerId);
+    return {
+      ok: true,
+      assignment: Object.assign({ id: id, createdAt: createdAt }, a),
+      workerGmachMonth: gmachMonth,
+    };
   } finally {
     lock.releaseLock();
   }
@@ -1150,7 +1257,12 @@ function updateAssignment(body) {
       a.rateGroup, a.sessionsGroup,
       a.rateExternal, a.externalPatients,
     ]]);
-    return { ok: true, assignment: Object.assign({ id: id }, a) };
+    const gmachMonth = syncWorkerGmachMonth_(a.workerId);
+    return {
+      ok: true,
+      assignment: Object.assign({ id: id }, a),
+      workerGmachMonth: gmachMonth,
+    };
   } finally {
     lock.releaseLock();
   }
@@ -1624,6 +1736,121 @@ function getBudgets() {
   return { ok: true, budgets: readBudgetsSafe() };
 }
 
+// ---------- hearing actions (שימועים) ----------
+
+// Mirror of validateHearing in lib/validate.js (defense in depth — the
+// Express proxy validates first, but a caller hitting /exec directly must
+// never write free text into the result column). workerId + hearingDate +
+// result required; reason is optional free text, trimmed + capped. The
+// worker_name snapshot is resolved server-side, never taken from the client.
+function validateHearing(h) {
+  if (!h || typeof h !== 'object') throw httpError(400, 'hearing required');
+  const workerId = String(h.workerId || '').trim();
+  if (!workerId) throw httpError(400, 'workerId required');
+  const hearingDate = validateRequiredDate(h.hearingDate, 'hearingDate');
+  const reason = String(h.reason || '').trim().slice(0, 500);
+  const result = String(h.result || '').trim();
+  if (HEARING_RESULT_VALUES.indexOf(result) < 0) throw httpError(400, 'bad result');
+  return { workerId: workerId, hearingDate: hearingDate, reason: reason, result: result };
+}
+
+// The hearings tab is created on demand with its headers. NEVER migrates or
+// reorders existing columns — ensureHeaders only fills in blank header
+// cells, same contract as every other tab.
+function ensureHearingsSheet_() {
+  const book = ss();
+  let sh = book.getSheetByName(HEARINGS_TAB);
+  if (!sh) sh = book.insertSheet(HEARINGS_TAB);
+  ensureHeaders(sh, HEADERS_HEARINGS);
+  return sh;
+}
+
+// Worker-name snapshot for a hearing row: the CURRENT name from the workers
+// tab. Throws 404 when the worker doesn't exist — a hearing must always
+// point at a real worker at write time.
+function hearingWorkerName_(workerId) {
+  const wsh = sheetByName(WORKERS_TAB);
+  const wrow = findRow(wsh, 0, workerId);
+  if (wrow < 0) throw httpError(404, 'worker not found');
+  return String(wsh.getRange(wrow, 2).getValue() || '');
+}
+
+function getHearings() {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    ensureHearingsSheet_();
+    return { ok: true, hearings: readHearingsSafe() };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function addHearing(body) {
+  const h = validateHearing(body.hearing || {});
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const workerName = hearingWorkerName_(h.workerId);
+    const sh = ensureHearingsSheet_();
+    const id = newId('hr');
+    const createdAt = new Date().toISOString();
+    sh.appendRow([id, h.workerId, workerName, h.hearingDate, h.reason, h.result, createdAt]);
+    return {
+      ok: true,
+      hearing: {
+        id: id, workerId: h.workerId, workerName: workerName,
+        hearingDate: h.hearingDate, reason: h.reason, result: h.result,
+        createdAt: createdAt,
+      },
+    };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function updateHearing(body) {
+  const id = requireBodyId(body);
+  const h = validateHearing(body.hearing || {});
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const workerName = hearingWorkerName_(h.workerId);
+    const sh = ensureHearingsSheet_();
+    const row = findRow(sh, 0, id);
+    if (row < 0) throw httpError(404, 'hearing not found');
+    const createdAt = cellToIso(sh.getRange(row, 7).getValue()) || new Date().toISOString();
+    sh.getRange(row, 1, 1, HEADERS_HEARINGS.length).setValues([[
+      id, h.workerId, workerName, h.hearingDate, h.reason, h.result, createdAt,
+    ]]);
+    return {
+      ok: true,
+      hearing: {
+        id: id, workerId: h.workerId, workerName: workerName,
+        hearingDate: h.hearingDate, reason: h.reason, result: h.result,
+        createdAt: createdAt,
+      },
+    };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function deleteHearing(body) {
+  const id = requireBodyId(body);
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const sh = ensureHearingsSheet_();
+    const row = findRow(sh, 0, id);
+    if (row < 0) throw httpError(404, 'hearing not found');
+    sh.deleteRow(row);
+    return { ok: true };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 // ---------- setup / migration / rollback / finalize ----------
 
 // Idempotent — safe to re-run. Creates v3 tabs with the right headers,
@@ -1638,6 +1865,7 @@ function setupSheetsV3() {
     { name: ARCHIVE_V3_TAB, headers: HEADERS_ARCHIVE_V3 },
     { name: MONTHLY_ACTUALS_TAB, headers: HEADERS_MONTHLY_ACTUALS },
     { name: BUDGETS_TAB, headers: HEADERS_BUDGETS },
+    { name: HEARINGS_TAB, headers: HEADERS_HEARINGS },
   ];
   wanted.forEach(function (w) {
     let sh = book.getSheetByName(w.name);
@@ -2649,7 +2877,7 @@ function installDigestTrigger() {
      role      — ASCII role value: guide / social_worker /
                  house_manager / coordinator
      active    — boolean, the assignment status is 'active'
-                 (false while on חל"ד / חל"ט leave)
+                 (false while on חל"ד / חל"ת leave)
      startDate — 'YYYY-MM-DD' employment start date, '' when not
                  yet entered (legacy rows — never back-filled)
    The endpoint name, the response key `guides`, and the original
