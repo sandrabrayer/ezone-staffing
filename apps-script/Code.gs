@@ -1183,6 +1183,10 @@ function syncWorkerGmachMonth_(workerId) {
   const current = formatMonthCell(wsh.getRange(row, 7).getValue());
   if (anyFinal) {
     if (current) return current;
+    // Make sure the appended gmach_month column carries its header label
+    // before the first value lands in it (ensureHeaders only fills blank
+    // header cells — existing columns are never moved).
+    ensureHeaders(wsh, HEADERS_WORKERS);
     const month = todayLocal().slice(0, 7);
     wsh.getRange(row, 7).setValue(month);
     return month;
