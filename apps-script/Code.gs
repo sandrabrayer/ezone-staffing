@@ -14,6 +14,13 @@
        for the hadrachot app. Fail-closed: while unset the feed always
        answers 401. Distinct from SHARED_SECRET on purpose — neither
        secret ever unlocks the other's surface.
+     - THERAPISTS_READ_SECRET : unlocks ONLY the read-only
+       getTherapistsForTherapists feed
+       (doGet?action=getTherapistsForTherapists) — the therapists
+       app's roster sync. Fail-closed: while unset the feed always
+       answers 401. Distinct from SHARED_SECRET and
+       HADRACHOT_READ_SECRET — no secret ever unlocks another's
+       surface.
    Script properties written by this script:
      - V3_MIGRATION_DONE = 'true' once migrateToV3 has succeeded.
        Cleared by rollbackV3.
@@ -279,6 +286,13 @@ function doGet(e) {
   // unlocks this feed and the hadrachot secret never unlocks the roster.
   if (e && e.parameter && e.parameter.action === 'getGuidesForHadrachot') {
     return handleHadrachotRead_(e);
+  }
+  // Read-only therapist roster feed for the therapists app. Same recipe:
+  // routed BEFORE the SHARED_SECRET gate and authorized ONLY by
+  // THERAPISTS_READ_SECRET (see the "Therapists read feed" section below)
+  // — no other secret unlocks it and it unlocks nothing else.
+  if (e && e.parameter && e.parameter.action === 'getTherapistsForTherapists') {
+    return handleTherapistsRead_(e);
   }
   return handle(e, function () {
     const houses = {};
@@ -2978,4 +2992,112 @@ function computeGuidesForHadrachot_() {
     return (x.house + ' ' + x.name).localeCompare(y.house + ' ' + y.name);
   });
   return guides;
+}
+
+/* ============================================================
+   Therapists read feed — getTherapistsForTherapists
+   ------------------------------------------------------------
+   A read-only GET endpoint for the therapists app (roster sync —
+   replaces its hard-coded therapist seed):
+   doGet?action=getTherapistsForTherapists&secret=<...>.
+
+   Auth: its OWN Script Property secret, THERAPISTS_READ_SECRET,
+   compared in constant time. Fail-closed: property unset, secret
+   missing, or secret wrong → 401 { error }, never data. Neither
+   SHARED_SECRET nor HADRACHOT_READ_SECRET unlocks this feed, and
+   this feed's secret unlocks neither the roster doGet/doPost nor
+   the hadrachot feed.
+
+   Payload — ONE entry per WORKER (not per assignment: a therapist
+   placed at two houses is one person), included iff at least one
+   current assignment's trimmed role is in THERAPISTS_FEED_ROLES
+   (מטפל/ת or פסיכיאטר/ית). Terminated placements already live in
+   ArchiveV3 — absent from the assignments tab — so they are
+   excluded automatically. EXACTLY these fields:
+     name      — the worker's full display name, trimmed
+     active    — boolean: true iff ANY therapist-role assignment's
+                 normalized status is 'active' (chld / chlt /
+                 final_settlement placements alone → false)
+     houses    — sorted array of house ids holding a
+                 therapist-role placement for this worker
+     startDate — 'YYYY-MM-DD' employment start date, '' when not
+                 yet entered (legacy rows — never back-filled)
+
+   HARD RULE: every other field is stripped. No salary, cost, rate,
+   pct, allowance, retainer, budget, notes, gmach_month, id,
+   worker_id, role_detail, or employment_type ever leaves this
+   feed — same no-financial contract as the hadrachot feed and the
+   digest. Orphaned assignments (no matching worker) and blank
+   names are skipped. Entries sorted by name.
+
+   No HEADERS_* array is touched: this feed only READS via the
+   existing position-mapped readers. No schema change.
+   ============================================================ */
+
+const THERAPISTS_READ_SECRET_PROP = 'THERAPISTS_READ_SECRET';
+
+// Sheet role strings (byte-exact ROLE_OPTIONS entries) that make a
+// placement a therapist. Compared against the assignment's TRIMMED
+// role only — role_detail plays no part here (unlike the hadrachot
+// feed's two-column social-worker rule).
+const THERAPISTS_FEED_ROLES = ['מטפל/ת', 'פסיכיאטר/ית'];
+
+function therapistsAuthorized_(e) {
+  const required = PropertiesService.getScriptProperties()
+    .getProperty(THERAPISTS_READ_SECRET_PROP);
+  const provided = (e && e.parameter && e.parameter.secret) || '';
+  return secretMatches_(required, provided);
+}
+
+// Entry point for the feed (dispatched from doGet). Auth first — an
+// unauthorized caller gets { error } and nothing else is even read.
+function handleTherapistsRead_(e) {
+  try {
+    if (!therapistsAuthorized_(e)) return json({ error: 'unauthorized' }, 401);
+    return json({ therapists: computeTherapistsFeed_() }, 200);
+  } catch (err) {
+    const status = err && err.status ? err.status : 500;
+    return json({ error: (err && err.message) || String(err) }, status);
+  }
+}
+
+// Builds the feed: one entry per worker with a therapist-role placement.
+// Reads name / house / role / status / startDate ONLY — never a
+// financial field.
+function computeTherapistsFeed_() {
+  const workerById = {};
+  readWorkersSafe().forEach(function (w) { workerById[w.id] = w; });
+
+  const byWorker = {};
+  readAssignmentsSafe().forEach(function (a) {
+    const role = String(a.role || '').trim();
+    if (THERAPISTS_FEED_ROLES.indexOf(role) < 0) return; // not a therapist placement
+    const w = workerById[a.workerId];
+    if (!w) return; // orphaned assignment — skip
+    const name = String(w.name || '').trim();
+    if (!name) return; // blank name — skip
+    let entry = byWorker[a.workerId];
+    if (!entry) {
+      entry = byWorker[a.workerId] = {
+        name: name,
+        active: false,
+        housesSeen: {},
+        startDate: w.startDate || '',
+      };
+    }
+    if (a.house) entry.housesSeen[a.house] = true;
+    if (normalizeStatus(a.status) === 'active') entry.active = true;
+  });
+
+  const therapists = Object.keys(byWorker).map(function (id) {
+    const t = byWorker[id];
+    return {
+      name: t.name,
+      active: t.active,
+      houses: Object.keys(t.housesSeen).sort(),
+      startDate: t.startDate,
+    };
+  });
+  therapists.sort(function (x, y) { return x.name.localeCompare(y.name); });
+  return therapists;
 }
