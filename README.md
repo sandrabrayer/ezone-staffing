@@ -163,6 +163,9 @@ All `/api/data` and `/api/action` requests require `Authorization: Bearer <token
   - `SHARED_SECRET` — between Express and Apps Script. Apps Script rejects requests without it.
   - `MORAN_PIN` — gates the PIN screen. Compared in constant time.
   - `SESSION_SECRET` — signs session tokens (HMAC-SHA256). Server-only, never sent to the client.
+- **Read-only feed secrets** (Apps Script **Script Properties**, not Railway env vars; both fail-closed — while unset the feed always answers 401):
+  - `HADRACHOT_READ_SECRET` — unlocks ONLY the `getGuidesForHadrachot` feed for the hadrachot app. It never unlocks the roster `doGet`/`doPost`, and `SHARED_SECRET` never unlocks the feed.
+  - `THERAPISTS_READ_SECRET` — unlocks ONLY the `getTherapistsForTherapists` feed (the therapists app's roster sync). Same rule: it never unlocks the roster, and no other secret — `SHARED_SECRET` or `HADRACHOT_READ_SECRET` — unlocks it.
 - The Apps Script URL is **never exposed to the browser**. Only the Express server knows it.
 - Session tokens are stateless (`<expiresAt>.<hmac>`) and stored in the browser's `localStorage`. Server verifies signature + expiry on every request.
 - Login is rate-limited (8 attempts / 15 min / IP, in-memory).

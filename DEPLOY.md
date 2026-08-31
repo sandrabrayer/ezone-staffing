@@ -139,6 +139,21 @@ job. Nothing else changes — the Script ID and `DEPLOYMENT_ID` stay the same.
 
 ---
 
+## Apps Script Script Properties checklist
+
+CI deploys the **code**; the Script Properties live only in the Apps Script
+project (**Project Settings → Script Properties**) and are never in git. After
+any fresh setup — and when enabling a new feed — confirm:
+
+| Property | Required | Purpose |
+| --- | --- | --- |
+| `SHEET_ID` | yes | the bound spreadsheet id |
+| `SHARED_SECRET` | yes | Express ↔ Apps Script auth (same value as Railway's `SHARED_SECRET`) |
+| `HADRACHOT_READ_SECRET` | optional | unlocks ONLY the read-only `getGuidesForHadrachot` feed. Fail-closed: unset → the feed answers 401. Never unlocks the roster |
+| `THERAPISTS_READ_SECRET` | optional | unlocks ONLY the read-only `getTherapistsForTherapists` feed (therapists app roster sync). Fail-closed: unset → the feed answers 401. Never unlocks the roster. Generate with `openssl rand -hex 32`; copy the same value + the staffing `/exec` URL into the therapists app's Script Properties |
+
+---
+
 ## Security notes
 
 - Credentials live **only** in GitHub Secrets (`CLASPRC_JSON`, `DEPLOYMENT_ID`).
