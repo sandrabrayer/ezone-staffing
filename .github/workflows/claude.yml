@@ -1,0 +1,61 @@
+name: Claude Code
+
+# The @claude agent on issues and pull requests. Owner-only by design:
+# E-ZONE staff reach the helpdesk through /report and the Q&A lane, never
+# through GitHub, so nobody but the repo owner may spend a run here.
+# See docs/github-actions.md for the full contract and the per-repo
+# replication checklist.
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [opened, assigned]
+  pull_request_review:
+    types: [submitted]
+
+# Least privilege for the whole workflow: write only where the action has to
+# push a branch, open/update a PR or comment on an issue; actions:read is the
+# CI-results read; id-token:write is the OIDC exchange the action needs.
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+  actions: read
+
+jobs:
+  claude:
+    # Two gates, both required:
+    #   1. the actor is the repo owner (staff/outside accounts can never
+    #      trigger a run, even by writing "@claude" on a public issue);
+    #   2. the trigger text actually mentions @claude.
+    if: |
+      github.actor == 'sandrabrayer' && (
+        (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+        (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+        (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+        (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          # The token lives only in repo secrets — never in this file.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+          # Lets Claude read CI results on PRs (pairs with actions: read above).
+          additional_permissions: |
+            actions: read
+
+          # Cost cap: a runaway conversation stops at 15 turns.
+          claude_args: '--max-turns 15'
