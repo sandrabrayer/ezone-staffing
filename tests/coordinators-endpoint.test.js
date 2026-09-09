@@ -495,3 +495,10 @@ test('HEADERS_WORKERS: phone is APPENDED LAST — every earlier column keeps its
   assert.deepStrictEqual(parseStringArray('HEADERS_WORKERS'), HEADERS);
   assert.ok(/phone: formatPhoneCell\(r\[7\]\)/.test(gs), 'readWorkersSafe reads index 7 as phone');
 });
+test('index.html: the worker form carries the phone field and posts it on create + update', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8');
+  assert.ok(/id="w_phone"[^>]*type="tel"/.test(html), 'a tel input with id w_phone');
+  assert.ok(/action: 'updateWorker'[^\n]*phone \}/.test(html), 'updateWorker payload carries phone');
+  assert.ok(/action: 'createWorker'[^\n]*phone \}/.test(html), 'createWorker payload carries phone');
+  assert.ok(/\^0\\d\{9\}\$/.test(html), 'client-side 10-digit-with-leading-zero check');
+});

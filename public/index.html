@@ -969,6 +969,16 @@ tbody tr:hover{
         <div class="hint">לא חובה — ניתן להשלים מאוחר יותר</div>
       </div>
 
+      <!-- Mobile phone. WORKER-LEVEL, optional. Kept as TEXT (10 digits with
+           the leading zero) — it feeds the coordinators app's guide roster
+           through getGuidesForCoordinators, which schedules and WhatsApps
+           guides by this number. Not financial. -->
+      <div class="field">
+        <label>טלפון נייד</label>
+        <input id="w_phone" type="tel" inputmode="numeric" maxlength="12" placeholder="05X-XXXXXXX" autocomplete="off"/>
+        <div class="hint">לא חובה — 10 ספרות המתחילות ב-0 (נשלח לאפליקציית הרכזים)</div>
+      </div>
+
       <!-- Contractual weekly shift commitment. WORKER-LEVEL, not per-house:
            a madrich has one contract even when he covers at two houses, so
            this sits on the worker payload alongside name + notes. Placed
@@ -2270,6 +2280,8 @@ function openWorker(workerId, house){
   document.getElementById('w_notes').value = editingWorker.notes;
   // Employment start date — worker-level, blank until entered.
   document.getElementById('w_startDate').value = w && w.startDate ? w.startDate : '';
+  // Mobile phone — worker-level, blank until entered.
+  document.getElementById('w_phone').value = w && w.phone ? w.phone : '';
 
   // Worker-level shift commitment: read straight off the worker (never the
   // assignment). onWorkerRoleChange below hides + clears it if this house's
@@ -2445,6 +2457,11 @@ async function saveWorker(){
   // 'YYYY-MM-DD' (or '' when empty), which the backend accepts as "not entered".
   const startDate = document.getElementById('w_startDate').value;
 
+  // Mobile phone — optional; when present it must be 10 digits starting with
+  // 0 (spaces / dashes are tolerated and stripped). Mirrors lib/validate.js.
+  const phone = document.getElementById('w_phone').value.replace(/[\s-]/g, '').trim();
+  if (phone && !/^0\d{9}$/.test(phone)){ toast('טלפון לא תקין — 10 ספרות המתחילות ב-0', true); return; }
+
   // Worker-level shift commitment. Optional; when present it must be a
   // whitelisted enum value. The field is cleared for non-instructors, so a
   // blank here is the normal case.
@@ -2508,8 +2525,8 @@ async function saveWorker(){
     // 1) Worker identity (create or update).
     let workerId = editingWorker.id;
     const workerPayload = wasEdit
-      ? { action: 'updateWorker', id: workerId, worker: { name, notes, shift_commitment: shiftCommitment, startDate } }
-      : { action: 'createWorker', worker: { name, notes, shift_commitment: shiftCommitment, startDate } };
+      ? { action: 'updateWorker', id: workerId, worker: { name, notes, shift_commitment: shiftCommitment, startDate, phone } }
+      : { action: 'createWorker', worker: { name, notes, shift_commitment: shiftCommitment, startDate, phone } };
     const wRes = await doAction(workerPayload);
     if (wRes && wRes.worker && wRes.worker.id){
       upsertById(WORKERS, wRes.worker);
