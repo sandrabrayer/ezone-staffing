@@ -121,7 +121,12 @@ const LEGACY_PREFIX = '_legacy_';
 //      applied, or blank. Set automatically when an assignment's status is
 //      saved as final_settlement (and cleared when it's reverted); same
 //      key-presence rule as start_date on updateWorker.
-const HEADERS_WORKERS = ['id', 'name', 'notes', 'created_at', 'shift_commitment', 'start_date', 'gmach_month'];
+//   7 phone            — mobile number as TEXT: exactly 10 digits with the
+//      leading zero ('0501234567'), or blank. Written with the '@' number
+//      format so Sheets never strips the zero; readWorkersSafe restores it
+//      defensively on read. Same key-presence rule as start_date. Read by the
+//      coordinators app through getGuidesForCoordinators (NOT financial).
+const HEADERS_WORKERS = ['id', 'name', 'notes', 'created_at', 'shift_commitment', 'start_date', 'gmach_month', 'phone'];
 // APPEND-ONLY (columns 0-14 are the original v3 shape). Columns 15+ were
 // appended later and MUST stay in this order — read/write map by position:
 //   15 allowance, 16 status, 17 status_date  (fixes the leave-status bug —
@@ -293,6 +298,13 @@ function doGet(e) {
   // — no other secret unlocks it and it unlocks nothing else.
   if (e && e.parameter && e.parameter.action === 'getTherapistsForTherapists') {
     return handleTherapistsRead_(e);
+  }
+  // Read-only GUIDE roster feed for the coordinators app. Same recipe again:
+  // routed BEFORE the SHARED_SECRET gate and authorized ONLY by
+  // COORDINATORS_READ_SECRET (see the "Coordinators read feed" section
+  // below) — no other secret unlocks it and it unlocks nothing else.
+  if (e && e.parameter && e.parameter.action === 'getGuidesForCoordinators') {
+    return handleCoordinatorsRead_(e);
   }
   return handle(e, function () {
     const houses = {};
@@ -474,10 +486,15 @@ function validateWorker(w) {
   // omitted key leaves the stored value alone, explicit '' clears it.
   const hasGmachMonth = Object.prototype.hasOwnProperty.call(w, 'gmachMonth');
   const gmachMonth = validateOptionalMonth(w.gmachMonth, 'gmachMonth');
+  // Mobile phone — same key-presence rule: omitted key leaves the stored
+  // number alone, explicit '' clears it, anything else must be 10 digits.
+  const hasPhone = Object.prototype.hasOwnProperty.call(w, 'phone');
+  const phone = validateOptionalPhone(w.phone, 'phone');
   return {
     name: name, notes: notes, shiftCommitment: shiftCommitment,
     startDate: startDate, hasStartDate: hasStartDate,
     gmachMonth: gmachMonth, hasGmachMonth: hasGmachMonth,
+    phone: phone, hasPhone: hasPhone,
   };
 }
 
@@ -676,6 +693,17 @@ function validateOptionalMonth(m, label) {
   return validateMonth(s, label);
 }
 
+// A mobile phone that may be blank: '' passes through (clears the stored
+// value); otherwise spaces / dashes are stripped and the result must be
+// EXACTLY 10 digits starting with 0 ('0501234567'). Stored as text — never
+// as a number (that would drop the leading zero). Mirror of lib/validate.js.
+function validateOptionalPhone(p, label) {
+  const s = String(p || '').replace(/[\s-]/g, '').trim();
+  if (!s) return '';
+  if (!/^0\d{9}$/.test(s)) throw httpError(400, 'bad ' + label);
+  return s;
+}
+
 function validateNonNegative(raw, label, max, decimals) {
   const n = Number(raw);
   if (!isFinite(n)) throw httpError(400, 'bad ' + label);
@@ -784,6 +812,9 @@ function readWorkersSafe() {
       // 'YYYY-MM' the final_settlement (גמ"ח) status was applied, or ''
       // (blank on every legacy row / every worker never set to גמ"ח).
       gmachMonth: formatMonthCell(r[6]),
+      // Mobile phone as 10-digit TEXT ('' when not entered). Appended column —
+      // blank on every legacy row.
+      phone: formatPhoneCell(r[7]),
     };
   });
 }
@@ -1071,9 +1102,15 @@ function createWorker(body) {
     const sh = sheetByName(WORKERS_TAB);
     const id = newId('w');
     const createdAt = new Date().toISOString();
-    // Column order MUST match HEADERS_WORKERS (append-only): gmach_month last.
-    sh.appendRow([id, w.name, w.notes, createdAt, w.shiftCommitment, w.startDate, w.gmachMonth]);
-    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, createdAt: createdAt, shift_commitment: w.shiftCommitment, startDate: w.startDate, gmachMonth: w.gmachMonth } };
+    // Column order MUST match HEADERS_WORKERS (append-only): phone last.
+    sh.appendRow([id, w.name, w.notes, createdAt, w.shiftCommitment, w.startDate, w.gmachMonth, w.phone]);
+    // Column 8 = phone: force the TEXT format so a 10-digit value keeps its
+    // leading zero (appendRow alone lets Sheets coerce it to a number).
+    if (w.phone) {
+      ensureHeaders(sh, HEADERS_WORKERS);
+      sh.getRange(sh.getLastRow(), 8).setNumberFormat('@').setValue(w.phone);
+    }
+    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, createdAt: createdAt, shift_commitment: w.shiftCommitment, startDate: w.startDate, gmachMonth: w.gmachMonth, phone: w.phone } };
   } finally {
     lock.releaseLock();
   }
@@ -1110,7 +1147,16 @@ function updateWorker(body) {
     } else {
       gmachMonth = formatMonthCell(sh.getRange(row, 7).getValue());
     }
-    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, shift_commitment: w.shiftCommitment, startDate: startDate, gmachMonth: gmachMonth } };
+    // Column 8 = phone (HEADERS_WORKERS index 7, 1-based col 8). Same
+    // key-presence rule. Text format first so the leading zero survives.
+    let phone = w.phone;
+    if (w.hasPhone) {
+      ensureHeaders(sh, HEADERS_WORKERS);
+      sh.getRange(row, 8).setNumberFormat('@').setValue(w.phone);
+    } else {
+      phone = formatPhoneCell(sh.getRange(row, 8).getValue());
+    }
+    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, shift_commitment: w.shiftCommitment, startDate: startDate, gmachMonth: gmachMonth, phone: phone } };
   } finally {
     lock.releaseLock();
   }
@@ -2375,6 +2421,19 @@ function cellToIso(cell) {
   return String(cell || '');
 }
 
+// A phone cell → 10-digit text. A cell that Sheets coerced to a number lost
+// its leading zero (501234567) — restore it. Anything else passes through
+// trimmed (validation happens on write, never on read).
+function formatPhoneCell(cell) {
+  if (typeof cell === 'number') {
+    const n = String(Math.round(cell));
+    return n.length === 9 ? '0' + n : n;
+  }
+  const s = String(cell || '').trim();
+  if (/^\d{9}$/.test(s)) return '0' + s;
+  return s;
+}
+
 // A numeric cell → Number, but a blank cell → null (distinguishes a
 // recorded 0 from "not recorded"). Used by the monthly-actuals reader.
 function numOrNull(cell) {
@@ -3100,4 +3159,136 @@ function computeTherapistsFeed_() {
   });
   therapists.sort(function (x, y) { return x.name.localeCompare(y.name); });
   return therapists;
+}
+
+/* ============================================================
+   Coordinators read feed — getGuidesForCoordinators
+   ------------------------------------------------------------
+   A read-only GET endpoint for the coordinators app (guide roster
+   sync — staffing is the single source of truth for who is a
+   guide; the coordinators app no longer adds / deletes / blocks
+   guides itself):
+   doGet?action=getGuidesForCoordinators&secret=<...>.
+
+   Auth: its OWN Script Property secret, COORDINATORS_READ_SECRET,
+   compared in constant time. Fail-closed: property unset, secret
+   missing, or secret wrong → 401 { error }, never data. Neither
+   SHARED_SECRET, HADRACHOT_READ_SECRET nor THERAPISTS_READ_SECRET
+   unlocks this feed, and this feed's secret unlocks nothing else.
+
+   Payload — ONE entry per WORKER (a guide placed at two houses is
+   one person), included iff the worker has a guide-role placement
+   (trimmed role === 'מדריך/ה') that is either CURRENT (assignments
+   tab) or TERMINATED (ArchiveV3). Terminated guides are published
+   ON PURPOSE with active:false so the coordinators app can retire
+   them instead of scheduling a guide who has left. EXACTLY these
+   fields:
+     name      — the worker's full display name, trimmed
+     phone     — 10-digit mobile as TEXT with the leading zero, or
+                 '' when not entered
+     active    — boolean: true iff ANY current guide-role
+                 placement's normalized status is 'active'
+                 (chld / chlt / final_settlement alone → false;
+                 archived-only → false)
+     houses    — sorted array of internal house ids (ramot / asher
+                 / ofroni / rehab / pardes …) holding a CURRENT
+                 guide placement; for an archived-only guide, the
+                 houses of the archived placements (so the consumer
+                 can scope the retirement)
+     startDate — 'YYYY-MM-DD' employment start date, '' when not
+                 yet entered
+
+   HARD RULE: every other field is stripped. No salary, cost, rate,
+   pct, allowance, retainer, budget, notes, gmach_month,
+   shift_commitment, id, worker_id, role_detail, employment_type,
+   termination reason ever leaves this feed — same no-financial
+   contract as the other two feeds and the digest. Orphaned
+   assignments and blank names are skipped. Entries sorted by name.
+   ============================================================ */
+
+const COORDINATORS_READ_SECRET_PROP = 'COORDINATORS_READ_SECRET';
+
+// The sheet role string (byte-exact ROLE_OPTIONS entry) that makes a
+// placement a guide. Compared against the TRIMMED role only.
+const COORDINATORS_FEED_ROLE = 'מדריך/ה';
+
+function coordinatorsAuthorized_(e) {
+  const required = PropertiesService.getScriptProperties()
+    .getProperty(COORDINATORS_READ_SECRET_PROP);
+  const provided = (e && e.parameter && e.parameter.secret) || '';
+  return secretMatches_(required, provided);
+}
+
+// Entry point for the feed (dispatched from doGet). Auth first — an
+// unauthorized caller gets { error } and nothing else is even read.
+function handleCoordinatorsRead_(e) {
+  try {
+    if (!coordinatorsAuthorized_(e)) return json({ error: 'unauthorized' }, 401);
+    return json({ guides: computeGuidesForCoordinators_() }, 200);
+  } catch (err) {
+    const status = err && err.status ? err.status : 500;
+    return json({ error: (err && err.message) || String(err) }, status);
+  }
+}
+
+// Builds the feed: one entry per worker with a guide-role placement, current
+// or archived. Reads name / phone / house / role / status / startDate ONLY —
+// never a financial field.
+function computeGuidesForCoordinators_() {
+  const workerById = {};
+  readWorkersSafe().forEach(function (w) { workerById[w.id] = w; });
+
+  const byWorker = {};
+  function entryFor(workerId) {
+    const w = workerById[workerId];
+    if (!w) return null; // orphaned placement — skip
+    const name = String(w.name || '').trim();
+    if (!name) return null; // blank name — skip
+    let entry = byWorker[workerId];
+    if (!entry) {
+      entry = byWorker[workerId] = {
+        name: name,
+        phone: String(w.phone || ''),
+        active: false,
+        current: false,
+        housesSeen: {},
+        archivedHousesSeen: {},
+        startDate: w.startDate || '',
+      };
+    }
+    return entry;
+  }
+
+  readAssignmentsSafe().forEach(function (a) {
+    if (String(a.role || '').trim() !== COORDINATORS_FEED_ROLE) return;
+    const entry = entryFor(a.workerId);
+    if (!entry) return;
+    entry.current = true;
+    if (a.house) entry.housesSeen[a.house] = true;
+    if (normalizeStatus(a.status) === 'active') entry.active = true;
+  });
+
+  // Terminated guide placements: published with active:false. A worker who
+  // still holds a current guide placement elsewhere keeps that placement's
+  // status and houses — the archived one adds nothing.
+  readArchiveV3Safe().forEach(function (a) {
+    if (String(a.role || '').trim() !== COORDINATORS_FEED_ROLE) return;
+    const entry = entryFor(a.workerId);
+    if (!entry) return;
+    if (a.house) entry.archivedHousesSeen[a.house] = true;
+  });
+
+  const guides = Object.keys(byWorker).map(function (id) {
+    const g = byWorker[id];
+    const houses = Object.keys(g.current ? g.housesSeen : g.archivedHousesSeen).sort();
+    return {
+      name: g.name,
+      phone: g.phone,
+      active: g.current && g.active,
+      houses: houses,
+      startDate: g.startDate,
+    };
+  });
+  guides.sort(function (x, y) { return x.name.localeCompare(y.name); });
+  return guides;
 }

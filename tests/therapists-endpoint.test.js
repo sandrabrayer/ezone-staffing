@@ -361,6 +361,6 @@ test('no HEADERS_* array gained or lost a column — the feed is read-only, no s
   assert.ok(m, 'HEADERS_WORKERS should be declared');
   const cols = m[1].split(',').map(s => s.trim().replace(/^'|'$/g, '')).filter(Boolean);
   assert.deepStrictEqual(cols,
-    ['id', 'name', 'notes', 'created_at', 'shift_commitment', 'start_date', 'gmach_month'],
-    'HEADERS_WORKERS is append-only and position-mapped — the feed itself must not touch it');
+    ['id', 'name', 'notes', 'created_at', 'shift_commitment', 'start_date', 'gmach_month', 'phone'],
+    'HEADERS_WORKERS is append-only and position-mapped — the feed itself must not touch it (phone was appended by the coordinators feed)');
 });

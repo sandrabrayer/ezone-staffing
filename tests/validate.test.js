@@ -191,6 +191,40 @@ test('validateWorker: rejects a malformed startDate', () => {
   });
 });
 
+// ---------- phone (worker mobile, appended column) ----------
+// Same key-presence contract as startDate: a caller that never mentions
+// phone must not wipe a number Moran entered by hand.
+test('validateWorker: omitting phone leaves the key absent, not empty', () => {
+  const w = validateWorker({ name: 'שחר' });
+  assert.ok(!Object.prototype.hasOwnProperty.call(w, 'phone'));
+});
+
+test('validateWorker: an explicit empty phone is kept, and means "clear it"', () => {
+  const w = validateWorker({ name: 'שחר', phone: '' });
+  assert.ok(Object.prototype.hasOwnProperty.call(w, 'phone'));
+  assert.equal(w.phone, '');
+});
+
+test('validateWorker: accepts a 10-digit phone as TEXT and strips spaces / dashes', () => {
+  assert.equal(validateWorker({ name: 'שחר', phone: '0501234567' }).phone, '0501234567');
+  assert.equal(validateWorker({ name: 'שחר', phone: '050-123-4567' }).phone, '0501234567');
+  assert.equal(validateWorker({ name: 'שחר', phone: ' 050 1234567 ' }).phone, '0501234567');
+  assert.equal(typeof validateWorker({ name: 'שחר', phone: '0501234567' }).phone, 'string');
+});
+
+test('validateWorker: rejects a phone that is not 10 digits starting with 0', () => {
+  ['501234567', '05012345678', '+972501234567', '05O1234567', 'abc', '1501234567'].forEach(v => {
+    assert.throws(() => validateWorker({ name: 'שחר', phone: v }), /bad phone/, String(v));
+  });
+});
+
+test('validateAction createWorker/updateWorker carry phone through, absent stays absent', () => {
+  const created = validateAction({ action: 'createWorker', worker: { name: 'רון', phone: '0521111111' } });
+  assert.equal(created.worker.phone, '0521111111');
+  const updated = validateAction({ action: 'updateWorker', id: 'w1', worker: { name: 'רון' } });
+  assert.ok(!Object.prototype.hasOwnProperty.call(updated.worker, 'phone'));
+});
+
 test('validateOptionalDate: blank passes, valid passes, junk throws', () => {
   assert.equal(validateOptionalDate('', 'd'), '');
   assert.equal(validateOptionalDate('  ', 'd'), '');

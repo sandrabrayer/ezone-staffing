@@ -151,6 +151,7 @@ any fresh setup — and when enabling a new feed — confirm:
 | `SHARED_SECRET` | yes | Express ↔ Apps Script auth (same value as Railway's `SHARED_SECRET`) |
 | `HADRACHOT_READ_SECRET` | optional | unlocks ONLY the read-only `getGuidesForHadrachot` feed. Fail-closed: unset → the feed answers 401. Never unlocks the roster |
 | `THERAPISTS_READ_SECRET` | optional | unlocks ONLY the read-only `getTherapistsForTherapists` feed (therapists app roster sync). Fail-closed: unset → the feed answers 401. Never unlocks the roster. Generate with `openssl rand -hex 32`; copy the same value + the staffing `/exec` URL into the therapists app's Script Properties |
+| `COORDINATORS_READ_SECRET` | optional | unlocks ONLY the read-only `getGuidesForCoordinators` feed (coordinators app guide roster sync). Fail-closed: unset → the feed answers 401. Never unlocks the roster. Generate with `openssl rand -hex 32`; copy the same value into the coordinators Apps Script as `STAFFING_GUIDES_SECRET`, together with the staffing `/exec` URL as `STAFFING_SHEETS_URL` |
 
 ---
 
