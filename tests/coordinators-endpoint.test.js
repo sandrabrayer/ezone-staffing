@@ -378,7 +378,7 @@ function fakeSheet(rows) {
   return sh;
 }
 
-const HEADERS = ['id', 'name', 'notes', 'created_at', 'shift_commitment', 'start_date', 'gmach_month', 'phone'];
+const HEADERS = ['id', 'name', 'notes', 'created_at', 'shift_commitment', 'start_date', 'gmach_month', 'phone', 'payroll_emp_number'];
 
 test('createWorker persists phone in column 8 as TEXT (number format "@") and echoes it', () => {
   const ctx = loadCtx();
@@ -491,7 +491,7 @@ test('the feed authorizes via its own property through the constant-time compara
   assert.ok(/case 'getGuidesForCoordinators'/.test(gs) === false, 'GET-only: never a doPost case');
 });
 
-test('HEADERS_WORKERS: phone is APPENDED LAST — every earlier column keeps its index', () => {
+test('HEADERS_WORKERS: every new column is APPENDED LAST — earlier columns keep their index', () => {
   assert.deepStrictEqual(parseStringArray('HEADERS_WORKERS'), HEADERS);
   assert.ok(/phone: formatPhoneCell\(r\[7\]\)/.test(gs), 'readWorkersSafe reads index 7 as phone');
 });

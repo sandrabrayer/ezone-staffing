@@ -39,11 +39,41 @@ app.use(express.json({ limit: '64kb' }));
 
 // ---- static (public) but gate the index ----
 app.use(express.static(path.join(__dirname, 'public'), { index: false }));
-// expose only the shared client-safe helper (calc.js).
-// Server-only modules in lib/ (auth.js, validate.js) MUST NOT be exposed.
-app.get('/lib/calc.js', (req, res) => {
-  res.setHeader('Cache-Control', 'no-cache');
-  res.sendFile(path.join(__dirname, 'lib', 'calc.js'));
+// expose only the shared client-safe helpers. Server-only modules in lib/
+// (auth.js, validate.js) MUST NOT be exposed — they are listed nowhere here
+// and the whitelist below is exact, not a prefix match.
+//   calc.js          — cost maths, shared with the browser
+//   payroll-parse.js — the בקרת שכר PDF parser and reconciliation gate
+//   payroll-rules.js — the בקרת שכר compliance rules
+//   xlsx_write.js    — the בקרת שכר xlsx export writer
+const CLIENT_LIBS = ['calc.js', 'payroll-parse.js', 'payroll-rules.js', 'xlsx_write.js'];
+CLIENT_LIBS.forEach((file) => {
+  app.get(`/lib/${file}`, (req, res) => {
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+    res.sendFile(path.join(__dirname, 'lib', file));
+  });
+});
+
+// pdfjs, served from node_modules rather than a CDN so the payroll report —
+// which never leaves the browser — is parsed by same-origin code only, with
+// no third-party script in the path of an HR document.
+const PDFJS_FILES = {
+  '/vendor/pdf.min.mjs': 'build/pdf.min.mjs',
+  '/vendor/pdf.worker.min.mjs': 'build/pdf.worker.min.mjs',
+};
+Object.keys(PDFJS_FILES).forEach((route) => {
+  app.get(route, (req, res) => {
+    let file;
+    try {
+      file = require.resolve(`pdfjs-dist/${PDFJS_FILES[route]}`);
+    } catch (err) {
+      return res.status(503).json({ error: 'pdfjs not installed' });
+    }
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.setHeader('Content-Type', 'text/javascript; charset=utf-8');
+    res.sendFile(file);
+  });
 });
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -96,12 +126,17 @@ function requireAuth(req, res, next) {
 }
 
 // ---- Apps Script proxy ----
-async function callAppsScript(method, body) {
+async function callAppsScript(method, body, query) {
   if (!APPS_SCRIPT_URL || !SHARED_SECRET) {
     throw Object.assign(new Error('server misconfigured'), { status: 500 });
   }
   const sep = APPS_SCRIPT_URL.includes('?') ? '&' : '?';
-  const url = `${APPS_SCRIPT_URL}${sep}secret=${encodeURIComponent(SHARED_SECRET)}`;
+  let url = `${APPS_SCRIPT_URL}${sep}secret=${encodeURIComponent(SHARED_SECRET)}`;
+  // Extra query params for the doGet routes. Only values the caller's own
+  // route has already validated ever reach this — never raw req.query.
+  Object.keys(query || {}).forEach((k) => {
+    url += `&${encodeURIComponent(k)}=${encodeURIComponent(query[k])}`;
+  });
   const init = {
     method,
     redirect: 'follow',
@@ -168,6 +203,36 @@ app.get('/api/hadrachot-status', requireAuth, async (req, res) => {
     console.error('[GET /api/hadrachot-status]', err.status || 502, err.message);
     // Generic body on purpose — never echo upstream details to the browser.
     res.status(err.status || 502).json({ error: 'hadrachot status unavailable' });
+  }
+});
+
+// ---- בקרת שכר read (the Apps Script doGet route) ----
+// A GET of its own rather than another /api/action POST, because reading a
+// payroll run is a read: it is cacheable, it is safe to retry, and it must
+// stay reachable when a run is locked and every write is refused.
+app.get('/api/payroll/run', requireAuth, async (req, res) => {
+  const query = { action: 'getPayrollRun' };
+  try {
+    const runId = String(req.query.runId || '').trim();
+    const month = String(req.query.month || '').trim();
+    // Validated HERE, before anything is put on the upstream URL.
+    if (runId) {
+      if (!/^pr_[A-Za-z0-9_]{4,40}$/.test(runId)) throw Object.assign(new Error('bad runId'), { status: 400 });
+      query.runId = runId;
+    }
+    if (month) {
+      if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw Object.assign(new Error('bad month'), { status: 400 });
+      query.month = month;
+    }
+  } catch (err) {
+    return res.status(err.status || 400).json({ error: err.message });
+  }
+  try {
+    const data = await callAppsScript('GET', undefined, query);
+    res.json(data);
+  } catch (err) {
+    console.error('[GET /api/payroll/run]', err.status || 500, err.message);
+    res.status(err.status || 500).json({ error: err.message });
   }
 });
 
