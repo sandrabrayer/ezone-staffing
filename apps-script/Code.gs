@@ -104,6 +104,16 @@ const HEARINGS_TAB = 'hearings';
 // specific override). Append-only; upserted in place per (house, month).
 const BUDGETS_TAB = 'budgets';
 
+// בקרת שכר — payroll control. One PayrollRuns row per imported monthly cost
+// report, one PayrollLines row per employee line in it, one PayrollFindings
+// row per rule hit, and an append-only PayrollApprovalLog of every human
+// decision. Created on demand by _ensurePayrollSheets_(); the tabs hold RAW
+// DATA ONLY — every compliance decision is made by lib/payroll-rules.js.
+const PAYROLL_RUNS_TAB = 'PayrollRuns';
+const PAYROLL_LINES_TAB = 'PayrollLines';
+const PAYROLL_FINDINGS_TAB = 'PayrollFindings';
+const PAYROLL_APPROVAL_LOG_TAB = 'PayrollApprovalLog';
+
 // Legacy tabs (read-only during transition; renamed by finalizeV3).
 const HISTORY_TAB = 'history';
 const EVENTS_TAB = 'events';
@@ -126,7 +136,12 @@ const LEGACY_PREFIX = '_legacy_';
 //      format so Sheets never strips the zero; readWorkersSafe restores it
 //      defensively on read. Same key-presence rule as start_date. Read by the
 //      coordinators app through getGuidesForCoordinators (NOT financial).
-const HEADERS_WORKERS = ['id', 'name', 'notes', 'created_at', 'shift_commitment', 'start_date', 'gmach_month', 'phone'];
+//   8 payroll_emp_number — the payroll bureau's employee number for this
+//      worker, as TEXT ('33'), or blank. Bound ONCE by Moran in בקרת שכר and
+//      then permanent: it is the primary key the monthly cost report is
+//      reconciled on, so a worker with a number never has to be re-matched by
+//      name. Same key-presence rule as start_date.
+const HEADERS_WORKERS = ['id', 'name', 'notes', 'created_at', 'shift_commitment', 'start_date', 'gmach_month', 'phone', 'payroll_emp_number'];
 // APPEND-ONLY (columns 0-14 are the original v3 shape). Columns 15+ were
 // appended later and MUST stay in this order — read/write map by position:
 //   15 allowance, 16 status, 17 status_date  (fixes the leave-status bug —
@@ -195,6 +210,54 @@ const HEADERS_HEARINGS = [
 ];
 // Mirror of HEARING_RESULT_VALUES in lib/validate.js.
 const HEARING_RESULT_VALUES = ['warning', 'dismissal'];
+
+// ---- בקרת שכר headers — APPEND-ONLY, position-mapped ----------------------
+// Same contract as every other tab: _readAll/_writeAll map by position, so a
+// new column goes on the END and never in the middle. The exact arrays below
+// are pinned by tests/payroll-guards.test.js, which fails the build on any
+// reorder, rename or removal.
+const HEADERS_PAYROLL_RUNS = [
+  'runId', 'month', 'importedAt', 'importedBy', 'fileName',
+  'rowCount', 'parsedTotal', 'printedTotal', 'flaggedCount', 'status',
+];
+const HEADERS_PAYROLL_LINES = [
+  'runId', 'lineId', 'empNumber', 'rawName', 'matchedWorkerId', 'matchStatus',
+  'dept', 'mappedHouse',
+  'tashlumim', 'tagmulim', 'keren', 'pitzuim', 'shonot', 'bituach',
+  'masMaasikim', 'masSachar', 'total',
+];
+const HEADERS_PAYROLL_FINDINGS = [
+  'runId', 'lineId', 'ruleId', 'severity', 'expected', 'actual', 'messageHe',
+  'state', 'resolvedBy', 'resolvedAt', 'note',
+];
+const HEADERS_PAYROLL_APPROVAL_LOG = [
+  'runId', 'lineId', 'action', 'actor', 'timestamp', 'note',
+];
+
+// Enums. ASCII on the wire and in storage; the Hebrew labels live in the
+// frontend only, exactly like HEARING_RESULT_VALUES above.
+const PAYROLL_RUN_STATUS = ['open', 'locked'];
+const PAYROLL_FINDING_STATES = ['open', 'approved', 'rejected'];
+const PAYROLL_RESOLVE_ACTIONS = ['approve', 'reject'];
+const PAYROLL_MATCH_STATUSES = ['number', 'exact', 'normalized', 'ambiguous', 'unmatched'];
+const PAYROLL_SEVERITIES = ['critical', 'warning'];
+// Stable rule ids — mirror of RULES in lib/payroll-rules.js. An unknown id is
+// rejected at the door so a stale client can never write a finding nobody can
+// interpret later.
+const PAYROLL_RULE_IDS = [
+  'R01', 'R02', 'R03', 'R04', 'R05', 'R06', 'R07', 'R08', 'R09',
+  'R10', 'R11', 'R12', 'R13', 'R14', 'R15', 'R16', 'R17',
+];
+
+// Caps. The real report is ~93 lines; these bound a hostile or broken client
+// without ever getting in a real month's way.
+const PAYROLL_MAX_LINES = 2000;
+const PAYROLL_MAX_FINDINGS = 20000;
+const PAYROLL_AMOUNT_MAX = 10000000;
+const PAYROLL_NOTE_MIN = 2;
+const PAYROLL_NOTE_MAX = 200;
+// Money comparisons are exact to the cent; this only absorbs IEEE noise.
+const PAYROLL_CENT = 0.005;
 
 // Legacy headers (only used by setupSheetsV3 to repair partial legacy state
 // during testing; migrateToV3 reads whatever is there regardless of header
@@ -306,6 +369,12 @@ function doGet(e) {
   if (e && e.parameter && e.parameter.action === 'getGuidesForCoordinators') {
     return handleCoordinatorsRead_(e);
   }
+  // בקרת שכר read. Unlike the three feeds above this is NOT a separate
+  // surface: it carries the app's own data and is gated by the ordinary
+  // SHARED_SECRET through handle(), exactly like the roster dump below.
+  if (e && e.parameter && e.parameter.action === 'getPayrollRun') {
+    return handle(e, function () { return getPayrollRun(e.parameter); });
+  }
   return handle(e, function () {
     const houses = {};
     HOUSE_IDS.forEach(function (h) { houses[h] = readLegacyHouseSafe(h); });
@@ -356,6 +425,10 @@ function doPost(e) {
       case 'addHearing':           result = addHearing(body); break;
       case 'updateHearing':        result = updateHearing(body); break;
       case 'deleteHearing':        result = deleteHearing(body); break;
+      case 'importPayrollRun':     return importPayrollRun(body);
+      case 'getPayrollRun':        return getPayrollRun(body);
+      case 'resolvePayrollFinding': return resolvePayrollFinding(body);
+      case 'lockPayrollRun':       return lockPayrollRun(body);
       default: throw httpError(400, 'unknown action');
     }
     // Rebuild the NewGuides digest after any write that can change a guide's
@@ -490,12 +563,26 @@ function validateWorker(w) {
   // number alone, explicit '' clears it, anything else must be 10 digits.
   const hasPhone = Object.prototype.hasOwnProperty.call(w, 'phone');
   const phone = validateOptionalPhone(w.phone, 'phone');
+  // Payroll bureau employee number — same key-presence rule again: omitted
+  // key leaves the binding alone, explicit '' unbinds it.
+  const hasPayrollEmpNumber = Object.prototype.hasOwnProperty.call(w, 'payrollEmpNumber');
+  const payrollEmpNumber = validateOptionalPayrollEmpNumber(w.payrollEmpNumber);
   return {
     name: name, notes: notes, shiftCommitment: shiftCommitment,
     startDate: startDate, hasStartDate: hasStartDate,
     gmachMonth: gmachMonth, hasGmachMonth: hasGmachMonth,
     phone: phone, hasPhone: hasPhone,
+    payrollEmpNumber: payrollEmpNumber, hasPayrollEmpNumber: hasPayrollEmpNumber,
   };
+}
+
+// Optional payroll employee number: '' or 1-6 digits. Stored normalised
+// (leading zeros stripped). Mirror of lib/validate.js.
+function validateOptionalPayrollEmpNumber(v) {
+  const s = String(v == null ? '' : v).trim();
+  if (!s) return '';
+  if (!/^\d{1,6}$/.test(s)) throw httpError(400, 'bad payrollEmpNumber');
+  return normalizePayrollEmpNumber_(s);
 }
 
 // Batch of { id, startDate } for setWorkerStartDates. id required; startDate
@@ -815,8 +902,21 @@ function readWorkersSafe() {
       // Mobile phone as 10-digit TEXT ('' when not entered). Appended column —
       // blank on every legacy row.
       phone: formatPhoneCell(r[7]),
+      // Payroll bureau employee number as TEXT ('' when not bound). Appended
+      // column — blank on every legacy row. Leading zeros are stripped so the
+      // printed '0033' and a typed '33' are the same key.
+      payrollEmpNumber: normalizePayrollEmpNumber_(r[8]),
     };
   });
+}
+
+// Canonical payroll employee number: digits only, leading zeros stripped.
+// Mirrors normalizeEmpNumber in lib/payroll-rules.js — the two must agree or
+// a worker bound in the UI would stop matching on the next import.
+function normalizePayrollEmpNumber_(v) {
+  const digits = String(v == null ? '' : v).replace(/\D/g, '');
+  if (!digits) return '';
+  return String(Number(digits));
 }
 
 function readAssignmentsSafe() {
@@ -1102,15 +1202,20 @@ function createWorker(body) {
     const sh = sheetByName(WORKERS_TAB);
     const id = newId('w');
     const createdAt = new Date().toISOString();
-    // Column order MUST match HEADERS_WORKERS (append-only): phone last.
-    sh.appendRow([id, w.name, w.notes, createdAt, w.shiftCommitment, w.startDate, w.gmachMonth, w.phone]);
+    // Column order MUST match HEADERS_WORKERS (append-only): payroll number last.
+    sh.appendRow([id, w.name, w.notes, createdAt, w.shiftCommitment, w.startDate, w.gmachMonth, w.phone, w.payrollEmpNumber]);
     // Column 8 = phone: force the TEXT format so a 10-digit value keeps its
     // leading zero (appendRow alone lets Sheets coerce it to a number).
     if (w.phone) {
       ensureHeaders(sh, HEADERS_WORKERS);
       sh.getRange(sh.getLastRow(), 8).setNumberFormat('@').setValue(w.phone);
     }
-    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, createdAt: createdAt, shift_commitment: w.shiftCommitment, startDate: w.startDate, gmachMonth: w.gmachMonth, phone: w.phone } };
+    // Column 9 = payroll_emp_number: TEXT for the same reason.
+    if (w.payrollEmpNumber) {
+      ensureHeaders(sh, HEADERS_WORKERS);
+      sh.getRange(sh.getLastRow(), 9).setNumberFormat('@').setValue(w.payrollEmpNumber);
+    }
+    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, createdAt: createdAt, shift_commitment: w.shiftCommitment, startDate: w.startDate, gmachMonth: w.gmachMonth, phone: w.phone, payrollEmpNumber: w.payrollEmpNumber } };
   } finally {
     lock.releaseLock();
   }
@@ -1156,7 +1261,17 @@ function updateWorker(body) {
     } else {
       phone = formatPhoneCell(sh.getRange(row, 8).getValue());
     }
-    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, shift_commitment: w.shiftCommitment, startDate: startDate, gmachMonth: gmachMonth, phone: phone } };
+    // Column 9 = payroll_emp_number (HEADERS_WORKERS index 8, 1-based col 9).
+    // Same key-presence rule: an older client that knows nothing about the
+    // payroll binding can never clear it.
+    let payrollEmpNumber = w.payrollEmpNumber;
+    if (w.hasPayrollEmpNumber) {
+      ensureHeaders(sh, HEADERS_WORKERS);
+      sh.getRange(row, 9).setNumberFormat('@').setValue(w.payrollEmpNumber);
+    } else {
+      payrollEmpNumber = normalizePayrollEmpNumber_(sh.getRange(row, 9).getValue());
+    }
+    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, shift_commitment: w.shiftCommitment, startDate: startDate, gmachMonth: gmachMonth, phone: phone, payrollEmpNumber: payrollEmpNumber } };
   } finally {
     lock.releaseLock();
   }
@@ -3291,4 +3406,459 @@ function computeGuidesForCoordinators_() {
   });
   guides.sort(function (x, y) { return x.name.localeCompare(y.name); });
   return guides;
+}
+
+// ===========================================================================
+// בקרת שכר — payroll control endpoints
+// ===========================================================================
+//
+// RAW DATA ONLY. Not one compliance decision is taken here: the browser runs
+// lib/payroll-parse.js over the bureau PDF and lib/payroll-rules.js over the
+// result, then posts the finished lines and findings. This file's job is to
+// validate that payload strictly, re-assert the reconciliation gate so a
+// broken or hostile client cannot store a run that does not add up, and
+// persist it under LockService.
+//
+// Every endpoint is reached through the ordinary SHARED_SECRET gate in
+// handle() / authorized(). No new secret and no new public surface.
+
+// The four tabs are created on demand with their headers. ensureHeaders only
+// ever FILLS IN a blank header cell — it never migrates or reorders data.
+function ensurePayrollSheets_() {
+  const book = ss();
+  function tab(name, headers) {
+    let sh = book.getSheetByName(name);
+    if (!sh) sh = book.insertSheet(name);
+    ensureHeaders(sh, headers);
+    return sh;
+  }
+  return {
+    runs: tab(PAYROLL_RUNS_TAB, HEADERS_PAYROLL_RUNS),
+    lines: tab(PAYROLL_LINES_TAB, HEADERS_PAYROLL_LINES),
+    findings: tab(PAYROLL_FINDINGS_TAB, HEADERS_PAYROLL_FINDINGS),
+    log: tab(PAYROLL_APPROVAL_LOG_TAB, HEADERS_PAYROLL_APPROVAL_LOG),
+  };
+}
+
+// ---------- validation ----------
+
+function payrollEnum_(value, allowed, label) {
+  const s = String(value == null ? '' : value).trim();
+  if (allowed.indexOf(s) < 0) throw httpError(400, 'bad ' + label);
+  return s;
+}
+
+function payrollText_(value, label, max, required) {
+  const s = String(value == null ? '' : value).trim().slice(0, max);
+  if (required && !s) throw httpError(400, label + ' required');
+  return s;
+}
+
+function payrollAmount_(value, label) {
+  const n = Number(value);
+  if (!isFinite(n)) throw httpError(400, 'bad ' + label);
+  if (Math.abs(n) > PAYROLL_AMOUNT_MAX) throw httpError(400, label + ' out of range');
+  return Math.round(n * 100) / 100;
+}
+
+// A run id is minted server-side, never accepted from the client, EXCEPT as
+// a lookup key — where it is constrained to the exact minted shape.
+function payrollRunId_(value) {
+  const s = String(value == null ? '' : value).trim();
+  if (!/^pr_[A-Za-z0-9_]{4,40}$/.test(s)) throw httpError(400, 'bad runId');
+  return s;
+}
+
+function payrollLineId_(value, required) {
+  const s = String(value == null ? '' : value).trim();
+  if (!s) {
+    if (required) throw httpError(400, 'lineId required');
+    return '';
+  }
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(s)) throw httpError(400, 'bad lineId');
+  return s;
+}
+
+// The mandatory human note on every approve / reject. 2-200 characters, so a
+// resolution can never be a bare click with no reason behind it.
+function payrollNote_(value) {
+  const s = String(value == null ? '' : value).trim();
+  if (s.length < PAYROLL_NOTE_MIN) throw httpError(400, 'note too short');
+  if (s.length > PAYROLL_NOTE_MAX) throw httpError(400, 'note too long');
+  return s;
+}
+
+function validatePayrollLine_(raw, index) {
+  if (!raw || typeof raw !== 'object') throw httpError(400, 'bad line at ' + index);
+  const dept = String(raw.dept == null ? '' : raw.dept).trim();
+  if (!/^\d{1,4}$/.test(dept)) throw httpError(400, 'bad dept at ' + index);
+  const mappedHouse = String(raw.mappedHouse == null ? '' : raw.mappedHouse).trim();
+  // '' means "department known but its house is not confirmed yet" — the
+  // frontend raises R16 for it. Anything non-empty must be a real house id.
+  if (mappedHouse && !isHouse(mappedHouse)) throw httpError(400, 'bad mappedHouse at ' + index);
+  const empNumber = String(raw.empNumber == null ? '' : raw.empNumber).trim();
+  if (!/^\d{1,6}$/.test(empNumber)) throw httpError(400, 'bad empNumber at ' + index);
+  return {
+    lineId: payrollLineId_(raw.lineId, true),
+    empNumber: normalizePayrollEmpNumber_(empNumber),
+    rawName: payrollText_(raw.rawName, 'rawName', 120, true),
+    matchedWorkerId: payrollText_(raw.matchedWorkerId, 'matchedWorkerId', 64, false),
+    matchStatus: payrollEnum_(raw.matchStatus, PAYROLL_MATCH_STATUSES, 'matchStatus'),
+    dept: dept,
+    mappedHouse: mappedHouse,
+    tashlumim: payrollAmount_(raw.tashlumim, 'tashlumim'),
+    tagmulim: payrollAmount_(raw.tagmulim, 'tagmulim'),
+    keren: payrollAmount_(raw.keren, 'keren'),
+    pitzuim: payrollAmount_(raw.pitzuim, 'pitzuim'),
+    shonot: payrollAmount_(raw.shonot, 'shonot'),
+    bituach: payrollAmount_(raw.bituach, 'bituach'),
+    masMaasikim: payrollAmount_(raw.masMaasikim, 'masMaasikim'),
+    masSachar: payrollAmount_(raw.masSachar, 'masSachar'),
+    total: payrollAmount_(raw.total, 'total'),
+  };
+}
+
+function validatePayrollFinding_(raw, index, lineIds) {
+  if (!raw || typeof raw !== 'object') throw httpError(400, 'bad finding at ' + index);
+  const lineId = payrollLineId_(raw.lineId, false);
+  // A finding may be run-level (R03 names a worker who has NO line at all),
+  // but if it does name a line that line must exist in this same run.
+  if (lineId && !lineIds[lineId]) throw httpError(400, 'unknown lineId at ' + index);
+  return {
+    lineId: lineId,
+    ruleId: payrollEnum_(raw.ruleId, PAYROLL_RULE_IDS, 'ruleId'),
+    severity: payrollEnum_(raw.severity, PAYROLL_SEVERITIES, 'severity'),
+    expected: payrollText_(raw.expected, 'expected', 120, false),
+    actual: payrollText_(raw.actual, 'actual', 120, false),
+    messageHe: payrollText_(raw.messageHe, 'messageHe', 300, true),
+  };
+}
+
+// ---------- import ----------
+
+function importPayrollRun(body) {
+  const month = validateMonth(body.month, 'month');
+  const fileName = payrollText_(body.fileName, 'fileName', 200, true);
+  const importedBy = payrollText_(body.importedBy, 'importedBy', 80, false) || 'moran';
+
+  const rawLines = body.lines;
+  if (!Array.isArray(rawLines)) throw httpError(400, 'lines required');
+  if (!rawLines.length) throw httpError(400, 'lines empty');
+  if (rawLines.length > PAYROLL_MAX_LINES) throw httpError(400, 'too many lines');
+
+  const rawFindings = body.findings === undefined ? [] : body.findings;
+  if (!Array.isArray(rawFindings)) throw httpError(400, 'findings must be an array');
+  if (rawFindings.length > PAYROLL_MAX_FINDINGS) throw httpError(400, 'too many findings');
+
+  const printedTotal = payrollAmount_(body.printedTotal, 'printedTotal');
+  const printedHeadcount = clampInt(body.printedHeadcount, PAYROLL_MAX_LINES);
+
+  const lines = rawLines.map(validatePayrollLine_);
+  const lineIds = {};
+  lines.forEach(function (l) {
+    if (lineIds[l.lineId]) throw httpError(400, 'duplicate lineId ' + l.lineId);
+    lineIds[l.lineId] = true;
+  });
+  const findings = rawFindings.map(function (f, i) { return validatePayrollFinding_(f, i, lineIds); });
+
+  // The reconciliation gate, re-asserted server-side. The browser already
+  // refused a file that fails it; doing it again here means a bug or a forged
+  // request cannot land a run whose rows do not reproduce what the bureau
+  // printed. Fail-closed, and the error names the delta.
+  const parsedTotal = Math.round(lines.reduce(function (a, l) { return a + l.total; }, 0) * 100) / 100;
+  if (Math.abs(parsedTotal - printedTotal) > PAYROLL_CENT) {
+    throw httpError(400, 'reconciliation failed: parsed total ' + parsedTotal.toFixed(2) +
+      ' vs printed total ' + printedTotal.toFixed(2) +
+      ', delta ' + (Math.round((parsedTotal - printedTotal) * 100) / 100).toFixed(2));
+  }
+  if (lines.length !== printedHeadcount) {
+    throw httpError(400, 'reconciliation failed: parsed rows ' + lines.length +
+      ' vs printed headcount ' + printedHeadcount +
+      ', delta ' + (lines.length - printedHeadcount));
+  }
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const sheets = ensurePayrollSheets_();
+
+    // A locked month is final. Re-importing it would silently rewrite a run
+    // somebody already signed off, so it is refused outright.
+    const existing = readPayrollRunsSafe_(sheets.runs).filter(function (r) { return r.month === month; });
+    const locked = existing.filter(function (r) { return r.status === 'locked'; });
+    if (locked.length) throw httpError(409, 'month ' + month + ' is locked');
+
+    // 'pr_' so the minted id matches payrollRunId_, which is the only shape
+    // any endpoint will accept back as a lookup key.
+    const runId = newId('pr_');
+    const importedAt = new Date().toISOString();
+    const flaggedCount = countFlaggedLines_(findings);
+
+    sheets.runs.appendRow([
+      runId, month, importedAt, importedBy, fileName,
+      lines.length, parsedTotal, printedTotal, flaggedCount, 'open',
+    ]);
+
+    if (lines.length) {
+      sheets.lines.getRange(sheets.lines.getLastRow() + 1, 1, lines.length, HEADERS_PAYROLL_LINES.length)
+        .setValues(lines.map(function (l) {
+          return [
+            runId, l.lineId, l.empNumber, l.rawName, l.matchedWorkerId, l.matchStatus,
+            l.dept, l.mappedHouse,
+            l.tashlumim, l.tagmulim, l.keren, l.pitzuim, l.shonot, l.bituach,
+            l.masMaasikim, l.masSachar, l.total,
+          ];
+        }));
+    }
+    if (findings.length) {
+      sheets.findings.getRange(sheets.findings.getLastRow() + 1, 1, findings.length, HEADERS_PAYROLL_FINDINGS.length)
+        .setValues(findings.map(function (f) {
+          return [runId, f.lineId, f.ruleId, f.severity, f.expected, f.actual, f.messageHe, 'open', '', '', ''];
+        }));
+    }
+
+    return {
+      ok: true,
+      run: {
+        runId: runId, month: month, importedAt: importedAt, importedBy: importedBy,
+        fileName: fileName, rowCount: lines.length, parsedTotal: parsedTotal,
+        printedTotal: printedTotal, flaggedCount: flaggedCount, status: 'open',
+      },
+      supersedes: existing.map(function (r) { return r.runId; }),
+    };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// How many distinct LINES carry at least one finding. Run-level findings
+// (R03) have no line and are counted separately by the frontend.
+function countFlaggedLines_(findings) {
+  const seen = {};
+  findings.forEach(function (f) { if (f.lineId) seen[f.lineId] = true; });
+  return Object.keys(seen).length;
+}
+
+// ---------- read ----------
+
+function readPayrollRunsSafe_(sheet) {
+  const sh = sheet || sheetByNameOrNull(PAYROLL_RUNS_TAB);
+  return rowsOf(sh).map(function (r) {
+    return {
+      runId: String(r[0] || ''),
+      month: formatMonthCell(r[1]),
+      importedAt: cellToIso(r[2]),
+      importedBy: String(r[3] || ''),
+      fileName: String(r[4] || ''),
+      rowCount: Number(r[5]) || 0,
+      parsedTotal: Number(r[6]) || 0,
+      printedTotal: Number(r[7]) || 0,
+      flaggedCount: Number(r[8]) || 0,
+      status: String(r[9] || 'open'),
+    };
+  });
+}
+
+function readPayrollLinesSafe_(runId) {
+  const sh = sheetByNameOrNull(PAYROLL_LINES_TAB);
+  return rowsOf(sh).filter(function (r) { return String(r[0] || '') === runId; }).map(function (r) {
+    return {
+      runId: String(r[0] || ''),
+      lineId: String(r[1] || ''),
+      empNumber: String(r[2] == null ? '' : r[2]),
+      rawName: String(r[3] || ''),
+      matchedWorkerId: String(r[4] || ''),
+      matchStatus: String(r[5] || ''),
+      dept: String(r[6] == null ? '' : r[6]),
+      mappedHouse: String(r[7] || ''),
+      tashlumim: Number(r[8]) || 0,
+      tagmulim: Number(r[9]) || 0,
+      keren: Number(r[10]) || 0,
+      pitzuim: Number(r[11]) || 0,
+      shonot: Number(r[12]) || 0,
+      bituach: Number(r[13]) || 0,
+      masMaasikim: Number(r[14]) || 0,
+      masSachar: Number(r[15]) || 0,
+      total: Number(r[16]) || 0,
+    };
+  });
+}
+
+function readPayrollFindingsSafe_(runId) {
+  const sh = sheetByNameOrNull(PAYROLL_FINDINGS_TAB);
+  return rowsOf(sh).filter(function (r) { return String(r[0] || '') === runId; }).map(function (r) {
+    return {
+      runId: String(r[0] || ''),
+      lineId: String(r[1] || ''),
+      ruleId: String(r[2] || ''),
+      severity: String(r[3] || ''),
+      expected: String(r[4] == null ? '' : r[4]),
+      actual: String(r[5] == null ? '' : r[5]),
+      messageHe: String(r[6] || ''),
+      state: String(r[7] || 'open'),
+      resolvedBy: String(r[8] || ''),
+      resolvedAt: cellToIso(r[9]),
+      note: String(r[10] || ''),
+    };
+  });
+}
+
+// getPayrollRun — with a runId, that run; with a month, the newest run of
+// that month; with neither, just the run index so the UI can offer a picker.
+function getPayrollRun(params) {
+  const p = params || {};
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    ensurePayrollSheets_();
+    const runs = readPayrollRunsSafe_();
+    // Newest first. readPayrollRunsSafe_ returns sheet order, so the row index
+    // breaks a tie: two imports inside the same second resolve to the one
+    // written later, never to whichever the sort happened to leave first.
+    const index = runs
+      .map(function (r, i) { return { run: r, i: i }; })
+      .sort(function (a, b) {
+        const byTime = String(b.run.importedAt).localeCompare(String(a.run.importedAt));
+        return byTime !== 0 ? byTime : b.i - a.i;
+      })
+      .map(function (x) { return x.run; });
+
+    let run = null;
+    if (p.runId !== undefined && String(p.runId).trim()) {
+      const runId = payrollRunId_(p.runId);
+      run = index.filter(function (r) { return r.runId === runId; })[0] || null;
+      if (!run) throw httpError(404, 'run not found');
+    } else if (p.month !== undefined && String(p.month).trim()) {
+      const month = validateMonth(p.month, 'month');
+      run = index.filter(function (r) { return r.month === month; })[0] || null;
+      if (!run) return { ok: true, run: null, lines: [], findings: [], runs: index };
+    } else {
+      return { ok: true, run: null, lines: [], findings: [], runs: index };
+    }
+
+    return {
+      ok: true,
+      run: run,
+      lines: readPayrollLinesSafe_(run.runId),
+      findings: readPayrollFindingsSafe_(run.runId),
+      // The previous month's per-employee totals, so the client can evaluate
+      // R15 without a second round trip. Raw data, no comparison done here.
+      previousTotals: previousMonthTotals_(index, run.month),
+      runs: index,
+    };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// Totals by employee number from the newest run of the month before `month`.
+function previousMonthTotals_(index, month) {
+  const m = /^(\d{4})-(\d{2})$/.exec(String(month || ''));
+  if (!m) return {};
+  let year = Number(m[1]);
+  let mon = Number(m[2]) - 1;
+  if (mon < 1) { mon = 12; year -= 1; }
+  const prevMonth = String(year) + '-' + (mon < 10 ? '0' + mon : String(mon));
+  const prev = index.filter(function (r) { return r.month === prevMonth; })[0];
+  if (!prev) return {};
+  const out = {};
+  readPayrollLinesSafe_(prev.runId).forEach(function (l) {
+    if (l.empNumber) out[l.empNumber] = l.total;
+  });
+  return out;
+}
+
+// ---------- resolve ----------
+
+// Approve or reject ONE finding, identified by its run + line + rule. The
+// note is mandatory — see payrollNote_. Every call also appends an immutable
+// PayrollApprovalLog row, so the decision trail survives a later re-import.
+function resolvePayrollFinding(body) {
+  const runId = payrollRunId_(body.runId);
+  const lineId = payrollLineId_(body.lineId, false);
+  const ruleId = payrollEnum_(body.ruleId, PAYROLL_RULE_IDS, 'ruleId');
+  // `action` is the doPost dispatch key, so the approve / reject choice
+  // travels under its own name.
+  const decision = payrollEnum_(body.decision, PAYROLL_RESOLVE_ACTIONS, 'decision');
+  const note = payrollNote_(body.note);
+  const actor = payrollText_(body.actor, 'actor', 80, false) || 'moran';
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const sheets = ensurePayrollSheets_();
+
+    const run = readPayrollRunsSafe_(sheets.runs).filter(function (r) { return r.runId === runId; })[0];
+    if (!run) throw httpError(404, 'run not found');
+    if (run.status === 'locked') throw httpError(409, 'run is locked');
+
+    const sh = sheets.findings;
+    const last = sh.getLastRow();
+    if (last < 2) throw httpError(404, 'finding not found');
+    const values = sh.getRange(2, 1, last - 1, HEADERS_PAYROLL_FINDINGS.length).getValues();
+    let rowIndex = -1;
+    for (let i = 0; i < values.length; i++) {
+      if (String(values[i][0] || '') !== runId) continue;
+      if (String(values[i][1] || '') !== lineId) continue;
+      if (String(values[i][2] || '') !== ruleId) continue;
+      rowIndex = i + 2;
+      break;
+    }
+    if (rowIndex < 0) throw httpError(404, 'finding not found');
+
+    const state = decision === 'approve' ? 'approved' : 'rejected';
+    const resolvedAt = new Date().toISOString();
+    // Columns 8-11 = state, resolvedBy, resolvedAt, note.
+    sh.getRange(rowIndex, 8, 1, 4).setValues([[state, actor, resolvedAt, note]]);
+    sheets.log.appendRow([runId, lineId, decision, actor, resolvedAt, note]);
+
+    return {
+      ok: true,
+      finding: {
+        runId: runId, lineId: lineId, ruleId: ruleId, state: state,
+        resolvedBy: actor, resolvedAt: resolvedAt, note: note,
+      },
+      openFindings: countOpenFindings_(runId),
+    };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function countOpenFindings_(runId) {
+  return readPayrollFindingsSafe_(runId).filter(function (f) { return f.state === 'open'; }).length;
+}
+
+// ---------- lock ----------
+
+// Close the month. Refused while any finding is still open — that is the
+// whole point of the gate — and idempotent-safe: a second lock is a 409, not
+// a silent no-op that would look like success.
+function lockPayrollRun(body) {
+  const runId = payrollRunId_(body.runId);
+  const actor = payrollText_(body.actor, 'actor', 80, false) || 'moran';
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    const sheets = ensurePayrollSheets_();
+    const sh = sheets.runs;
+    const row = findRow(sh, 0, runId);
+    if (row < 0) throw httpError(404, 'run not found');
+
+    const status = String(sh.getRange(row, 10).getValue() || 'open');
+    if (status === 'locked') throw httpError(409, 'run is already locked');
+
+    const open = countOpenFindings_(runId);
+    if (open > 0) throw httpError(409, 'cannot lock: ' + open + ' open findings');
+
+    // Column 10 = status.
+    sh.getRange(row, 10).setValue('locked');
+    const at = new Date().toISOString();
+    sheets.log.appendRow([runId, '', 'lock', actor, at, 'נעילת חודש']);
+
+    return { ok: true, runId: runId, status: 'locked', lockedBy: actor, lockedAt: at };
+  } finally {
+    lock.releaseLock();
+  }
 }

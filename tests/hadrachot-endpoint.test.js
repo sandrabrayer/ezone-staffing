@@ -246,8 +246,8 @@ test('HEADERS_WORKERS is untouched — the feed is read-only, no schema change',
   assert.ok(m, 'HEADERS_WORKERS should be declared');
   const cols = m[1].split(',').map(s => s.trim().replace(/^'|'$/g, '')).filter(Boolean);
   assert.deepStrictEqual(cols,
-    ['id', 'name', 'notes', 'created_at', 'shift_commitment', 'start_date', 'gmach_month', 'phone'],
-    'HEADERS_WORKERS is append-only and position-mapped — the feed itself must not touch it (gmach_month was appended by the final_settlement feature, phone by the coordinators feed)');
+    ['id', 'name', 'notes', 'created_at', 'shift_commitment', 'start_date', 'gmach_month', 'phone', 'payroll_emp_number'],
+    'HEADERS_WORKERS is append-only and position-mapped — the feed itself must not touch it (gmach_month was appended by the final_settlement feature, phone by the coordinators feed, payroll_emp_number by בקרת שכר)');
 });
 
 test('computeGuidesForHadrachot_ source contains no financial word', () => {

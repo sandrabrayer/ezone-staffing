@@ -239,6 +239,64 @@ body{
   border-color:rgba(226,75,74,0.45);
 }
 
+/* בקרת שכר */
+.pr-lede{color:var(--ink-soft);font-size:13px;line-height:1.7;margin:0 0 12px}
+.pr-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.pr-row label{min-width:110px;color:var(--muted);font-size:13px}
+.pr-row input,.pr-row select{
+  background:var(--bg-elevated);color:var(--ink);border:1px solid var(--line-strong);
+  border-radius:8px;padding:8px 10px;font-family:inherit;font-size:14px;
+}
+.pr-error{
+  border:1px solid var(--danger);border-radius:10px;padding:10px 12px;margin:12px 0;
+  background:rgba(226,75,74,0.10);color:var(--danger);font-size:13px;line-height:1.6;
+}
+.pr-gate{border-radius:10px;padding:12px;margin-bottom:14px;border:1px solid var(--line-strong)}
+.pr-gate.ok{border-color:var(--success);background:rgba(93,202,165,0.08)}
+.pr-gate.bad{border-color:var(--danger);background:rgba(226,75,74,0.08)}
+.pr-gate-title{font-weight:700;margin-bottom:8px}
+.pr-gate.ok .pr-gate-title{color:var(--success)}
+.pr-gate.bad .pr-gate-title{color:var(--danger)}
+.pr-gate-table{width:auto;min-width:0;font-size:13px}
+.pr-gate-table th{background:none;color:var(--muted);padding:3px 14px 3px 0;font-weight:500}
+.pr-gate-table td{padding:3px 0;font-variant-numeric:tabular-nums;font-weight:600}
+.pr-counters{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0}
+.pr-counter{
+  background:var(--bg-elevated);border:1px solid var(--line);border-radius:10px;
+  padding:10px 16px;min-width:88px;text-align:center;
+}
+.pr-counter b{display:block;font-size:22px;font-variant-numeric:tabular-nums}
+.pr-counter span{font-size:12px;color:var(--muted)}
+.pr-counter.ok b{color:var(--success)}
+.pr-counter.warn b{color:var(--warning)}
+.pr-counter.crit b{color:var(--danger)}
+.pr-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:12px 0}
+.btn.btn-small{padding:5px 12px;font-size:12px}
+.btn.btn-small.on{background:var(--grad);color:var(--accent-deep);border-color:transparent}
+.pr-table td{vertical-align:top}
+.pr-line.clean td{opacity:.72}
+.pr-sub{font-size:11px;color:var(--muted);margin-top:2px}
+.pr-ok{color:var(--success);font-size:12px}
+.pr-empty{color:var(--muted);font-size:13px;padding:14px;text-align:center}
+.pr-findings-cell{min-width:320px}
+.pr-finding{
+  border:1px solid var(--line-strong);border-right-width:3px;border-radius:8px;
+  padding:8px 10px;margin-bottom:6px;background:var(--bg-elevated);
+}
+.pr-finding.critical{border-right-color:var(--danger)}
+.pr-finding.warning{border-right-color:var(--warning)}
+.pr-finding.resolved{opacity:.6}
+.pr-finding-head{display:flex;gap:6px;align-items:baseline;flex-wrap:wrap}
+.pr-pill{border-radius:999px;padding:1px 8px;font-size:11px;font-weight:700}
+.pr-pill.critical{background:var(--danger);color:#1a0505}
+.pr-pill.warning{background:var(--warning);color:#1a1200}
+.pr-rule{font-size:11px;color:var(--muted);font-weight:700}
+.pr-msg{font-size:12.5px;line-height:1.55}
+.pr-expected{display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:var(--ink-soft);margin-top:5px}
+.pr-expected b{color:var(--muted);font-weight:500;margin-left:4px}
+.pr-finding-actions{display:flex;gap:6px;margin-top:7px}
+.pr-finding-state{font-size:11.5px;color:var(--muted);margin-top:6px}
+
 /* Table card */
 .tablecard{
   background:var(--bg-surface);
@@ -1433,6 +1491,9 @@ tbody tr:hover{
 <div class="toast" id="toast"></div>
 
 <script src="/lib/calc.js"></script>
+<script src="/lib/payroll-parse.js"></script>
+<script src="/lib/payroll-rules.js"></script>
+<script src="/lib/xlsx_write.js"></script>
 <script>
 /* ============================================================
    E-ZONE — ניהול כוח אדם (גרסת ענן, v3)
@@ -3397,11 +3458,17 @@ function renderSwitch(){
   });
   html += `<button class="topbar-link ${view==='startdates'?'on':''}" onclick="go('startdates')">תאריכי תחילה</button>`;
   html += `<button class="topbar-link ${view==='hearings'?'on':''}" onclick="go('hearings')">שימועים</button>`;
+  html += `<button class="topbar-link ${view==='payroll'?'on':''}" onclick="go('payroll')">בקרת שכר</button>`;
   html += `<button class="topbar-link ${view==='archive'?'on':''}" onclick="go('archive')">ארכיב עובדים</button>`;
   html += `<button class="logout" onclick="logout()">יציאה</button>`;
   el.innerHTML=html;
 }
-function go(v){ view=v; rosterFilter=''; render(); window.scrollTo(0,0); }
+function go(v){
+  view=v; rosterFilter=''; render(); window.scrollTo(0,0);
+  // בקרת שכר lives in its own tabs, not in /api/data, so it is fetched the
+  // first time the tab is opened and never on boot.
+  if (v === 'payroll') payrollEnsureLoaded();
+}
 function logout(){ clearToken(); showPinGate(); }
 
 function render(){
@@ -3415,6 +3482,7 @@ function render(){
   else if (view === 'archive') app.innerHTML = archiveView();
   else if (view === 'hearings') app.innerHTML = hearingsView();
   else if (view === 'startdates') app.innerHTML = startDatesView();
+  else if (view === 'payroll')  app.innerHTML = payrollView();
   else                       { app.innerHTML = houseView(view); highlightWorkerRow(); }
 }
 
@@ -4234,6 +4302,554 @@ async function boot(){
     showPinGate();
   }
 }
+
+/* PAYROLL-CONTROL:START
+     בקרת שכר. Every Hebrew string between these two markers is checked by
+     tests/payroll-guards.test.js: NO PARENTHESES anywhere, and no house id
+     literal — the only mapping from a payroll department to a house lives in
+     DEPT_TO_HOUSE inside lib/payroll-rules.js. All compliance logic lives in
+     lib/payroll-rules.js and all parsing in lib/payroll-parse.js; this block
+     only uploads, renders and posts. */
+
+/* ---------- בקרת שכר ---------- */
+
+// The whole tab's state. `draft` holds a parsed-but-not-yet-saved import;
+// `run` holds what the backend has stored.
+let PAYROLL = {
+  step: 'upload',
+  month: '',
+  run: null,
+  lines: [],
+  findings: [],
+  previousTotals: {},
+  runs: [],
+  draft: null,
+  error: '',
+  filter: 'flagged',
+  busy: false,
+};
+
+const PAYROLL_FILTERS = [
+  { key: 'flagged', label: 'לבדיקה בלבד' },
+  { key: 'all', label: 'כל השורות' },
+  { key: 'clean', label: 'תקינות בלבד' },
+];
+
+// Severity → Hebrew, in one place. The counters and the per-finding pills
+// both read it, so a label can never drift between them.
+const PAYROLL_SEVERITY_LABELS = { critical: 'חריג', warning: 'לבדיקה' };
+const PAYROLL_STATE_LABELS = { open: 'פתוח', approved: 'אושר', rejected: 'נדחה' };
+const PAYROLL_MATCH_LABELS = {
+  number: 'זוהה לפי מספר עובד',
+  exact: 'זוהה לפי שם מלא',
+  normalized: 'זוהה לפי שם מנורמל',
+  ambiguous: 'יותר מהתאמה אחת',
+  unmatched: 'לא זוהה',
+};
+// The two rules the פנסיה panel is built from. R07 is the pension liability
+// itself; R08 is the case where a missing start date makes it unanswerable.
+const PAYROLL_PENSION_RULES = ['R07', 'R08'];
+
+// An id on its way into an onclick handler. escapeHtml is right for TEXT,
+// but inside a double-quoted attribute the browser decodes &#39; back to a
+// real quote before the JS parser sees it, so an apostrophe would break out
+// of the string literal. lineId and ruleId are already constrained by both
+// validators; this strips anything else anyway, because a payments screen is
+// the wrong place to rely on a check made somewhere else.
+function payrollAttrId(v){
+  return String(v == null ? '' : v).replace(/[^A-Za-z0-9_-]/g, '');
+}
+
+function payrollMoney(v){
+  const n = Number(v) || 0;
+  return n.toLocaleString('he-IL', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+// The roster inputs the rules need, built from the app's own loaded state.
+function payrollRosterContext(){
+  const workers = WORKERS.map(w => ({
+    id: w.id,
+    name: w.name,
+    startDate: w.startDate || '',
+    payrollEmpNumber: w.payrollEmpNumber || '',
+  }));
+  // A current placement = an assignment row that still exists and is not on
+  // leave or in final settlement. Archived assignments live in ARCHIVE_V3.
+  const placements = ASSIGNMENTS
+    .filter(a => !calcIsOnLeave(a) && !calcIsFinalSettlement(a))
+    .map(a => ({ workerId: a.workerId, house: a.house, houseLabel: houseName(a.house), active: true }));
+  const terminations = ARCHIVE_V3.map(r => ({ workerId: r.workerId, terminationDate: r.terminationDate || '' }));
+  return { workers, placements, terminations };
+}
+
+// Lazy, once: the run index is fetched the first time the tab is opened.
+// A failure leaves the upload step usable rather than blocking the tab.
+let PAYROLL_LOADED = false;
+async function payrollEnsureLoaded(){
+  if (PAYROLL_LOADED || PAYROLL.busy) return;
+  PAYROLL_LOADED = true;
+  PAYROLL.busy = true;
+  try{
+    await payrollLoadRun({});
+  } catch(err){
+    PAYROLL.error = err && err.message ? err.message : 'שגיאה בטעינת ריצות השכר';
+  } finally {
+    PAYROLL.busy = false;
+    if (view === 'payroll') render();
+  }
+}
+
+/* ---------- upload + parse ---------- */
+
+// pdfjs is served same-origin from /vendor — the payroll report never leaves
+// the browser and no third-party script is in its path. Loaded lazily so the
+// rest of the app boots without it.
+let PDFJS_LIB = null;
+async function payrollPdfjs(){
+  if (PDFJS_LIB) return PDFJS_LIB;
+  const lib = await import('/vendor/pdf.min.mjs');
+  lib.GlobalWorkerOptions.workerSrc = '/vendor/pdf.worker.min.mjs';
+  PDFJS_LIB = lib;
+  return lib;
+}
+
+// pdfjs text content → the { str, x, y } shape lib/payroll-parse.js expects.
+// transform[4] and transform[5] are the item's x and y in PDF user space.
+function payrollToItems(textContent){
+  return (textContent.items || [])
+    .filter(it => it && typeof it.str === 'string' && it.str.trim() !== '')
+    .map(it => ({ str: it.str, x: it.transform[4], y: it.transform[5] }));
+}
+
+async function payrollReadPdf(file){
+  const pdfjs = await payrollPdfjs();
+  const buf = await file.arrayBuffer();
+  const doc = await pdfjs.getDocument({ data: new Uint8Array(buf) }).promise;
+  const pages = [];
+  for (let p = 1; p <= doc.numPages; p++){
+    const page = await doc.getPage(p);
+    pages.push(payrollToItems(await page.getTextContent()));
+  }
+  return pages;
+}
+
+async function payrollAnalyze(){
+  const fileInput = document.getElementById('pr_file');
+  const monthInput = document.getElementById('pr_month');
+  const file = fileInput && fileInput.files && fileInput.files[0];
+  const month = monthInput ? String(monthInput.value || '').trim() : '';
+  if (!month){ toast('יש לבחור חודש שכר', true); return; }
+  if (!file){ toast('יש לבחור קובץ תמחיר חודשי', true); return; }
+
+  PAYROLL.busy = true; PAYROLL.error = ''; PAYROLL.draft = null; render();
+  try{
+    const pages = await payrollReadPdf(file);
+    const parsed = PayrollParse.parseTamhir(pages);
+    const gate = PayrollParse.reconcile(parsed);
+    if (!gate.ok){
+      // The gate is the whole point: a file that does not reproduce the
+      // bureau's own printed figures is refused, never partially imported.
+      PAYROLL.error = gate.problems.map(p => p.messageHe).join(' · ');
+      PAYROLL.draft = { gate, parsed, fileName: file.name, month, lines: [], findings: [] };
+      return;
+    }
+    const roster = payrollRosterContext();
+    const evaluated = PayrollRules.evaluateRun({
+      month,
+      runId: '',
+      rows: parsed.rows,
+      workers: roster.workers,
+      placements: roster.placements,
+      terminations: roster.terminations,
+      previousTotals: PAYROLL.previousTotals || {},
+    });
+    PAYROLL.draft = {
+      fileName: file.name, month, parsed, gate,
+      lines: evaluated.lines, findings: evaluated.findings,
+      summary: PayrollRules.summarize(evaluated.lines, evaluated.findings),
+    };
+    PAYROLL.step = 'preview';
+  } catch(err){
+    PAYROLL.error = err && err.message ? err.message : 'שגיאה בקריאת הקובץ';
+  } finally {
+    PAYROLL.busy = false;
+    render();
+  }
+}
+
+async function payrollSaveImport(){
+  const d = PAYROLL.draft;
+  if (!d || !d.lines.length) return;
+  PAYROLL.busy = true; render();
+  try{
+    const body = await apiFetch('/api/action', { method:'POST', body: JSON.stringify({
+      action: 'importPayrollRun',
+      month: d.month,
+      fileName: d.fileName,
+      printedTotal: d.gate.printedTotal,
+      printedHeadcount: d.gate.printedHeadcount,
+      lines: d.lines,
+      findings: d.findings,
+    })});
+    PAYROLL.draft = null;
+    PAYROLL.month = d.month;
+    await payrollLoadRun({ runId: body.run.runId });
+    toast('הייבוא נשמר');
+  } catch(err){
+    PAYROLL.error = err && err.message ? err.message : 'שגיאה בשמירה';
+  } finally {
+    PAYROLL.busy = false;
+    render();
+  }
+}
+
+/* ---------- load + resolve + lock ---------- */
+
+async function payrollLoadRun(params){
+  const qs = [];
+  if (params && params.runId) qs.push('runId=' + encodeURIComponent(params.runId));
+  else if (params && params.month) qs.push('month=' + encodeURIComponent(params.month));
+  const body = await apiFetch('/api/payroll/run' + (qs.length ? '?' + qs.join('&') : ''));
+  PAYROLL.run = body.run || null;
+  PAYROLL.lines = Array.isArray(body.lines) ? body.lines : [];
+  PAYROLL.findings = Array.isArray(body.findings) ? body.findings : [];
+  PAYROLL.previousTotals = body.previousTotals || {};
+  PAYROLL.runs = Array.isArray(body.runs) ? body.runs : [];
+  PAYROLL.step = PAYROLL.run ? 'triage' : 'upload';
+}
+
+async function payrollOpenMonth(){
+  const sel = document.getElementById('pr_runPicker');
+  if (!sel) return;
+  PAYROLL.busy = true; PAYROLL.error = ''; render();
+  try{
+    await payrollLoadRun({ runId: sel.value });
+  } catch(err){
+    PAYROLL.error = err && err.message ? err.message : 'שגיאה בטעינה';
+  } finally {
+    PAYROLL.busy = false; render();
+  }
+}
+
+// Approve or reject one finding. The note is mandatory and is validated on
+// the proxy AND in Apps Script; asking here is a courtesy, not the gate.
+async function payrollResolve(lineId, ruleId, decision){
+  if (!PAYROLL.run || PAYROLL.run.status === 'locked') return;
+  const promptText = decision === 'approve'
+    ? 'הערת אישור - בין 2 ל 200 תווים'
+    : 'הערת דחייה - בין 2 ל 200 תווים';
+  const note = window.prompt(promptText, '');
+  if (note === null) return;
+  const trimmed = String(note).trim();
+  if (trimmed.length < 2 || trimmed.length > 200){
+    toast('הערה חייבת להיות בין 2 ל 200 תווים', true);
+    return;
+  }
+  PAYROLL.busy = true; render();
+  try{
+    await apiFetch('/api/action', { method:'POST', body: JSON.stringify({
+      action: 'resolvePayrollFinding',
+      runId: PAYROLL.run.runId,
+      lineId: lineId || '',
+      ruleId,
+      decision,
+      note: trimmed,
+    })});
+    await payrollLoadRun({ runId: PAYROLL.run.runId });
+    toast(decision === 'approve' ? 'הממצא אושר' : 'הממצא נדחה');
+  } catch(err){
+    toast(err && err.message ? err.message : 'שגיאה בעדכון', true);
+  } finally {
+    PAYROLL.busy = false; render();
+  }
+}
+
+async function payrollLock(){
+  if (!PAYROLL.run) return;
+  const open = PAYROLL.findings.filter(f => f.state === 'open').length;
+  if (open > 0){ toast('לא ניתן לנעול כל עוד יש ממצאים פתוחים', true); return; }
+  if (!confirm('לנעול את חודש ' + PAYROLL.run.month + '? לאחר הנעילה הריצה לקריאה בלבד.')) return;
+  PAYROLL.busy = true; render();
+  try{
+    await apiFetch('/api/action', { method:'POST', body: JSON.stringify({
+      action: 'lockPayrollRun', runId: PAYROLL.run.runId,
+    })});
+    await payrollLoadRun({ runId: PAYROLL.run.runId });
+    toast('החודש ננעל');
+  } catch(err){
+    toast(err && err.message ? err.message : 'שגיאה בנעילה', true);
+  } finally {
+    PAYROLL.busy = false; render();
+  }
+}
+
+/* ---------- export ---------- */
+
+const PAYROLL_EXPORT_HEADERS = [
+  'מספר עובד','שם בקובץ','זיהוי','מחלקה','תשלומים','תגמולי מעסיק','קרן השתלמות',
+  'פיצויים','שונות','ביטוח לאומי מעסיק','מס מעסיקים','מס שכר','סה"כ עלות','ממצאים',
+];
+
+function payrollExport(){
+  if (!PAYROLL.run) return;
+  const byLine = {};
+  PAYROLL.findings.forEach(f => { (byLine[f.lineId] = byLine[f.lineId] || []).push(f); });
+  const rows = [PAYROLL_EXPORT_HEADERS];
+  PAYROLL.lines.forEach(l => {
+    const fs = (byLine[l.lineId] || [])
+      .map(f => f.ruleId + ' ' + (PAYROLL_STATE_LABELS[f.state] || f.state)).join(' | ');
+    rows.push([
+      l.empNumber, l.rawName, PAYROLL_MATCH_LABELS[l.matchStatus] || l.matchStatus, l.dept,
+      l.tashlumim, l.tagmulim, l.keren, l.pitzuim, l.shonot, l.bituach,
+      l.masMaasikim, l.masSachar, l.total, fs,
+    ]);
+  });
+  const bytes = XlsxWrite.writeXlsx(rows, 'בקרת שכר');
+  const url = URL.createObjectURL(new Blob([bytes], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'בקרת-שכר-' + PAYROLL.run.month + '.xlsx';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/* ---------- views ---------- */
+
+function payrollView(){
+  if (PAYROLL.step === 'triage' && PAYROLL.run) return payrollTriageView();
+  if (PAYROLL.step === 'preview' && PAYROLL.draft) return payrollPreviewView();
+  return payrollUploadView();
+}
+
+function payrollErrorBox(){
+  if (!PAYROLL.error) return '';
+  return `<div class="pr-error" id="pr_error">${escapeHtml(PAYROLL.error)}</div>`;
+}
+
+function payrollRunPicker(){
+  if (!PAYROLL.runs.length) return '';
+  const opts = PAYROLL.runs.map(r =>
+    `<option value="${payrollAttrId(r.runId)}"${PAYROLL.run && PAYROLL.run.runId === r.runId ? ' selected' : ''}>${escapeHtml(r.month)} · ${escapeHtml(r.fileName)}</option>`
+  ).join('');
+  return `
+    <div class="pr-row">
+      <label for="pr_runPicker">ריצות שמורות</label>
+      <select id="pr_runPicker">${opts}</select>
+      <button class="btn" onclick="payrollOpenMonth()">פתיחה</button>
+    </div>`;
+}
+
+function payrollUploadView(){
+  return `
+  <div class="section">
+    <div class="section-title">בקרת שכר</div>
+    <div class="tablecard accent-edge" style="padding:18px">
+      <p class="pr-lede">העלאת דוח תמחיר חודשי כל העובדים מלשכת השכר. הקובץ נקרא בדפדפן בלבד ואינו נשלח לשום שירות חיצוני. שלב א מכסה שכירים בלבד.</p>
+      <div class="pr-row">
+        <label for="pr_month">חודש שכר</label>
+        <input id="pr_month" type="month" value="${escapeHtml(PAYROLL.month || '')}"/>
+      </div>
+      <div class="pr-row">
+        <label for="pr_file">קובץ PDF</label>
+        <input id="pr_file" type="file" accept="application/pdf,.pdf"/>
+      </div>
+      <button class="btn btn-primary" id="pr_analyze" onclick="payrollAnalyze()"${PAYROLL.busy ? ' disabled' : ''}>${PAYROLL.busy ? 'קורא את הקובץ…' : 'ניתוח הקובץ'}</button>
+      ${payrollErrorBox()}
+      ${payrollRunPicker()}
+    </div>
+  </div>`;
+}
+
+function payrollCounters(summary){
+  return `
+  <div class="pr-counters">
+    <div class="pr-counter ok"><b>${summary.clean}</b><span>תקין</span></div>
+    <div class="pr-counter warn"><b>${summary.warning}</b><span>לבדיקה</span></div>
+    <div class="pr-counter crit"><b>${summary.critical}</b><span>חריג</span></div>
+    <div class="pr-counter"><b>${summary.total}</b><span>סך השורות</span></div>
+  </div>`;
+}
+
+function payrollPreviewView(){
+  const d = PAYROLL.draft;
+  const g = d.gate;
+  const gateOk = g.ok;
+  const summary = d.summary || { clean:0, warning:0, critical:0, total:0 };
+  return `
+  <div class="section">
+    <div class="section-title">בקרת שכר · תצוגה מקדימה</div>
+    <div class="tablecard accent-edge" style="padding:18px">
+      <div class="pr-gate ${gateOk ? 'ok' : 'bad'}">
+        <div class="pr-gate-title">${gateOk ? 'בדיקת ההתאמה עברה' : 'בדיקת ההתאמה נכשלה - הייבוא נדחה'}</div>
+        <table class="pr-gate-table">
+          <tr><th>שורות שנקראו</th><td>${g.parsedCount}</td><th>מספר עובדים מודפס</th><td>${g.printedHeadcount === null ? 'חסר' : g.printedHeadcount}</td></tr>
+          <tr><th>סכום שנקרא</th><td>${payrollMoney(g.parsedTotal)}</td><th>סה"כ מודפס</th><td>${g.printedTotal === null ? 'חסר' : payrollMoney(g.printedTotal)}</td></tr>
+        </table>
+      </div>
+      ${payrollErrorBox()}
+      ${gateOk ? payrollCounters(summary) : ''}
+      <div class="pr-actions">
+        ${gateOk ? `<button class="btn btn-primary" onclick="payrollSaveImport()"${PAYROLL.busy ? ' disabled' : ''}>${PAYROLL.busy ? 'שומר…' : 'שמירת הייבוא'}</button>` : ''}
+        <button class="btn" onclick="payrollBackToUpload()">חזרה</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function payrollBackToUpload(){
+  PAYROLL.step = 'upload';
+  PAYROLL.draft = null;
+  PAYROLL.error = '';
+  render();
+}
+
+function payrollSetFilter(key){
+  PAYROLL.filter = key;
+  render();
+}
+
+function payrollFindingsByLine(){
+  const map = {};
+  PAYROLL.findings.forEach(f => { (map[f.lineId || ''] = map[f.lineId || ''] || []).push(f); });
+  return map;
+}
+
+// One finding, with the expected and the actual value side by side and the
+// two decisions, each of which demands a note.
+function payrollFindingCard(f, locked){
+  const open = f.state === 'open';
+  const sev = PAYROLL_SEVERITY_LABELS[f.severity] || f.severity;
+  const actions = (open && !locked) ? `
+      <div class="pr-finding-actions">
+        <button class="btn btn-small" onclick="payrollResolve('${payrollAttrId(f.lineId)}','${payrollAttrId(f.ruleId)}','approve')">אישור</button>
+        <button class="btn btn-small" onclick="payrollResolve('${payrollAttrId(f.lineId)}','${payrollAttrId(f.ruleId)}','reject')">דחייה</button>
+      </div>` : `
+      <div class="pr-finding-state">${escapeHtml(PAYROLL_STATE_LABELS[f.state] || f.state)}${f.note ? ' · ' + escapeHtml(f.note) : ''}</div>`;
+  return `
+    <div class="pr-finding ${escapeHtml(f.severity)}${open ? '' : ' resolved'}">
+      <div class="pr-finding-head">
+        <span class="pr-pill ${escapeHtml(f.severity)}">${escapeHtml(sev)}</span>
+        <span class="pr-rule">${escapeHtml(f.ruleId)}</span>
+        <span class="pr-msg">${escapeHtml(f.messageHe)}</span>
+      </div>
+      <div class="pr-expected">
+        <span><b>צפוי</b> ${escapeHtml(f.expected || 'ללא')}</span>
+        <span><b>בפועל</b> ${escapeHtml(f.actual || 'ללא')}</span>
+      </div>
+      ${actions}
+    </div>`;
+}
+
+// The פנסיה panel — every R07 and R08 row with its tenure in months. This is
+// the highest-value output of the whole tool, so it gets its own block above
+// the table rather than being buried among the other findings.
+function payrollPensionPanel(){
+  const rows = PAYROLL.findings
+    .filter(f => PAYROLL_PENSION_RULES.indexOf(f.ruleId) >= 0)
+    .map(f => {
+      const line = PAYROLL.lines.find(l => l.lineId === f.lineId) || null;
+      const worker = line && line.matchedWorkerId ? workerById(line.matchedWorkerId) : null;
+      const tenure = worker ? PayrollRules.tenureMonths(worker.startDate, PAYROLL.run.month) : null;
+      return { f, line, tenure };
+    });
+  if (!rows.length){
+    return `<div class="tablecard" style="padding:14px"><div class="section-title">פנסיה</div><div class="pr-empty">אין ממצאי פנסיה בחודש זה</div></div>`;
+  }
+  const body = rows.map(r => `
+    <tr>
+      <td>${escapeHtml(r.line ? r.line.empNumber : '')}</td>
+      <td>${escapeHtml(r.line ? r.line.rawName : '')}</td>
+      <td>${r.tenure === null ? 'לא ידוע' : escapeHtml(String(r.tenure))}</td>
+      <td>${r.line ? payrollMoney(r.line.tashlumim) : ''}</td>
+      <td>${escapeHtml(r.f.ruleId)}</td>
+      <td>${escapeHtml(PAYROLL_STATE_LABELS[r.f.state] || r.f.state)}</td>
+    </tr>`).join('');
+  return `
+  <div class="tablecard accent-edge" style="margin-bottom:16px">
+    <div style="padding:14px 14px 0"><div class="section-title">פנסיה</div>
+    <div class="pr-lede">עובדים ללא הפרשות פנסיה כלל, ועובדים שלא ניתן לבדוק אותם בגלל תאריך תחילת עבודה חסר.</div></div>
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>מספר</th><th>שם</th><th>ותק בחודשים</th><th>תשלומים</th><th>כלל</th><th>סטטוס</th></tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+function payrollTriageView(){
+  const run = PAYROLL.run;
+  const locked = run.status === 'locked';
+  const byLine = payrollFindingsByLine();
+  const summary = PayrollRules.summarize(PAYROLL.lines, PAYROLL.findings);
+  const openCount = PAYROLL.findings.filter(f => f.state === 'open').length;
+
+  const visible = PAYROLL.lines.filter(l => {
+    const fs = byLine[l.lineId] || [];
+    if (PAYROLL.filter === 'all') return true;
+    if (PAYROLL.filter === 'clean') return fs.length === 0;
+    return fs.length > 0;
+  });
+
+  const rows = visible.map(l => {
+    const fs = byLine[l.lineId] || [];
+    const cards = fs.map(f => payrollFindingCard(f, locked)).join('');
+    return `
+    <tr class="pr-line${fs.length ? '' : ' clean'}">
+      <td>${escapeHtml(l.empNumber)}</td>
+      <td>${escapeHtml(l.rawName)}<div class="pr-sub">${escapeHtml(PAYROLL_MATCH_LABELS[l.matchStatus] || l.matchStatus)}</div></td>
+      <td>${escapeHtml(l.dept)}</td>
+      <td>${payrollMoney(l.tashlumim)}</td>
+      <td>${payrollMoney(l.tagmulim)}</td>
+      <td>${payrollMoney(l.pitzuim)}</td>
+      <td>${payrollMoney(l.total)}</td>
+      <td class="pr-findings-cell">${cards || '<span class="pr-ok">תקין</span>'}</td>
+    </tr>`;
+  }).join('');
+
+  // R03 names a worker with no line at all, so it has nowhere to sit in the
+  // table; those findings get their own block.
+  const orphan = (byLine[''] || []).map(f => payrollFindingCard(f, locked)).join('');
+
+  const filters = PAYROLL_FILTERS.map(f =>
+    `<button class="btn btn-small${PAYROLL.filter === f.key ? ' on' : ''}" onclick="payrollSetFilter('${f.key}')">${escapeHtml(f.label)}</button>`
+  ).join('');
+
+  return `
+  <div class="section">
+    <div class="section-title">בקרת שכר · ${escapeHtml(run.month)}${locked ? ' · נעול' : ''}</div>
+    <div class="pr-summary tablecard" style="padding:14px;margin-bottom:16px">
+      <div class="pr-lede">${escapeHtml(run.fileName)} · יובא בידי ${escapeHtml(run.importedBy)} · ${PAYROLL.lines.length} שורות · ${payrollMoney(run.parsedTotal)} שקלים</div>
+      ${payrollCounters(summary)}
+      <div class="pr-actions">
+        ${filters}
+        <button class="btn" onclick="payrollExport()">ייצוא לאקסל</button>
+        <button class="btn btn-primary" onclick="payrollLock()"${locked || openCount > 0 || PAYROLL.busy ? ' disabled' : ''}>נעילת חודש</button>
+        <button class="btn" onclick="payrollBackToUpload()">ייבוא חודש נוסף</button>
+      </div>
+      <div class="pr-lede">${locked ? 'החודש נעול והריצה לקריאה בלבד.' : (openCount > 0 ? 'ממצאים פתוחים ' + openCount + ' - נעילת החודש תתאפשר כשכולם יטופלו.' : 'אין ממצאים פתוחים - ניתן לנעול את החודש.')}</div>
+      ${payrollErrorBox()}
+    </div>
+    ${payrollPensionPanel()}
+    ${orphan ? `<div class="tablecard" style="padding:14px;margin-bottom:16px"><div class="section-title">עובדים ללא שורה בקובץ</div>${orphan}</div>` : ''}
+    <div class="tablecard">
+      <div class="table-scroll">
+        <table class="pr-table">
+          <thead><tr>
+            <th>מספר</th><th>שם</th><th>מחלקה</th><th>תשלומים</th>
+            <th>תגמולים</th><th>פיצויים</th><th>סה"כ</th><th>ממצאים</th>
+          </tr></thead>
+          <tbody>${rows || '<tr><td colspan="8" class="pr-empty">אין שורות להצגה בסינון הנוכחי</td></tr>'}</tbody>
+        </table>
+      </div>
+    </div>
+  </div>`;
+}
+/* PAYROLL-CONTROL:END */
 
 document.getElementById('pinSubmit').addEventListener('click', submitPin);
 document.getElementById('pinInput').addEventListener('keydown', e=>{
