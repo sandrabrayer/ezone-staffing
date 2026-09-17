@@ -20,34 +20,15 @@ const path = require('node:path');
 const { JSDOM, VirtualConsole } = require('jsdom');
 
 const ROOT = path.join(__dirname, '..');
+const { buildInlinedHtml } = require('./inline-page');
 
 // Inline lib/calc.js into the HTML so jsdom doesn't try to fetch it over the
 // network. Preserves the classic-script load order: calc.js first, then the
 // existing inline <script>. (The collision we're testing for happens exactly
 // when both scripts execute in the same realm's global lexical env, which is
 // the case here.)
-function buildInlinedHtml() {
-  const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8');
-  const calc = fs.readFileSync(path.join(ROOT, 'lib', 'calc.js'), 'utf8');
-  const withCalc = html.replace(
-    /<script src="\/lib\/calc\.js"><\/script>/,
-    `<script>${calc}</script>`,
-  );
-  // The cost engine loads as a second classic script, exactly like calc.js
-  // in the browser. Inlined here so jsdom never reaches for the network.
-  const engineSrc = fs.readFileSync(path.join(ROOT, 'lib', 'cost-engine.js'), 'utf8');
-  const inlined = withCalc.replace(
-    /<script src="\/lib\/cost-engine\.js"><\/script>/,
-    `<script>${engineSrc}</script>`,
-  );
-  if (inlined === withCalc) {
-    throw new Error('expected <script src="/lib/cost-engine.js"></script> in public/index.html');
-  }
-  if (withCalc === html) {
-    throw new Error('expected <script src="/lib/calc.js"></script> in public/index.html');
-  }
-  return inlined;
-}
+// public/index.html with its classic-script libraries inlined — see
+// tests/inline-page.js for why that helper is shared.
 
 function loadPage() {
   const errors = [];

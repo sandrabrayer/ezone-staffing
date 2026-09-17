@@ -85,6 +85,12 @@ app.get('/lib/cost-engine.js', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.sendFile(path.join(__dirname, 'lib', 'cost-engine.js'));
 });
+// The CSV export builders. Same rule again: pure, client-safe projections of
+// data the browser already holds, and no secret.
+app.get('/lib/exports.js', (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache');
+  res.sendFile(path.join(__dirname, 'lib', 'exports.js'));
+});
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });

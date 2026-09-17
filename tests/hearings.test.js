@@ -11,6 +11,7 @@ const path = require('node:path');
 const { JSDOM, VirtualConsole } = require('jsdom');
 
 const ROOT = path.join(__dirname, '..');
+const { buildInlinedHtml } = require('./inline-page');
 const { validateAction, validateHearing, HEARING_RESULT_VALUES } = require('../lib/validate');
 
 const gs = fs.readFileSync(path.join(ROOT, 'apps-script', 'Code.gs'), 'utf8');
@@ -106,25 +107,8 @@ test('Code.gs: all four hearing actions are dispatched, defined, and validated',
 // frontend: labels, badges, and the tab's DOM in jsdom
 // ---------------------------------------------------------------------------
 
-function buildInlinedHtml() {
-  const calcSrc = fs.readFileSync(path.join(ROOT, 'lib', 'calc.js'), 'utf8');
-  const withCalc = html.replace(
-    /<script src="\/lib\/calc\.js"><\/script>/,
-    `<script>${calcSrc}</script>`,
-  );
-  // The cost engine loads as a second classic script, exactly like calc.js
-  // in the browser. Inlined here so jsdom never reaches for the network.
-  const engineSrc = fs.readFileSync(path.join(ROOT, 'lib', 'cost-engine.js'), 'utf8');
-  const inlined = withCalc.replace(
-    /<script src="\/lib\/cost-engine\.js"><\/script>/,
-    `<script>${engineSrc}</script>`,
-  );
-  if (inlined === withCalc) {
-    throw new Error('expected <script src="/lib/cost-engine.js"></script> in public/index.html');
-  }
-  assert.notEqual(withCalc, html, 'expected the calc.js script tag');
-  return inlined;
-}
+// public/index.html with its classic-script libraries inlined — see
+// tests/inline-page.js for why that helper is shared.
 
 function loadPage() {
   const vc = new VirtualConsole();

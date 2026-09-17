@@ -4,20 +4,14 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
 const path = require('node:path');
 const { JSDOM, VirtualConsole } = require('jsdom');
 
 const ROOT = path.join(__dirname, '..');
+const { buildInlinedHtml } = require('./inline-page');
 
-function buildInlinedHtml() {
-  const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8');
-  const calc = fs.readFileSync(path.join(ROOT, 'lib', 'calc.js'), 'utf8');
-  const engine = fs.readFileSync(path.join(ROOT, 'lib', 'cost-engine.js'), 'utf8');
-  return html
-    .replace(/<script src="\/lib\/calc\.js"><\/script>/, `<script>${calc}</script>`)
-    .replace(/<script src="\/lib\/cost-engine\.js"><\/script>/, `<script>${engine}</script>`);
-}
+// public/index.html with its classic-script libraries inlined — see
+// tests/inline-page.js for why that helper is shared.
 
 function loadPage() {
   const errors = [];
