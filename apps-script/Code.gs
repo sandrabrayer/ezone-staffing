@@ -3292,3 +3292,539 @@ function computeGuidesForCoordinators_() {
   guides.sort(function (x, y) { return x.name.localeCompare(y.name); });
   return guides;
 }
+
+/* ============================================================
+   Data integrity report — runDataIntegrityReportNow()
+   ------------------------------------------------------------
+   EDITOR-RUN AND READ-ONLY. It never edits, deletes, renames or
+   reorders a single existing cell. The only write it can make is
+   creating ONE brand-new tab (runDataIntegrityReportToSheetNow),
+   named IntegrityReport_YYYYMMDD — and if that name is taken it
+   picks IntegrityReport_YYYYMMDD_HHmm rather than touching the
+   existing one.
+
+   How to run it: see docs/STAFFING_DATA_INTEGRITY_REPORT.md.
+
+     runDataIntegrityReportNow()          → logs only (Execution log)
+     runDataIntegrityReportToSheetNow()   → logs + writes a NEW tab
+
+   The whole computation is the pure function
+   computeDataIntegrityReport_(data, todayYmd), so it is unit-tested
+   in tests/data-integrity.test.js against fixtures without a sheet.
+
+   Finding codes are ASCII (stored values stay ASCII — Hebrew is
+   display only, and the Hebrew explanations live in the docs).
+   ============================================================ */
+
+// Severity ranking used to sort the findings, worst first.
+const INTEGRITY_SEVERITY_ORDER = { error: 0, warn: 1, info: 2 };
+
+// Columns of the IntegrityReport_YYYYMMDD tab. Written once, to a tab that
+// did not exist a moment earlier — no append-only concern applies.
+const INTEGRITY_REPORT_HEADERS = [
+  'severity', 'code', 'entity', 'entity_id', 'worker_id', 'assignment_id',
+  'house', 'detail',
+];
+
+// Names that look like smoke-test / demo leftovers rather than real people.
+// Matched case-insensitively against the normalized name.
+const INTEGRITY_SMOKE_PATTERNS = [
+  'smoke', 'test', 'dummy', 'example', 'foo', 'bar', 'qa ',
+  'בדיקה', 'בדיקת', 'דמו', 'לבדיקה', 'טסט',
+];
+
+// Normalize a display name for duplicate detection and for the exact-match
+// sync risk check. Consumers (coordinators / therapists) match by EXACT
+// worker name, so anything this normalization changes is a latent sync
+// break: trim, collapse internal whitespace, drop bidi control marks, and
+// fold the Hebrew gershayim / geresh onto their ASCII quotes.
+function integrityNormalizeName_(name) {
+  return String(name === null || name === undefined ? '' : name)
+    .replace(/[‎‏‪-‮⁦-⁩﻿]/g, '')
+    .replace(/״/g, '"')
+    .replace(/׳/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+// Digits-only view of a phone for duplicate detection (a cell that Sheets
+// coerced to a number already had its leading zero restored on read).
+function integrityNormalizePhone_(phone) {
+  return String(phone === null || phone === undefined ? '' : phone).replace(/\D/g, '');
+}
+
+// The cost fields that must carry a positive number for the assignment's
+// employment type. per_session is special-cased in the check below because
+// ANY ONE of its four rate/count products is enough.
+const INTEGRITY_REQUIRED_RATE_FIELDS = {
+  full_time: ['salary'],
+  part_time: ['salary'],
+  hourly: ['hourlyRate'],
+  fixed_retainer: ['retainerAmount'],
+};
+
+function integrityFinding_(severity, code, entity, entityId, detail, extra) {
+  const f = {
+    severity: severity,
+    code: code,
+    entity: entity,
+    entityId: String(entityId || ''),
+    workerId: '',
+    assignmentId: '',
+    house: '',
+    detail: String(detail || ''),
+  };
+  if (extra) {
+    if (extra.workerId) f.workerId = String(extra.workerId);
+    if (extra.assignmentId) f.assignmentId = String(extra.assignmentId);
+    if (extra.house) f.house = String(extra.house);
+  }
+  return f;
+}
+
+// The whole report, as a pure function of the data. `data` is the shape
+// readAllForIntegrity_() returns; `todayYmd` is 'YYYY-MM-DD'.
+function computeDataIntegrityReport_(data, todayYmd) {
+  const d = data || {};
+  const workers = d.workers || [];
+  const assignments = d.assignments || [];
+  const absences = d.absences || [];
+  const coverages = d.coverages || [];
+  const archive = d.archiveV3 || [];
+  const actuals = d.monthlyActuals || [];
+  const budgets = d.budgets || [];
+  const today = String(todayYmd || '');
+  const findings = [];
+
+  const workerById = {};
+  workers.forEach(function (w) { if (w && w.id) workerById[w.id] = w; });
+
+  // ---- 1/2. duplicate workers by normalized name and by phone ----
+  const byName = {};
+  const byPhone = {};
+  workers.forEach(function (w) {
+    if (!w) return;
+    const n = integrityNormalizeName_(w.name);
+    if (n) (byName[n] = byName[n] || []).push(w);
+    const p = integrityNormalizePhone_(w.phone);
+    if (p) (byPhone[p] = byPhone[p] || []).push(w);
+  });
+  Object.keys(byName).forEach(function (n) {
+    const group = byName[n];
+    if (group.length < 2) return;
+    group.forEach(function (w) {
+      findings.push(integrityFinding_(
+        'error', 'DUP_WORKER_NAME', 'worker', w.id,
+        'same normalized name as ' + (group.length - 1) + ' other worker row(s): ids ' +
+          group.map(function (g) { return g.id; }).join(', '),
+        { workerId: w.id }));
+    });
+  });
+  Object.keys(byPhone).forEach(function (p) {
+    const group = byPhone[p];
+    if (group.length < 2) return;
+    group.forEach(function (w) {
+      findings.push(integrityFinding_(
+        'error', 'DUP_WORKER_PHONE', 'worker', w.id,
+        'phone shared with ' + (group.length - 1) + ' other worker row(s): ids ' +
+          group.map(function (g) { return g.id; }).join(', '),
+        { workerId: w.id }));
+    });
+  });
+
+  // ---- 3. duplicate assignments (same worker at the same house twice) ----
+  const byWorkerHouse = {};
+  assignments.forEach(function (a) {
+    if (!a) return;
+    const k = String(a.workerId || '') + '|' + String(a.house || '');
+    (byWorkerHouse[k] = byWorkerHouse[k] || []).push(a);
+  });
+  Object.keys(byWorkerHouse).forEach(function (k) {
+    const group = byWorkerHouse[k];
+    if (group.length < 2) return;
+    group.forEach(function (a) {
+      findings.push(integrityFinding_(
+        'error', 'DUP_ASSIGNMENT', 'assignment', a.id,
+        'worker has ' + group.length + ' assignment rows at the same house: ids ' +
+          group.map(function (g) { return g.id; }).join(', '),
+        { workerId: a.workerId, assignmentId: a.id, house: a.house }));
+    });
+  });
+
+  // ---- 4. workers with no assignment at all (and none archived either) ----
+  const workersWithAssignment = {};
+  assignments.forEach(function (a) { if (a && a.workerId) workersWithAssignment[a.workerId] = true; });
+  const workersWithArchive = {};
+  archive.forEach(function (a) { if (a && a.workerId) workersWithArchive[a.workerId] = true; });
+  workers.forEach(function (w) {
+    if (!w || !w.id) return;
+    if (workersWithAssignment[w.id]) return;
+    const archivedOnly = !!workersWithArchive[w.id];
+    findings.push(integrityFinding_(
+      archivedOnly ? 'info' : 'warn',
+      'WORKER_NO_ASSIGNMENT', 'worker', w.id,
+      archivedOnly
+        ? 'no current assignment; only archived placements remain'
+        : 'no assignment row and no archived placement — the worker costs nothing and appears nowhere',
+      { workerId: w.id }));
+  });
+
+  // ---- 5. orphan assignments (workerId missing from the workers tab) ----
+  assignments.forEach(function (a) {
+    if (!a) return;
+    if (a.workerId && workerById[a.workerId]) return;
+    findings.push(integrityFinding_(
+      'error', 'ORPHAN_ASSIGNMENT', 'assignment', a.id,
+      'worker_id "' + String(a.workerId || '') + '" has no row in the workers tab — silently dropped from every feed',
+      { workerId: a.workerId, assignmentId: a.id, house: a.house }));
+  });
+
+  // ---- 6/7. start dates: missing, and future dates counted as active ----
+  workers.forEach(function (w) {
+    if (!w || !w.id) return;
+    if (!workersWithAssignment[w.id]) return;   // no placement → nothing accrues
+    const sd = String(w.startDate || '').trim();
+    if (!sd) {
+      findings.push(integrityFinding_(
+        'warn', 'MISSING_START_DATE', 'worker', w.id,
+        'no start date; every month-aware rule that needs one falls back to "always employed"',
+        { workerId: w.id }));
+      return;
+    }
+    if (today && sd > today) {
+      findings.push(integrityFinding_(
+        'error', 'FUTURE_START_ACTIVE', 'worker', w.id,
+        'start date ' + sd + ' is in the future, yet the worker has live assignments that are billed today',
+        { workerId: w.id }));
+    }
+  });
+
+  // ---- 8. terminated / archived rows still visible as active ----
+  const archivedAssignmentIds = {};
+  archive.forEach(function (a) {
+    if (a && a.assignmentId) archivedAssignmentIds[a.assignmentId] = a;
+  });
+  assignments.forEach(function (a) {
+    if (!a) return;
+    const arc = archivedAssignmentIds[a.id];
+    if (!arc) return;
+    findings.push(integrityFinding_(
+      'error', 'ARCHIVED_STILL_ACTIVE', 'assignment', a.id,
+      'assignment is archived (termination ' + String(arc.terminationDate || '') +
+        ') but the live assignments tab still carries the row — cost is counted twice',
+      { workerId: a.workerId, assignmentId: a.id, house: a.house }));
+  });
+
+  // ---- 9. invalid house ids ----
+  function checkHouse(entity, id, house, extra) {
+    if (isHouse(house)) return;
+    findings.push(integrityFinding_(
+      'error', 'INVALID_HOUSE', entity, id,
+      'house "' + String(house || '') + '" is not one of ' + HOUSE_IDS.join(' / '),
+      extra));
+  }
+  assignments.forEach(function (a) {
+    if (a) checkHouse('assignment', a.id, a.house, { workerId: a.workerId, assignmentId: a.id, house: a.house });
+  });
+  absences.forEach(function (x) {
+    if (x) checkHouse('absence', x.id, x.house, { workerId: x.workerId, house: x.house });
+  });
+  coverages.forEach(function (c) {
+    if (!c) return;
+    checkHouse('coverage', c.id, c.coveringHouse, { workerId: c.coveringWorkerId, house: c.coveringHouse });
+    checkHouse('coverage', c.id, c.receivingHouse, { workerId: c.coveringWorkerId, house: c.receivingHouse });
+  });
+  budgets.forEach(function (b) {
+    if (b) checkHouse('budget', b.id, b.house, { house: b.house });
+  });
+
+  // ---- 10. missing / zero / negative rates ----
+  assignments.forEach(function (a) {
+    if (!a) return;
+    const extra = { workerId: a.workerId, assignmentId: a.id, house: a.house };
+    const type = String(a.employmentType || '');
+    if (EMPLOYMENT_TYPES.indexOf(type) < 0) {
+      findings.push(integrityFinding_(
+        'error', 'INVALID_EMPLOYMENT_TYPE', 'assignment', a.id,
+        'employment_type "' + type + '" is not one of ' + EMPLOYMENT_TYPES.join(' / '), extra));
+      return;
+    }
+    // Negative money anywhere is always wrong.
+    ALL_COST_FIELDS.concat(['allowance']).forEach(function (f) {
+      const key = f === 'hourlyRate' ? 'hourlyRate' : f;
+      const v = Number(a[key]);
+      if (isFinite(v) && v < 0) {
+        findings.push(integrityFinding_(
+          'error', 'NEGATIVE_RATE', 'assignment', a.id,
+          key + ' is negative (' + v + ')', extra));
+      }
+    });
+    if (type === 'per_session') {
+      const products = Math.max(0, Number(a.rateIndividual) || 0) * Math.max(0, Number(a.sessionsIndividual) || 0)
+        + Math.max(0, Number(a.rateGroup) || 0) * Math.max(0, Number(a.sessionsGroup) || 0)
+        + Math.max(0, Number(a.rateExternal) || 0) * Math.max(0, Number(a.externalPatients) || 0)
+        + Math.max(0, Number(a.sessionRate) || 0) * Math.max(0, Number(a.estSessions) || 0);
+      if (products <= 0) {
+        findings.push(integrityFinding_(
+          'warn', 'MISSING_RATE', 'assignment', a.id,
+          'per_session placement has no rate x count on any of the four session products — it costs 0 every month', extra));
+      }
+      return;
+    }
+    (INTEGRITY_REQUIRED_RATE_FIELDS[type] || []).forEach(function (f) {
+      const v = Number(a[f]) || 0;
+      if (v <= 0) {
+        findings.push(integrityFinding_(
+          'warn', 'MISSING_RATE', 'assignment', a.id,
+          f + ' is missing or zero for a ' + type + ' placement — it costs 0 every month', extra));
+      }
+    });
+    if (type === 'part_time') {
+      const pct = Number(a.pct) || 0;
+      if (pct <= 0 || pct > 100) {
+        findings.push(integrityFinding_(
+          'warn', 'MISSING_RATE', 'assignment', a.id,
+          'pct is ' + pct + ' for a part_time placement — expected 1..100', extra));
+      }
+    }
+    if (type === 'hourly') {
+      const hours = Number(a.estHours) || 0;
+      if (hours <= 0) {
+        findings.push(integrityFinding_(
+          'warn', 'MISSING_RATE', 'assignment', a.id,
+          'est_hours is missing or zero for an hourly placement — with no monthly actuals it costs 0', extra));
+      }
+    }
+  });
+
+  // ---- 11. smoke / test records ----
+  workers.forEach(function (w) {
+    if (!w) return;
+    const n = integrityNormalizeName_(w.name);
+    if (!n) {
+      findings.push(integrityFinding_(
+        'error', 'BLANK_NAME', 'worker', w.id,
+        'worker has no name — skipped by every feed', { workerId: w.id }));
+      return;
+    }
+    for (let i = 0; i < INTEGRITY_SMOKE_PATTERNS.length; i++) {
+      if (n.indexOf(INTEGRITY_SMOKE_PATTERNS[i]) >= 0) {
+        findings.push(integrityFinding_(
+          'warn', 'SMOKE_RECORD', 'worker', w.id,
+          'name looks like a test / demo leftover: "' + String(w.name) + '"', { workerId: w.id }));
+        return;
+      }
+    }
+  });
+
+  // ---- 12. names that would fail an exact-match sync ----
+  workers.forEach(function (w) {
+    if (!w) return;
+    const raw = String(w.name === null || w.name === undefined ? '' : w.name);
+    if (!raw.trim()) return;                       // already reported as BLANK_NAME
+    const reasons = [];
+    if (raw !== raw.trim()) reasons.push('leading/trailing whitespace');
+    if (/\s\s/.test(raw)) reasons.push('double space');
+    if (/[‎‏‪-‮⁦-⁩﻿]/.test(raw)) reasons.push('bidi control character');
+    if (/[׳״]/.test(raw)) reasons.push('Hebrew geresh/gershayim instead of an ASCII quote');
+    if (/[‘’“”]/.test(raw)) reasons.push('curly quote');
+    if (!reasons.length) return;
+    findings.push(integrityFinding_(
+      'warn', 'NAME_SYNC_RISK', 'worker', w.id,
+      'exact-name sync to the coordinators / therapists apps will not match: ' + reasons.join(', '),
+      { workerId: w.id }));
+  });
+
+  // ---- extras: orphan links that silently drop cost or history ----
+  absences.forEach(function (x) {
+    if (!x) return;
+    if (x.workerId && !workerById[x.workerId]) {
+      findings.push(integrityFinding_(
+        'warn', 'ORPHAN_ABSENCE', 'absence', x.id,
+        'worker_id "' + x.workerId + '" has no row in the workers tab',
+        { workerId: x.workerId, house: x.house }));
+    }
+    if (!x.workerId) {
+      findings.push(integrityFinding_(
+        'info', 'UNSTAFFED_POSITION', 'absence', x.id,
+        'absence with no worker — an unstaffed position, not an employee absence',
+        { house: x.house }));
+    }
+  });
+  const absenceById = {};
+  absences.forEach(function (x) { if (x && x.id) absenceById[x.id] = x; });
+  coverages.forEach(function (c) {
+    if (!c) return;
+    if (c.coveringWorkerId && !workerById[c.coveringWorkerId]) {
+      findings.push(integrityFinding_(
+        'warn', 'ORPHAN_COVERAGE', 'coverage', c.id,
+        'covering_worker_id "' + c.coveringWorkerId + '" has no row in the workers tab',
+        { workerId: c.coveringWorkerId, house: c.receivingHouse }));
+    }
+    if (c.absenceId && !absenceById[c.absenceId]) {
+      findings.push(integrityFinding_(
+        'info', 'DANGLING_COVERAGE_LINK', 'coverage', c.id,
+        'absence_id "' + c.absenceId + '" no longer exists — the coverage is treated as unlinked',
+        { workerId: c.coveringWorkerId, house: c.receivingHouse }));
+    }
+  });
+
+  // Overlapping absences for the same (worker, house) — double-counted leave.
+  const absByWorkerHouse = {};
+  absences.forEach(function (x) {
+    if (!x || !x.workerId) return;
+    const k = x.workerId + '|' + String(x.house || '');
+    (absByWorkerHouse[k] = absByWorkerHouse[k] || []).push(x);
+  });
+  Object.keys(absByWorkerHouse).forEach(function (k) {
+    const list = absByWorkerHouse[k];
+    for (let i = 0; i < list.length; i++) {
+      for (let j = i + 1; j < list.length; j++) {
+        const a = list[i], b = list[j];
+        if (!a.startDate || !a.endDate || !b.startDate || !b.endDate) continue;
+        if (!datesOverlap(a.startDate, a.endDate, b.startDate, b.endDate)) continue;
+        findings.push(integrityFinding_(
+          'warn', 'ABSENCE_OVERLAP', 'absence', a.id,
+          'overlaps absence ' + b.id + ' for the same worker and house (' +
+            a.startDate + '..' + a.endDate + ' vs ' + b.startDate + '..' + b.endDate + ')',
+          { workerId: a.workerId, house: a.house }));
+      }
+    }
+  });
+
+  // Monthly actuals pointing at an assignment that no longer exists.
+  const assignmentById = {};
+  assignments.forEach(function (a) { if (a && a.id) assignmentById[a.id] = a; });
+  actuals.forEach(function (r) {
+    if (!r) return;
+    if (r.assignmentId && assignmentById[r.assignmentId]) return;
+    findings.push(integrityFinding_(
+      'info', 'ORPHAN_ACTUALS', 'monthly_actuals', r.id,
+      'assignment_id "' + String(r.assignmentId || '') + '" is not in the assignments tab (terminated or deleted)',
+      { assignmentId: r.assignmentId }));
+  });
+
+  function severityRank(sev) {
+    // NOTE: `|| 9` would be wrong here — 'error' ranks 0, which is falsy.
+    const r = INTEGRITY_SEVERITY_ORDER[sev];
+    return r === undefined ? 9 : r;
+  }
+  findings.sort(function (x, y) {
+    const s = severityRank(x.severity) - severityRank(y.severity);
+    if (s !== 0) return s;
+    if (x.code !== y.code) return x.code < y.code ? -1 : 1;
+    return x.entityId < y.entityId ? -1 : (x.entityId > y.entityId ? 1 : 0);
+  });
+
+  const byCode = {};
+  const bySeverity = { error: 0, warn: 0, info: 0 };
+  findings.forEach(function (f) {
+    byCode[f.code] = (byCode[f.code] || 0) + 1;
+    bySeverity[f.severity] = (bySeverity[f.severity] || 0) + 1;
+  });
+
+  return {
+    today: today,
+    counts: {
+      workers: workers.length,
+      assignments: assignments.length,
+      absences: absences.length,
+      coverages: coverages.length,
+      archiveV3: archive.length,
+      monthlyActuals: actuals.length,
+      budgets: budgets.length,
+    },
+    findings: findings,
+    bySeverity: bySeverity,
+    byCode: byCode,
+  };
+}
+
+// Absences, mapped exactly like readAbsencesSafe but WITHOUT its lazy
+// status write-back. readAbsencesSafe corrects a stale 'active' status to
+// 'ended' in the sheet as a side effect of reading; the integrity report
+// must not write anything at all, so it uses this reader instead. Status is
+// derived in memory by the same rule.
+function readAbsencesReadOnly_() {
+  const sh = sheetByNameOrNull(ABSENCES_TAB);
+  if (!sh) return [];
+  const values = sh.getDataRange().getValues();
+  if (values.length < 2) return [];
+  const today = todayLocal();
+  const out = [];
+  for (let i = 1; i < values.length; i++) {
+    const r = values[i];
+    if (String(r[0] || '').trim() === '') continue;
+    const startDate = formatDateCell(r[3]);
+    const endDate = formatDateCell(r[4]);
+    let status = String(r[8] || '').trim() || (active(startDate, endDate, today) ? 'active' : 'ended');
+    if (status === 'active' && endDate && endDate < today) status = 'ended';
+    out.push({
+      id: String(r[0]),
+      workerId: String(r[1] || ''),
+      house: String(r[2] || ''),
+      startDate: startDate,
+      endDate: endDate,
+      reasonType: String(r[5] || ''),
+      reasonDetail: String(r[6] || ''),
+      notes: String(r[7] || ''),
+      status: status,
+      createdAt: cellToIso(r[9]),
+    });
+  }
+  return out;
+}
+
+// Read every tab the report looks at. READ ONLY — the same *Safe readers
+// doGet uses, except for absences: readAbsencesSafe writes back corrected
+// statuses, so readAbsencesReadOnly_ stands in for it here.
+function readAllForIntegrity_() {
+  return {
+    workers: readWorkersSafe(),
+    assignments: readAssignmentsSafe(),
+    absences: readAbsencesReadOnly_(),
+    coverages: readCoveragesSafe(),
+    archiveV3: readArchiveV3Safe(),
+    monthlyActuals: readMonthlyActualsSafe(),
+    budgets: readBudgetsSafe(),
+  };
+}
+
+// One line per finding in the Execution log, plus a summary. NO WRITES.
+function runDataIntegrityReportNow() {
+  const report = computeDataIntegrityReport_(readAllForIntegrity_(), todayLocal());
+  Logger.log('E-ZONE staffing data integrity report — ' + report.today);
+  Logger.log('rows: ' + JSON.stringify(report.counts));
+  Logger.log('findings by severity: ' + JSON.stringify(report.bySeverity));
+  Logger.log('findings by code: ' + JSON.stringify(report.byCode));
+  report.findings.forEach(function (f) {
+    Logger.log([f.severity, f.code, f.entity, f.entityId, f.house, f.detail].join(' | '));
+  });
+  Logger.log('READ-ONLY: nothing was written. Run runDataIntegrityReportToSheetNow() to also create a new IntegrityReport_ tab.');
+  return report;
+}
+
+// Same report, plus ONE brand-new tab. Never touches an existing tab: if
+// today's name is taken it adds the time rather than overwriting.
+function runDataIntegrityReportToSheetNow() {
+  const report = runDataIntegrityReportNow();
+  const book = ss();
+  const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyyMMdd');
+  let name = 'IntegrityReport_' + stamp;
+  if (book.getSheetByName(name)) {
+    name = name + '_' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'HHmm');
+  }
+  if (book.getSheetByName(name)) {
+    Logger.log('A tab named ' + name + ' already exists — refusing to overwrite it. Nothing was written.');
+    return report;
+  }
+  const sh = book.insertSheet(name);
+  const rows = [INTEGRITY_REPORT_HEADERS].concat(report.findings.map(function (f) {
+    return [f.severity, f.code, f.entity, f.entityId, f.workerId, f.assignmentId, f.house, f.detail];
+  }));
+  sh.getRange(1, 1, rows.length, INTEGRITY_REPORT_HEADERS.length).setValues(rows);
+  sh.setFrozenRows(1);
+  Logger.log('Wrote ' + report.findings.length + ' finding(s) to the NEW tab ' + name + '. No existing tab was touched.');
+  return report;
+}
