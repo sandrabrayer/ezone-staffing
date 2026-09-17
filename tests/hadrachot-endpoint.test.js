@@ -99,8 +99,16 @@ test('computeGuidesForHadrachot_ emits ONLY name/house/role/active/startDate', (
   const guides = plain(ctx.computeGuidesForHadrachot_());
   assert.ok(guides.length > 0, 'fixture must produce entries');
   for (const g of guides) {
-    assert.deepStrictEqual(Object.keys(g).sort(), ['active', 'house', 'name', 'role', 'startDate'],
-      'every entry carries exactly the five whitelisted fields');
+    // THE FROZEN KEY SET. Fields may be ADDED; none may be removed or
+    // renamed. Phase 3 added workerId + assignmentId — and because THIS feed
+    // is one entry per ASSIGNMENT, both are scalars here, unlike the
+    // per-worker coordinators and therapists feeds.
+    assert.deepStrictEqual(Object.keys(g).sort(),
+      ['active', 'assignmentId', 'house', 'name', 'role', 'startDate', 'workerId'],
+      'every entry carries exactly the whitelisted fields');
+    assert.strictEqual(typeof g.workerId, 'string');
+    assert.strictEqual(typeof g.assignmentId, 'string');
+    assert.ok(g.workerId && g.assignmentId, 'neither id is ever blank');
   }
 });
 

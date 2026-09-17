@@ -634,6 +634,18 @@ tbody tr:hover{
   font-size:11px;font-weight:700;color:var(--muted);
   margin-inline-start:6px;
 }
+/* Sync-status dots. The question this panel answers is binary enough that a
+   colour is the right amount of signal: green pulled recently, amber has not
+   pulled in a while, grey has never pulled at all. */
+.sync-dot{
+  display:inline-block;width:9px;height:9px;border-radius:50%;
+  margin-inline-end:6px;vertical-align:middle;
+}
+.sync-dot.sync-ok{background:var(--ok,#2e7d32)}
+.sync-dot.sync-stale{background:var(--warning)}
+.sync-dot.sync-never{background:var(--line-strong,#bbb)}
+tr.sync-stale td{background:color-mix(in srgb, var(--warning) 12%, transparent)}
+tr.sync-never td{color:var(--muted)}
 /* Absence status pills. Three states, derived from the dates: a planned
    absence is 'future' and must be visible, which before Phase 2 it was not. */
 .abs-status-pill{
@@ -1592,6 +1604,9 @@ let BUDGETS = [];
 // Hearing events (שימועים). Loaded with the main doGet payload; mutations
 // patch the local array in place like every other entity.
 let HEARINGS = [];
+// Per-consumer feed sync status, from the feed_log tab. One row per consumer:
+// when it last pulled and how much it got. Empty until something pulls.
+let FEED_LOG = [];
 // First-hadracha completions from the hadrachot app, via the server proxy.
 // null = no usable data (unconfigured / unreachable / unrecognized payload)
 // → the dashboard renders NO banner, never a false alert. An array (possibly
@@ -1663,6 +1678,7 @@ async function loadData(){
   MONTHLY_ACTUALS = Array.isArray(d.monthlyActuals) ? d.monthlyActuals : [];
   BUDGETS = Array.isArray(d.budgets) ? d.budgets : [];
   HEARINGS = Array.isArray(d.hearings) ? d.hearings : [];
+  FEED_LOG = Array.isArray(d.feedLog) ? d.feedLog : [];
 }
 
 // First-hadracha status — fetched THROUGH the server proxy only
@@ -1955,6 +1971,84 @@ function costSplitSub(t){
   if (t.estimated) parts.push(`אומדן ${fmt(t.estimated)}`);
   if (t.missingData) parts.push(`${t.missingData} שיבוצים ללא נתונים מלאים`);
   return parts.join(' · ');
+}
+
+// ---------- sync status panel ----------
+// Which consumers pull from staffing, and how long a gap is worth worrying
+// about. These are DISPLAY thresholds only — nothing acts on them.
+//   coordinators: pulls on every house open, so a whole day of silence is
+//                 already odd.
+//   therapists:   pulls on every getData, same reasoning.
+//   hadrachot:    pulled far less often, so a week is the sensible line.
+const FEED_CONSUMER_META = [
+  { key: 'coordinators', label: 'רכזים', what: 'מצבת מדריכים', staleHours: 24 },
+  { key: 'therapists', label: 'מטפלים', what: 'מצבת מטפלים', staleHours: 24 },
+  { key: 'hadrachot', label: 'הדרכות', what: 'מצבת להדרכה', staleHours: 24 * 7 },
+];
+
+// Hours since an ISO timestamp, or null when there is no usable timestamp.
+function hoursSince(iso){
+  const t = Date.parse(String(iso || ''));
+  if (!Number.isFinite(t)) return null;
+  return (Date.now() - t) / 3600000;
+}
+
+// A human gap: "לפני 3 שעות" / "לפני 2 ימים" / "לפני רגע".
+function agoText(iso){
+  const h = hoursSince(iso);
+  if (h === null) return 'לא סונכרן';
+  if (h < 1) return 'לפני פחות משעה';
+  if (h < 24) return 'לפני ' + Math.floor(h) + ' שעות';
+  const d = Math.floor(h / 24);
+  return d === 1 ? 'לפני יום' : 'לפני ' + d + ' ימים';
+}
+
+// The «סטטוס סנכרון» panel. Answers the question staffing could not answer
+// before: has each consumer actually pulled, and how recently. A consumer
+// whose secret is wrong, or whose sync silently stopped, used to look exactly
+// like one that was up to date.
+function syncStatusSection(){
+  const byKey = {};
+  FEED_LOG.forEach(r => { if (r && r.consumer) byKey[r.consumer] = r; });
+
+  const rows = FEED_CONSUMER_META.map(meta => {
+    const r = byKey[meta.key];
+    const h = r ? hoursSince(r.lastServedAt) : null;
+    let cls, status;
+    if (!r || h === null){
+      cls = 'sync-never'; status = 'לא סונכרן מעולם';
+    } else if (h > meta.staleHours){
+      cls = 'sync-stale'; status = 'לא סונכרן זמן רב';
+    } else {
+      cls = 'sync-ok'; status = 'מסונכרן';
+    }
+    return `
+    <tr class="${cls}">
+      <td>${escapeHtml(meta.label)}</td>
+      <td>${escapeHtml(meta.what)}</td>
+      <td>${escapeHtml(r ? agoText(r.lastServedAt) : '—')}</td>
+      <td class="money">${r ? fmt(r.lastRowCount) : '—'}</td>
+      <td><span class="sync-dot ${cls}"></span>${escapeHtml(status)}</td>
+    </tr>`;
+  }).join('');
+
+  return `
+  <div class="section">
+    <div class="section-head">
+      <h2>סטטוס סנכרון</h2>
+    </div>
+    <div class="tablecard">
+      <div class="section-note">האפליקציות האחרות שולפות את המצבת מכאן. השורה מציגה מתי כל אפליקציה שלפה בפעם האחרונה וכמה רשומות קיבלה. אם אפליקציה לא סונכרנה זמן רב — יש לבדוק את המפתח שלה בהגדרות.</div>
+      <div class="table-scroll">
+        <table class="budget-table">
+          <thead><tr>
+            <th>אפליקציה</th><th>מה נשלף</th><th>סנכרון אחרון</th><th>רשומות</th><th>סטטוס</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>
+  </div>`;
 }
 
 // ---------- budget view helpers ----------
@@ -3762,6 +3856,8 @@ function centralView(){
   </div>
 
   ${budgetSummarySection()}
+
+  ${syncStatusSection()}
   </div>`;
 }
 

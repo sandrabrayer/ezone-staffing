@@ -142,10 +142,21 @@ test('computeTherapistsFeed_ emits ONLY name/active/houses/startDate', () => {
   const therapists = feed(ctx);
   assert.ok(therapists.length > 0, 'fixture must produce entries');
   for (const t of therapists) {
-    assert.deepStrictEqual(Object.keys(t).sort(), ['active', 'houses', 'name', 'startDate'],
-      'every entry carries exactly the four whitelisted fields');
+    // THE FROZEN KEY SET. Fields may be ADDED; none may be removed or
+    // renamed. Phase 3 added workerId + assignmentIds, so this pin moved
+    // deliberately — which is what pinning it is for.
+    assert.deepStrictEqual(Object.keys(t).sort(),
+      ['active', 'assignmentIds', 'houses', 'name', 'startDate', 'workerId'],
+      'every entry carries exactly the whitelisted fields');
     assert.strictEqual(typeof t.active, 'boolean');
     assert.ok(Array.isArray(t.houses));
+    assert.strictEqual(typeof t.name, 'string');
+    assert.strictEqual(typeof t.startDate, 'string');
+    assert.strictEqual(typeof t.workerId, 'string');
+    assert.ok(t.workerId, 'workerId is never blank');
+    assert.ok(Array.isArray(t.assignmentIds));
+    assert.deepStrictEqual(t.assignmentIds, t.assignmentIds.slice().sort());
+    assert.ok(t.assignmentIds.length, 'a therapist in the feed has at least one placement');
   }
 });
 
@@ -153,9 +164,12 @@ test('salary and every other stripped field is ABSENT from the feed', () => {
   const ctx = loadCtx();
   seedReaders(ctx);
   const flat = JSON.stringify(feed(ctx));
+  // NOTE: `workerId` and `assignmentIds` left this list in Phase 3 — now
+  // published on purpose, additively. Everything financial or private stays
+  // forbidden, and `"id"` stays forbidden: the raw row id is not contracted.
   for (const bad of ['salary', 'hourlyRate', 'sessionRate', 'estSessions', 'retainerAmount',
     'allowance', 'pct', 'rateIndividual', 'rateGroup', 'rateExternal', 'employmentType',
-    'notes', 'shift_commitment', 'roleDetail', 'role_detail', 'gmach', 'workerId', '"id"']) {
+    'notes', 'shift_commitment', 'roleDetail', 'role_detail', 'gmach', '"id"']) {
     assert.ok(!flat.includes(bad), `field "${bad}" must never appear in the feed`);
   }
   // The fixture's financial/private VALUES must not leak either.
