@@ -618,6 +618,22 @@ tbody tr:hover{
   background:var(--warning);color:#1a1200;
   vertical-align:middle;margin-inline-start:6px;
 }
+/* Missing-data badge: a required rate or date is absent, so the number
+   shown is short. Deliberately louder than the estimate badge. */
+.miss-badge{
+  display:inline-block;
+  font-size:10.5px;font-weight:700;
+  padding:1px 7px;border-radius:999px;
+  background:var(--danger,#c62828);color:#fff;
+  vertical-align:middle;margin-inline-start:6px;
+}
+/* The selected month, pinned next to a total so no figure on the page is
+   ambiguous about which month it belongs to. */
+.month-tag{
+  display:inline-block;
+  font-size:11px;font-weight:700;color:var(--muted);
+  margin-inline-start:6px;
+}
 /* Small note showing the actual quantity used when a cost IS from actuals. */
 .actual-note{
   display:inline-block;
@@ -1433,6 +1449,7 @@ tbody tr:hover{
 <div class="toast" id="toast"></div>
 
 <script src="/lib/calc.js"></script>
+<script src="/lib/cost-engine.js"></script>
 <script>
 /* ============================================================
    E-ZONE — ניהול כוח אדם (גרסת ענן, v3)
@@ -1502,24 +1519,16 @@ const TOKEN_KEY = 'ezone_staff_token_v1';
 // new calc.js export.
 const {
   assignmentCategory: calcAssignmentCategory,
-  assignmentCost: calcAssignmentCost,
   perSessionCost: calcPerSessionCost,
   isOnLeave: calcIsOnLeave,
   isFinalSettlement: calcIsFinalSettlement,
   filterGmachFinished: calcFilterGmachFinished,
   gmachFinishedRows: calcGmachFinishedRows,
   assignmentsByHouse: calcAssignmentsByHouse,
-  houseAssignmentsCost: calcHouseAssignmentsCost,
   splitByCategory: calcSplitByCategory,
   currentMonth: calcCurrentMonth,
   indexActuals: calcIndexActuals,
   lookupActual: calcLookupActual,
-  monthlyAssignmentCost: calcMonthlyAssignmentCost,
-  houseMonthlyTotal: calcHouseMonthlyTotal,
-  networkMonthlyTotal: calcNetworkMonthlyTotal,
-  houseMonthlyInstructorsCost: calcHouseMonthlyInstructorsCost,
-  budgetForHouse: calcBudgetForHouse,
-  instructorsBudgetForHouse: calcInstructorsBudgetForHouse,
   budgetWarning: calcBudgetWarning,
   budgetVariance: calcBudgetVariance,
   todayStr: calcTodayStr,
@@ -1528,20 +1537,22 @@ const {
   openAbsences: calcOpenAbsences,
   coveragesForAbsence: calcCoveragesForAbsence,
   isCoverageActive: calcIsCoverageActive,
-  activeCoveragesByHouse: calcActiveCoveragesByHouse,
-  coverageExtra: calcCoverageExtra,
-  pendingTerminations: calcPendingTerminations,
-  pendingHouseCost: calcPendingHouseCost,
-  houseTotal: calcHouseTotal,
-  networkTotal: calcNetworkTotal,
   assignmentsForWorker: calcAssignmentsForWorker,
-  workerTotalCost: calcWorkerTotalCost,
   activeAbsenceForWorker: calcActiveAbsenceForWorker,
   networkAbsenceCoverageRows: calcNetworkAbsenceCoverageRows,
   searchWorkers: calcSearchWorkers,
   parseHadrachotStatus: calcParseHadrachotStatus,
   firstHadrachaFlags: calcFirstHadrachaFlags,
 } = window.EZONE_CALC;
+
+// The monthly cost engine (lib/cost-engine.js). Every number the cost views
+// show comes from ONE call to costForMonth() per render — see COST below.
+// Nothing in this file multiplies a rate by a count any more.
+const {
+  costForMonth: engineCostForMonth,
+  lineForAssignmentId: engineLineFor,
+  RULES_TO_CONFIRM: ENGINE_RULES_TO_CONFIRM,
+} = window.CostEngine;
 
 // Set by the dashboard search when a result is clicked → go(house) navigates,
 // then render() flashes the matching roster row. Cleared after it fires.
@@ -1573,6 +1584,11 @@ let view = 'central';
 // can look up a row by assignmentId+month without recomputing.
 let selectedMonth = '';
 let ACTUALS_INDEX = Object.create(null);
+// The cost report for `selectedMonth`, rebuilt once per render() by
+// rebuildCostReport(). Every total, every roster cost cell and every budget
+// line reads from THIS object, so a single month drives all of them and they
+// can never disagree with each other.
+let COST = null;
 // Per-house roster search term. Filters the roster tables (שכירים +
 // פרילנסרים) by worker name within a single house view. Lives in module
 // state — not the DOM — so a re-render (e.g. after an edit) keeps the
@@ -1760,10 +1776,6 @@ function rosterAt(houseId){
 function rosterCount(houseId){ return rosterAt(houseId).length; }
 function totalWorkers(){ return WORKERS.length; }
 function totalAssignments(){ return ASSIGNMENTS.length; }
-function totalCost(today){
-  const houseIds = HOUSES.map(h => h.id);
-  return calcNetworkTotal(ASSIGNMENTS, COVERAGES, ABSENCES, ARCHIVE_V3, houseIds, today);
-}
 
 // ---------- month view helpers ----------
 
@@ -1803,40 +1815,112 @@ function onMonthChange(value){
   render();
 }
 
-// Small "estimate" badge shown on an hourly / per_session cost when no
-// actuals were recorded for the selected month, so the number shown is the
-// one-time estimate rather than the real month's cost.
+// Rebuild the cost report for the selected month. Called once per render,
+// BEFORE any view reads a number.
+function rebuildCostReport(){
+  COST = engineCostForMonth(
+    WORKERS, ASSIGNMENTS, ABSENCES, COVERAGES, BUDGETS, ensureMonth(),
+    { archive: ARCHIVE_V3, monthlyActuals: MONTHLY_ACTUALS }
+  );
+  return COST;
+}
+
+// A house's slice of the report. A house with nothing at all this month
+// still needs a zeroed shape so the views never branch on null.
+const EMPTY_HOUSE_COST = {
+  actualConfirmed: 0, estimated: 0, projectedTotal: 0, missingData: 0,
+  instructorsCost: 0, instructorsEstimated: 0,
+  budget: null, instructorsBudget: null,
+  variance: { budget: null, cost: 0, variance: null, pct: null, status: 'none' },
+  instructorsVariance: { budget: null, cost: 0, variance: null, pct: null, status: 'none' },
+};
+function houseCost(houseId){
+  return (COST && COST.byHouse[houseId]) || EMPTY_HOUSE_COST;
+}
+
+// Badges. The selected month drives all three, so a number is never shown
+// without saying how much of it is real.
+//   אומדן      — an estimate was used because no actuals were recorded
+//   בפועל      — a recorded actual was used
+//   חסרים נתונים — a required rate or date is missing, so the number is short
 function estBadge(){
-  return ` <span class="est-badge" title="לא הוזנו שעות/מפגשים בפועל לחודש זה — מוצג אומדן לפי ההערכה בשיבוץ">אומדן</span>`;
+  return ` <span class="est-badge" title="לא הוזנו שעות או מפגשים בפועל לחודש זה — מוצג אומדן לפי ההערכה בשיבוץ">אומדן</span>`;
+}
+function missingBadge(what){
+  const t = what ? `חסר במערכת: ${what}` : 'חסרים נתונים לחישוב מלא';
+  return ` <span class="miss-badge" title="${escapeHtml(t)}">חסרים נתונים</span>`;
+}
+// Month label appended to a total, so no figure on the page is ambiguous
+// about which month it belongs to.
+function monthTag(){
+  return `<span class="month-tag">${escapeHtml(fmtMonth(ensureMonth()))}</span>`;
 }
 
-// The month-aware cost cell inner for a roster row: cost for selectedMonth
-// (actuals where present, estimate otherwise) plus the אומדן badge on a
-// fallback, or a small "בפועל" note showing the recorded quantity used.
+// The month-aware cost cell for a roster row, straight off the report line.
+// The tooltip carries the engine's own trace — which rule fired and how many
+// days were counted — so a surprising number can be explained on the spot.
 function monthCostCellInner(a){
-  const m = ensureMonth();
-  const actual = calcLookupActual(ACTUALS_INDEX, a.id, m);
-  const mc = calcMonthlyAssignmentCost(a, actual);
+  const line = COST ? engineLineFor(COST, a.id) : null;
+  if (!line) return fmt(0);
+  // The badges are independent: a missing start date does not make an
+  // estimate any less of an estimate, so a cell can carry both.
   let tail = '';
-  if (mc.isEstimate) {
+  if (line.source === 'estimate') {
     tail = estBadge();
-  } else if (a.employmentType === 'hourly' && actual && actual.actualHours != null) {
-    tail = ` <span class="actual-note">בפועל ${Number(actual.actualHours)} ש'</span>`;
-  } else if (a.employmentType === 'per_session' && actual && actual.actualSessions != null) {
-    tail = ` <span class="actual-note">בפועל ${Number(actual.actualSessions)} מפגשים</span>`;
+  } else if (line.rule === 'HOURLY_ACTUAL') {
+    const actual = calcLookupActual(ACTUALS_INDEX, a.id, ensureMonth());
+    tail = ` <span class="actual-note">בפועל ${Number(actual && actual.actualHours || 0)} ש'</span>`;
+  } else if (line.rule === 'PER_SESSION_ACTUAL') {
+    const actual = calcLookupActual(ACTUALS_INDEX, a.id, ensureMonth());
+    tail = ` <span class="actual-note">בפועל ${Number(actual && actual.actualSessions || 0)} מפגשים</span>`;
+  } else if (line.rule === 'UNPAID_STATUS') {
+    tail = ` <span class="actual-note">ללא תשלום</span>`;
+  } else if (line.rule === 'NOT_STARTED') {
+    tail = ` <span class="actual-note">טרם התחיל/ה</span>`;
+  } else if (line.rule === 'ENDED_BEFORE_MONTH') {
+    tail = ` <span class="actual-note">סיים/ה לפני החודש</span>`;
+  } else if (/_PRORATED$/.test(line.rule)) {
+    tail = ` <span class="actual-note">${line.daysCounted} מתוך ${line.daysInMonth} ימים</span>`;
   }
-  return `${fmt(mc.cost)}${tail}`;
+  if (line.missingData && line.missingData.length) {
+    tail += missingBadge(line.missingData.join(', '));
+  }
+  const trace = `${line.rule} · ${line.basis}`;
+  return `<span title="${escapeHtml(trace)}">${fmt(line.cost)}</span>${tail}`;
 }
 
-// Month-aware house total + network total (for the selected month).
-function houseMonthTotal(houseId, today){
-  return calcHouseMonthlyTotal(ASSIGNMENTS, COVERAGES, ABSENCES, ARCHIVE_V3,
-    ACTUALS_INDEX, houseId, ensureMonth(), today);
+// Month-aware house total + network total, both from the one report.
+function houseMonthTotal(houseId){
+  return houseCost(houseId).projectedTotal;
 }
-function totalCostMonth(today){
-  const houseIds = HOUSES.map(h => h.id);
-  return calcNetworkMonthlyTotal(ASSIGNMENTS, COVERAGES, ABSENCES, ARCHIVE_V3,
-    ACTUALS_INDEX, houseIds, ensureMonth(), today);
+// The part of a house's month total that is coverage extras, and the part
+// that is placements already terminated but still inside their notice
+// period. Both are read off the SAME report as the total, so the "כולל…"
+// lines can never contradict the headline number.
+function houseCoverageExtraMonth(houseId){
+  if (!COST) return 0;
+  return COST.lines
+    .filter(l => l.kind === 'coverage' && l.house === houseId)
+    .reduce((sum, l) => sum + l.cost, 0);
+}
+function housePendingMonth(houseId){
+  if (!COST) return 0;
+  return COST.lines
+    .filter(l => l.kind === 'assignment' && l.house === houseId && l.terminated)
+    .reduce((sum, l) => sum + l.cost, 0);
+}
+function totalCostMonth(){
+  return COST ? COST.totals.projectedTotal : 0;
+}
+
+// The actual / estimate / missing-data split under a total, in Hebrew and
+// without parentheses.
+function costSplitSub(t){
+  const parts = [];
+  if (t.actualConfirmed) parts.push(`מאושר ${fmt(t.actualConfirmed)}`);
+  if (t.estimated) parts.push(`אומדן ${fmt(t.estimated)}`);
+  if (t.missingData) parts.push(`${t.missingData} שיבוצים ללא נתונים מלאים`);
+  return parts.join(' · ');
 }
 
 // ---------- budget view helpers ----------
@@ -1871,13 +1955,13 @@ function complianceCls(v){
 
 // Compact read-only budget line for a house card / house view. `cost` is
 // the already-computed month total for the house.
-function budgetLineHtml(houseId, cost){
-  const budget = calcBudgetForHouse(BUDGETS, houseId, ensureMonth());
-  const v = calcBudgetVariance(budget, cost);
+function budgetLineHtml(houseId){
+  const hc = houseCost(houseId);
+  const v = hc.variance;
   if (v.status === 'none'){
-    return `<div class="bud-line bud-none">תקציב: לא הוגדר</div>`;
+    return `<div class="bud-line bud-none">אין תקציב ל-${escapeHtml(fmtMonth(ensureMonth()))}</div>`;
   }
-  return `<div class="bud-line ${complianceCls(v)}">תקציב ${fmt(v.budget)} · ${varianceText(v)} · ${pctText(v.pct)}</div>`;
+  return `<div class="bud-line ${complianceCls(v)}">תקציב ${escapeHtml(fmtMonth(ensureMonth()))} ${fmt(v.budget)} · ${varianceText(v)} · ${pctText(v.pct)}</div>`;
 }
 
 // Indented "מדריכים" sub-row for a house, shown only when that house has an
@@ -1885,14 +1969,13 @@ function budgetLineHtml(houseId, cost){
 // house's מדריך/ה assignment costs (actuals where present, estimate + אומדן
 // badge otherwise). Same columns as the house row: budget, cost, יתרה/חריגה,
 // ניצול %, status. Returns '' when the house has no instructors budget.
-function instructorsSubRow(houseId, month){
-  const instBudget = calcInstructorsBudgetForHouse(BUDGETS, houseId, month);
-  if (instBudget === null) return '';
-  const ic = calcHouseMonthlyInstructorsCost(ASSIGNMENTS, ACTUALS_INDEX, houseId, month);
-  const v = calcBudgetVariance(instBudget, ic.cost);
+function instructorsSubRow(houseId){
+  const hc = houseCost(houseId);
+  if (hc.instructorsBudget === null) return '';
+  const v = hc.instructorsVariance;
   const meta = BUDGET_STATUS[v.status];
   const cCls = complianceCls(v);
-  const costCell = `${fmt(ic.cost)}${ic.isEstimate ? estBadge() : ''}`;
+  const costCell = `${fmt(hc.instructorsCost)}${hc.instructorsEstimated ? estBadge() : ''}`;
   return `
     <tr class="bud-sub ${cCls}-row">
       <td class="bud-sub-label">מדריכים</td>
@@ -1909,13 +1992,14 @@ function instructorsSubRow(houseId, month){
 // variance ₪, utilization %, status) with a per-house edit control, plus a
 // combined summary row across houses that have a budget set. Houses with an
 // instructors budget get an indented "מדריכים" sub-row beneath them.
-function budgetSummarySection(today){
+function budgetSummarySection(){
   const month = ensureMonth();
   let sumBudget = 0, sumCostBudgeted = 0, anyBudget = false;
   const rows = HOUSES.map(h => {
-    const cost = houseMonthTotal(h.id, today);
-    const budget = calcBudgetForHouse(BUDGETS, h.id, month);
-    const v = calcBudgetVariance(budget, cost);
+    const hc = houseCost(h.id);
+    const cost = hc.projectedTotal;
+    const budget = hc.budget;
+    const v = hc.variance;
     const meta = BUDGET_STATUS[v.status];
     if (budget !== null){ anyBudget = true; sumBudget += v.budget; sumCostBudgeted += cost; }
     const houseRow = `
@@ -1928,7 +2012,7 @@ function budgetSummarySection(today){
       <td><span class="bud-dot ${meta.cls}" title="${escapeHtml(meta.label)}"></span>${escapeHtml(meta.label)}</td>
       <td><button class="btn btn-sm btn-accent-hover" onclick="openBudget('${escapeHtml(h.id)}')">עריכת תקציב</button></td>
     </tr>`;
-    return houseRow + instructorsSubRow(h.id, month);
+    return houseRow + instructorsSubRow(h.id);
   }).join('');
 
   const cv = calcBudgetVariance(anyBudget ? sumBudget : null, sumCostBudgeted);
@@ -1964,10 +2048,10 @@ function budgetSummarySection(today){
 }
 
 // House-view budget control: the read-only line + an edit button.
-function houseBudgetControlHtml(houseId, cost){
+function houseBudgetControlHtml(houseId){
   return `
   <div class="house-budget">
-    ${budgetLineHtml(houseId, cost)}
+    ${budgetLineHtml(houseId)}
     <button class="btn btn-sm btn-accent-hover" onclick="openBudget('${escapeHtml(houseId)}')">עריכת תקציב</button>
   </div>`;
 }
@@ -3410,6 +3494,7 @@ function render(){
   // in-place roster search reads them.
   ensureMonth();
   ACTUALS_INDEX = calcIndexActuals(MONTHLY_ACTUALS);
+  rebuildCostReport();
   const app=document.getElementById('app');
   if (view === 'central')      app.innerHTML = centralView();
   else if (view === 'archive') app.innerHTML = archiveView();
@@ -3458,9 +3543,10 @@ function centralView(){
 
   const houseBoxes = HOUSES.map(h=>{
     const roster = rosterAt(h.id);
-    const houseT = houseMonthTotal(h.id, today);
-    const extra = calcCoverageExtra(COVERAGES, ABSENCES, h.id, today);
-    const pending = calcPendingHouseCost(ARCHIVE_V3, h.id, today);
+    const houseT = houseMonthTotal(h.id);
+    const extra = houseCoverageExtraMonth(h.id);
+    const pending = housePendingMonth(h.id);
+    const hc = houseCost(h.id);
     const mgrPill = h.mgr
       ? `<span class="hb-mgr">מנהל: ${escapeHtml(h.mgr)}</span>`
       : '';
@@ -3474,10 +3560,12 @@ function centralView(){
         <div><div class="n">${roster.length}</div><div class="t">שיבוצים בבית</div></div>
         <div>
           <div class="n">${fmt(houseT)}</div>
-          <div class="t">עלות חודשית</div>
+          <div class="t">עלות חודשית ${monthTag()}</div>
+          ${hc.estimated ? `<div class="bonus-line">כולל אומדן ${fmt(hc.estimated)}</div>` : ''}
+          ${hc.missingData ? `<div class="bonus-line">${hc.missingData} שיבוצים ללא נתונים מלאים</div>` : ''}
           ${extra ? `<div class="bonus-line">כולל תוספות מחליפים ${fmt(extra)}</div>` : ''}
           ${pending ? `<div class="bonus-line">כולל בתקופת הודעה ${fmt(pending)}</div>` : ''}
-          ${budgetLineHtml(h.id, houseT)}
+          ${budgetLineHtml(h.id)}
         </div>
       </div>
     </div>`;
@@ -3505,8 +3593,8 @@ function centralView(){
     </div>
     <div class="stat">
       <div class="lbl">עלות שכר — ${escapeHtml(fmtMonth(ensureMonth()))}</div>
-      <div class="val">${fmt(totalCostMonth(today))}</div>
-      <div class="sub">שיבוצים (שעתי/מפגש לפי בפועל) + תוספות מחליפים + תקופת הודעה</div>
+      <div class="val">${fmt(totalCostMonth())}</div>
+      <div class="sub">${escapeHtml(costSplitSub(COST.totals)) || 'שיבוצים בכל הבתים · תוספות מחליפים · תקופת הודעה'}</div>
     </div>
     <div class="stat">
       <div class="lbl">בתים פעילים</div>
@@ -3537,7 +3625,7 @@ function centralView(){
     <div class="house-grid">${houseBoxes}</div>
   </div>
 
-  ${budgetSummarySection(today)}
+  ${budgetSummarySection()}
   </div>`;
 }
 
@@ -4072,9 +4160,10 @@ function houseView(id){
   // not the headline numbers.
   const filtered = filterRoster(list, rosterFilter);
   const split = calcSplitByCategory(filtered);
-  const houseT = houseMonthTotal(id, today);
-  const extra = calcCoverageExtra(COVERAGES, ABSENCES, id, today);
-  const pending = calcPendingHouseCost(ARCHIVE_V3, id, today);
+  const houseT = houseMonthTotal(id);
+  const extra = houseCoverageExtraMonth(id);
+  const pending = housePendingMonth(id);
+  const hc = houseCost(id);
   // v3.1: house view shows absences logged AT this house, and coverages
   // logged AT this house (i.e. where this house's workers cover
   // elsewhere). Two independent sections; coverages are no longer
@@ -4149,7 +4238,7 @@ function houseView(id){
     <p>צוות הבית, נעדרים והחלפות פעילות</p>
     ${mgrPill}
     ${monthPickerHtml()}
-    ${houseBudgetControlHtml(id, houseT)}
+    ${houseBudgetControlHtml(id)}
   </div>
 
   <div class="stats">
@@ -4161,12 +4250,11 @@ function houseView(id){
     <div class="stat">
       <div class="lbl">עלות ${escapeHtml(fmtMonth(ensureMonth()))}</div>
       <div class="val">${fmt(houseT)}</div>
-      <div class="sub">${extra||pending
-        ? [
-            extra?`+ תוספות מחליפים ${fmt(extra)}`:'',
-            pending?`+ תקופת הודעה ${fmt(pending)}`:'',
-          ].filter(Boolean).join(' · ')
-        : 'סך עלויות השיבוצים בבית'}</div>
+      <div class="sub">${escapeHtml([
+        extra ? `כולל תוספות מחליפים ${fmt(extra)}` : '',
+        pending ? `כולל תקופת הודעה ${fmt(pending)}` : '',
+        costSplitSub(hc),
+      ].filter(Boolean).join(' · ')) || 'סך עלויות השיבוצים בבית'}</div>
     </div>
     <div class="stat">
       <div class="lbl">היעדרויות פעילות היום</div>

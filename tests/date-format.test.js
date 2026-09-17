@@ -25,7 +25,9 @@ const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8');
 // tests/page-load.test.js) so fmtDate / leaveBadge are callable as globals.
 function loadPage() {
   const calc = fs.readFileSync(path.join(ROOT, 'lib', 'calc.js'), 'utf8');
-  const inlined = html.replace(/<script src="\/lib\/calc\.js"><\/script>/, `<script>${calc}</script>`);
+  const engineSrc = fs.readFileSync(path.join(ROOT, 'lib', 'cost-engine.js'), 'utf8');
+  const withCalc = html.replace(/<script src="\/lib\/calc\.js"><\/script>/, `<script>${calc}</script>`);
+  const inlined = withCalc.replace(/<script src="\/lib\/cost-engine\.js"><\/script>/, `<script>${engineSrc}</script>`);
   const vc = new VirtualConsole();
   const dom = new JSDOM(inlined, { url: 'http://localhost/', runScripts: 'dangerously', virtualConsole: vc });
   return dom.window;
