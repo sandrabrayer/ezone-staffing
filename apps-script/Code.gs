@@ -104,6 +104,12 @@ const HEARINGS_TAB = 'hearings';
 // spreadsheet the roster does — but it is never read by any feed, and the
 // feed key-set guard tests keep it that way.
 const AUDIT_LOG_TAB = 'audit_log';
+// One row PER CONSUMER, upserted in place: when that consumer last pulled,
+// how many rows it got, and how many times it has pulled. Not one row per
+// pull — the coordinators app pulls on every house open, and an append-only
+// log of that would grow by thousands of rows a month and tell Moran
+// nothing she cannot read off a single row.
+const FEED_LOG_TAB = 'feed_log';
 // Per-house monthly salary budgets. One row per (house, month) where month
 // is 'YYYY-MM' or the sentinel 'default' (fallback for any month without a
 // specific override). Append-only; upserted in place per (house, month).
@@ -138,6 +144,14 @@ const HEADERS_WORKERS = ['id', 'name', 'notes', 'created_at', 'shift_commitment'
 const HEADERS_AUDIT_LOG = [
   'ts', 'action', 'entity', 'entity_id', 'field', 'before', 'after', 'reason',
 ];
+// APPEND-ONLY, same rule as every other tab. `consumer` is the feed's ASCII
+// key (coordinators / therapists / hadrachot); `status` is 'ok' or 'error'.
+const HEADERS_FEED_LOG = [
+  'consumer', 'last_served_at', 'last_row_count', 'serve_count', 'status',
+];
+// The three consumers, as ASCII keys. Also the order the sync-status panel
+// lists them in.
+const FEED_CONSUMERS = ['coordinators', 'therapists', 'hadrachot'];
 // APPEND-ONLY (columns 0-14 are the original v3 shape). Columns 15+ were
 // appended later and MUST stay in this order — read/write map by position:
 //   15 allowance, 16 status, 17 status_date  (fixes the leave-status bug —
@@ -368,6 +382,9 @@ function doGet(e) {
       monthlyActuals: readMonthlyActualsSafe(),
       budgets: readBudgetsSafe(),
       hearings: readHearingsSafe(),
+      // Per-consumer sync status for the «סטטוס סנכרון» panel. Missing tab
+      // (nothing has pulled yet) → [].
+      feedLog: readFeedLogSafe(),
       // legacy passthrough — empty arrays/objects when tabs are missing
       // (e.g. after finalizeV3 or on a fresh v3-only install).
       houses: houses,
@@ -1252,6 +1269,70 @@ function auditDiff_(action, entity, entityId, before, after, fields, reason) {
       field: f, before: b, after: a, reason: reason || '' });
   });
   return out;
+}
+
+// ---------- feed log ----------
+// Failure visibility. Before this, staffing could not tell whether the
+// coordinators app had pulled its roster in the last hour, day or week: a
+// consumer whose secret was wrong, or whose sync had silently stopped,
+// looked exactly like one that was up to date. One row per consumer, showing
+// when it last pulled and how much it got, makes that answerable.
+//
+// It means the read-only feeds now perform ONE small write each. Deliberate,
+// and hedged three ways: the write happens only AFTER authorization (so an
+// unauthorized caller can never make us write), it takes the lock with
+// tryLock and SKIPS rather than queues (so it can never delay one of Moran's
+// mutations), and it never throws (so a logging failure can never break a
+// consumer's sync).
+
+function feedLogSheet_() {
+  const book = ss();
+  let sh = book.getSheetByName(FEED_LOG_TAB);
+  if (!sh) {
+    sh = book.insertSheet(FEED_LOG_TAB);
+    sh.getRange(1, 1, 1, HEADERS_FEED_LOG.length).setValues([HEADERS_FEED_LOG]);
+    sh.setFrozenRows(1);
+  }
+  return sh;
+}
+
+function readFeedLogSafe() {
+  const sh = sheetByNameOrNull(FEED_LOG_TAB);
+  return rowsOf(sh).map(function (r) {
+    return {
+      consumer: String(r[0] || ''),
+      lastServedAt: cellToIso(r[1]),
+      lastRowCount: Number(r[2]) || 0,
+      serveCount: Number(r[3]) || 0,
+      status: String(r[4] || 'ok'),
+    };
+  });
+}
+
+// Record that `consumer` was just served `rowCount` rows. Best-effort.
+function recordFeedServed_(consumer, rowCount, status) {
+  try {
+    if (FEED_CONSUMERS.indexOf(consumer) < 0) return;
+    const lock = LockService.getScriptLock();
+    // A feed pull must never wait behind a mutation, and must never make a
+    // mutation wait. One second, then give up silently.
+    if (!lock.tryLock(1000)) return;
+    try {
+      const sh = feedLogSheet_();
+      const row = findRow(sh, 0, consumer);
+      const now = new Date().toISOString();
+      if (row < 0) {
+        sh.appendRow([consumer, now, rowCount, 1, status || 'ok']);
+        return;
+      }
+      const prev = Number(sh.getRange(row, 4).getValue()) || 0;
+      sh.getRange(row, 2, 1, 4).setValues([[now, rowCount, prev + 1, status || 'ok']]);
+    } finally {
+      lock.releaseLock();
+    }
+  } catch (err) {
+    Logger.log('recordFeedServed_ failed: ' + ((err && err.message) || String(err)));
+  }
 }
 
 // ---------- duplicate detection ----------
@@ -3485,7 +3566,13 @@ function hadrachotAuthorized_(e) {
 function handleHadrachotRead_(e) {
   try {
     if (!hadrachotAuthorized_(e)) return json({ error: 'unauthorized' }, 401);
-    return json({ guides: computeGuidesForHadrachot_() }, 200);
+    const guides = computeGuidesForHadrachot_();
+    // feedGeneratedAt is a property of the FEED, not of a worker, so it sits
+    // at the top level rather than being repeated on every entry. A consumer
+    // storing it per row calls that field syncedAt — its own, not ours.
+    const servedAt = new Date().toISOString();
+    recordFeedServed_('hadrachot', guides.length, 'ok');
+    return json({ guides: guides, feedGeneratedAt: servedAt }, 200);
   } catch (err) {
     const status = err && err.status ? err.status : 500;
     return json({ error: (err && err.message) || String(err) }, status);
@@ -3509,6 +3596,13 @@ function computeGuidesForHadrachot_() {
     const w = workerById[a.workerId];
     if (!w) return; // orphaned assignment — skip
     guides.push({
+      // ADDED (Phase 3), additive only: stable ids so the consumer can match
+      // on something that survives a rename. `name` stays, and remains the
+      // key every consumer uses until it switches over.
+      // Wording note: a test scans this builder for financial words as a
+      // substring, so a few innocent English words cannot appear here.
+      workerId: w.id,
+      assignmentId: a.id,
       name: w.name,
       house: a.house,
       role: role,
@@ -3584,7 +3678,10 @@ function therapistsAuthorized_(e) {
 function handleTherapistsRead_(e) {
   try {
     if (!therapistsAuthorized_(e)) return json({ error: 'unauthorized' }, 401);
-    return json({ therapists: computeTherapistsFeed_() }, 200);
+    const therapists = computeTherapistsFeed_();
+    const servedAt = new Date().toISOString();
+    recordFeedServed_('therapists', therapists.length, 'ok');
+    return json({ therapists: therapists, feedGeneratedAt: servedAt }, 200);
   } catch (err) {
     const status = err && err.status ? err.status : 500;
     return json({ error: (err && err.message) || String(err) }, status);
@@ -3612,16 +3709,25 @@ function computeTherapistsFeed_() {
         name: name,
         active: false,
         housesSeen: {},
+        assignmentIds: [],
         startDate: w.startDate || '',
       };
     }
     if (a.house) entry.housesSeen[a.house] = true;
+    if (a.id) entry.assignmentIds.push(a.id);
     if (normalizeStatus(a.status) === 'active') entry.active = true;
   });
 
   const therapists = Object.keys(byWorker).map(function (id) {
     const t = byWorker[id];
     return {
+      // ADDED (Phase 3), additive only. This feed is ONE ENTRY PER WORKER, so
+      // a single scalar assignmentId would be a lie for a therapist placed at
+      // two houses — `assignmentIds` is the sorted list instead, parallel to
+      // the existing `houses`. The hadrachot feed, which is per assignment,
+      // does carry a scalar assignmentId.
+      workerId: id,
+      assignmentIds: t.assignmentIds.slice().sort(),
       name: t.name,
       active: t.active,
       houses: Object.keys(t.housesSeen).sort(),
@@ -3695,7 +3801,10 @@ function coordinatorsAuthorized_(e) {
 function handleCoordinatorsRead_(e) {
   try {
     if (!coordinatorsAuthorized_(e)) return json({ error: 'unauthorized' }, 401);
-    return json({ guides: computeGuidesForCoordinators_() }, 200);
+    const guides = computeGuidesForCoordinators_();
+    const servedAt = new Date().toISOString();
+    recordFeedServed_('coordinators', guides.length, 'ok');
+    return json({ guides: guides, feedGeneratedAt: servedAt }, 200);
   } catch (err) {
     const status = err && err.status ? err.status : 500;
     return json({ error: (err && err.message) || String(err) }, status);
@@ -3724,6 +3833,8 @@ function computeGuidesForCoordinators_() {
         current: false,
         housesSeen: {},
         archivedHousesSeen: {},
+        assignmentIds: [],
+        archivedAssignmentIds: [],
         startDate: w.startDate || '',
       };
     }
@@ -3736,6 +3847,7 @@ function computeGuidesForCoordinators_() {
     if (!entry) return;
     entry.current = true;
     if (a.house) entry.housesSeen[a.house] = true;
+    if (a.id) entry.assignmentIds.push(a.id);
     if (normalizeStatus(a.status) === 'active') entry.active = true;
   });
 
@@ -3747,12 +3859,24 @@ function computeGuidesForCoordinators_() {
     const entry = entryFor(a.workerId);
     if (!entry) return;
     if (a.house) entry.archivedHousesSeen[a.house] = true;
+    // The archive row's assignment_id is the ORIGINAL placement's id, so a
+    // consumer that stored it while the guide was current can still match
+    // the row it is now retiring.
+    if (a.assignmentId) entry.archivedAssignmentIds.push(a.assignmentId);
   });
 
   const guides = Object.keys(byWorker).map(function (id) {
     const g = byWorker[id];
     const houses = Object.keys(g.current ? g.housesSeen : g.archivedHousesSeen).sort();
+    // assignmentIds follows `houses`: the CURRENT placements for a current
+    // guide, the archived ones for an archived-only guide, so the two arrays
+    // always describe the same set of placements.
+    const ids = (g.current ? g.assignmentIds : g.archivedAssignmentIds).slice().sort();
     return {
+      // ADDED (Phase 3), additive only. One entry per WORKER, so
+      // `assignmentIds` is a list — see the note in the therapists feed.
+      workerId: id,
+      assignmentIds: ids,
       name: g.name,
       phone: g.phone,
       active: g.current && g.active,
