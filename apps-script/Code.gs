@@ -99,6 +99,11 @@ const ARCHIVE_V3_TAB = 'archive_v3';
 const MONTHLY_ACTUALS_TAB = 'monthly_actuals';
 // Hearing events (שימועים) — one row per hearing held for a worker.
 const HEARINGS_TAB = 'hearings';
+// Append-only audit trail. One row per field changed by a mutation. HR-only:
+// it MAY carry salary values, because it lives in the same HR-only
+// spreadsheet the roster does — but it is never read by any feed, and the
+// feed key-set guard tests keep it that way.
+const AUDIT_LOG_TAB = 'audit_log';
 // Per-house monthly salary budgets. One row per (house, month) where month
 // is 'YYYY-MM' or the sentinel 'default' (fallback for any month without a
 // specific override). Append-only; upserted in place per (house, month).
@@ -127,6 +132,12 @@ const LEGACY_PREFIX = '_legacy_';
 //      defensively on read. Same key-presence rule as start_date. Read by the
 //      coordinators app through getGuidesForCoordinators (NOT financial).
 const HEADERS_WORKERS = ['id', 'name', 'notes', 'created_at', 'shift_commitment', 'start_date', 'gmach_month', 'phone'];
+// APPEND-ONLY, same rule as every other tab. ts is an ISO timestamp; action
+// is the doPost action name; entity / entity_id identify the row; field,
+// before and after describe ONE field's change; reason is free text.
+const HEADERS_AUDIT_LOG = [
+  'ts', 'action', 'entity', 'entity_id', 'field', 'before', 'after', 'reason',
+];
 // APPEND-ONLY (columns 0-14 are the original v3 shape). Columns 15+ were
 // appended later and MUST stay in this order — read/write map by position:
 //   15 allowance, 16 status, 17 status_date  (fixes the leave-status bug —
@@ -142,21 +153,49 @@ const HEADERS_ASSIGNMENTS = [
   'rate_individual', 'sessions_individual',
   'rate_group', 'sessions_group',
   'rate_external', 'external_patients',
+  // 24 effective_from — the PLACEMENT's own start date ('YYYY-MM-DD' or
+  //    blank), as opposed to the worker's employment start. Written by
+  //    moveAssignment so a transfer's new placement is costed from the
+  //    transfer date rather than from the 1st of the month. Blank on every
+  //    earlier row, where the cost engine falls back to created_at.
+  'effective_from',
 ];
+// The `status` column carries a DERIVED value: 'future' before the start
+// date, 'active' between the dates, 'ended' after the end date. It is a
+// cached hint, recomputed on every read — the dates are the truth. 'future'
+// was added in Phase 2: before it, a not-yet-started absence was stored as
+// 'ended', which hid it from the overlap guard and from the UI.
 const HEADERS_ABSENCES = [
   'id', 'worker_id', 'house', 'start_date', 'end_date',
   'reason_type', 'reason_detail', 'notes', 'status', 'created_at',
 ];
+const ABSENCE_STATUS_VALUES = ['future', 'active', 'ended'];
 // v3.1 schema. The previous shape had `providing_house` and inherited
 // dates from the parent absence. migrateCoveragesToV3_1 rewrites the
 // existing tab in-place: providing_house → covering_house, plus new
 // receiving_house / start_date / end_date columns backfilled from the
 // linked absence.
+// APPEND-ONLY. Columns 10-15 were appended after the v3.1 rewrite and MUST
+// stay in this order:
+//   10 replaced_assignment_id — the assignment being covered, when known
+//   11 role                   — the role being covered, from ROLE_OPTIONS
+//   12 shift_count            — how many shifts the coverage is worth
+//   13 approval_status        — pending / approved / rejected
+//   14 approved_by            — who approved it, free text
+//   15 cancelled              — 'true' once cancelled; the row is NEVER
+//                               deleted, so the history survives and the
+//                               cost engine simply stops charging it
 const HEADERS_COVERAGES = [
   'id', 'absence_id', 'covering_worker_id',
   'covering_house', 'receiving_house', 'start_date', 'end_date',
   'extra_payment', 'notes', 'created_at',
+  'replaced_assignment_id', 'role', 'shift_count',
+  'approval_status', 'approved_by', 'cancelled',
 ];
+// Mirror of COVERAGE_APPROVAL_VALUES in lib/validate.js. ASCII enum — the
+// Hebrew labels live in the frontend only.
+const COVERAGE_APPROVAL_VALUES = ['pending', 'approved', 'rejected'];
+const COVERAGE_SHIFT_COUNT_MAX = 62;
 // APPEND-ONLY. Columns 20-25 (the per_session 3-rate snapshot) were
 // appended so a terminated therapist's frozen terms keep their real cost
 // during the notice window — the legacy session_rate/est_sessions pair is 0
@@ -217,8 +256,15 @@ const ROLE_OPTIONS = [
 const ABSENCE_REASON_TYPES = [
   'חופשה', 'חל״ת', 'מחלה', 'חופשת לידה', 'ניתוח', 'צורך תפעולי', 'אישי', 'אחר',
 ];
+// A termination reason is REQUIRED from Phase 2 on. 'לא צוין' is the
+// explicit opt-out: the UI offers it, so "no reason" is a deliberate choice
+// on the record rather than an empty cell nobody noticed. Stored in Hebrew
+// because this column has always held Hebrew enum values — see
+// docs/STAFFING_AUDIT.md on the ASCII-stored-values rule.
+const TERMINATION_REASON_NOT_STATED = 'לא צוין';
 const TERMINATION_REASONS = [
   'התפטרות', 'פיטורין', 'סיום חוזה', 'מעבר תפקיד', 'אחר',
+  TERMINATION_REASON_NOT_STATED,
 ];
 const EMPLOYMENT_TYPES = [
   'full_time', 'part_time', 'hourly', 'per_session', 'fixed_retainer',
@@ -264,6 +310,9 @@ const ALLOWANCE_VALUES = [0, 2000, 6000];
 // its month in the worker-level gmach_month column automatically.
 const WORKER_STATUS_VALUES = ['active', 'chld', 'chlt', 'final_settlement'];
 const FINAL_SETTLEMENT_STATUS = 'final_settlement';
+// Statuses under which a worker is not available to cover for someone else.
+// Mirror of UNPAID_STATUSES in lib/calc.js and lib/cost-engine.js.
+const UNPAID_ASSIGNMENT_STATUSES = ['chld', 'chlt', 'final_settlement'];
 
 // Per-field caps — must mirror lib/validate.js.
 const SALARY_MAX = 1000000;
@@ -367,6 +416,14 @@ function doPost(e) {
   });
 }
 
+// Error fields a thrower may attach that are safe to send back to the
+// client. A WHITELIST, not a spread: an error object can pick up all sorts
+// of things, and only these are part of the contract the UI acts on.
+//   duplicates  — the matching worker rows behind a createWorker 409
+//   conflictId  — the absence / coverage row a 409 collided with
+//   archiveId   — the existing archive row behind an already-terminated 409
+const ERROR_DETAIL_FIELDS = ['duplicates', 'conflictId', 'archiveId'];
+
 function handle(e, fn) {
   try {
     if (!authorized(e)) return json({ error: 'unauthorized' }, 401);
@@ -374,7 +431,13 @@ function handle(e, fn) {
   } catch (err) {
     const status = err && err.status ? err.status : 500;
     const msg = (err && err.message) || String(err);
-    return json({ error: msg }, status);
+    const payload = { error: msg };
+    if (err) {
+      ERROR_DETAIL_FIELDS.forEach(function (f) {
+        if (err[f] !== undefined) payload[f] = err[f];
+      });
+    }
+    return json(payload, status);
   }
 }
 
@@ -653,11 +716,28 @@ function validateCoverage(c) {
   if (endDate < startDate) throw httpError(400, 'endDate before startDate');
   const extraPayment = clampMoney(c.extraPayment, EXTRA_PAYMENT_MAX);
   const notes = String(c.notes || '').trim().slice(0, 500);
+  // Appended fields, all optional. Anything outside its enum is rejected so
+  // a caller hitting /exec directly cannot write free text into the sheet.
+  const replacedAssignmentId = String(c.replacedAssignmentId || '').trim();
+  const role = String(c.role || '').trim();
+  if (role && !isRole(role)) throw httpError(400, 'bad role');
+  const shiftCount = clampInt(c.shiftCount, COVERAGE_SHIFT_COUNT_MAX);
+  const approvalStatus = c.approvalStatus === undefined || c.approvalStatus === null
+    || String(c.approvalStatus).trim() === ''
+    ? 'pending'
+    : String(c.approvalStatus).trim();
+  if (COVERAGE_APPROVAL_VALUES.indexOf(approvalStatus) < 0) {
+    throw httpError(400, 'bad approvalStatus');
+  }
+  const approvedBy = String(c.approvedBy || '').trim().slice(0, 80);
   return {
     absenceId: absenceId, coveringWorkerId: coveringWorkerId,
     coveringHouse: c.coveringHouse, receivingHouse: c.receivingHouse,
     startDate: startDate, endDate: endDate,
     extraPayment: extraPayment, notes: notes,
+    replacedAssignmentId: replacedAssignmentId, role: role,
+    shiftCount: shiftCount, approvalStatus: approvalStatus,
+    approvedBy: approvedBy,
   };
 }
 
@@ -848,6 +928,9 @@ function readAssignmentsSafe() {
       sessionsGroup: Number(r[21]) || 0,
       rateExternal: Number(r[22]) || 0,
       externalPatients: Number(r[23]) || 0,
+      // Appended column — blank on every row written before Phase 2. The
+      // cost engine falls back to created_at when it is blank.
+      effectiveFrom: formatDateCell(r[24]),
     };
   });
 }
@@ -873,10 +956,12 @@ function readAbsencesSafe() {
     if (String(r[0] || '').trim() === '') continue;
     const startDate = formatDateCell(r[3]);
     const endDate = formatDateCell(r[4]);
-    let status = String(r[8] || '').trim() || (active(startDate, endDate, today) ? 'active' : 'ended');
-    if (status === 'active' && endDate && endDate < today) {
-      status = 'ended';
-      corrections.push({ row: i + 1, status: status });
+    // Derive from the dates every time — the stored cell is a cached hint.
+    // Phase 2: a not-yet-started absence is 'future', not 'ended'.
+    const derived = absenceStatusFor_(startDate, endDate, today);
+    let status = derived;
+    if (String(r[8] || '').trim() !== derived) {
+      corrections.push({ row: i + 1, status: derived });
     }
     out.push({
       id: String(r[0]),
@@ -913,8 +998,27 @@ function readCoveragesSafe() {
       extraPayment: Number(r[7]) || 0,
       notes: String(r[8] || ''),
       createdAt: cellToIso(r[9]),
+      // Appended columns — blank on every row written before Phase 2, which
+      // read back as '' / 0 / 'approved' / false. An older row is treated as
+      // already approved and not cancelled, so nothing that was being paid
+      // silently stops being paid.
+      replacedAssignmentId: String(r[10] || ''),
+      role: String(r[11] || ''),
+      shiftCount: Number(r[12]) || 0,
+      approvalStatus: normalizeApproval_(r[13]),
+      approvedBy: String(r[14] || ''),
+      cancelled: String(r[15] || '').trim().toLowerCase() === 'true',
     };
   });
+}
+
+// A blank approval cell means the row predates the approval field, so it is
+// treated as 'approved' — never as 'pending', which would look like a
+// backlog of work Moran never created.
+function normalizeApproval_(cell) {
+  const v = String(cell || '').trim();
+  if (!v) return 'approved';
+  return COVERAGE_APPROVAL_VALUES.indexOf(v) >= 0 ? v : 'approved';
 }
 
 function readArchiveV3Safe() {
@@ -1092,6 +1196,104 @@ function newId(prefix) {
   return (prefix || 'x') + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 }
 
+// ---------- audit log ----------
+// Append-only. One row per FIELD changed, so "who changed what, from what,
+// to what" is answerable without diffing snapshots.
+//
+// Best-effort by design: auditLog_ never throws. An audit failure must not
+// fail Moran's mutation — the same rule the digest rebuild follows. The tab
+// is created on first use and is never read by any feed.
+
+function auditSheet_() {
+  const book = ss();
+  let sh = book.getSheetByName(AUDIT_LOG_TAB);
+  if (!sh) {
+    sh = book.insertSheet(AUDIT_LOG_TAB);
+    sh.getRange(1, 1, 1, HEADERS_AUDIT_LOG.length).setValues([HEADERS_AUDIT_LOG]);
+    sh.setFrozenRows(1);
+  }
+  return sh;
+}
+
+// entries: [{ action, entity, entityId, field, before, after, reason }]
+function auditLog_(entries) {
+  try {
+    const list = (entries || []).filter(function (e) { return e; });
+    if (!list.length) return;
+    const ts = new Date().toISOString();
+    const rows = list.map(function (e) {
+      return [
+        ts,
+        String(e.action || ''),
+        String(e.entity || ''),
+        String(e.entityId || ''),
+        String(e.field || ''),
+        e.before === undefined || e.before === null ? '' : String(e.before),
+        e.after === undefined || e.after === null ? '' : String(e.after),
+        String(e.reason || ''),
+      ];
+    });
+    auditSheet_().getRange(auditSheet_().getLastRow() + 1, 1, rows.length, HEADERS_AUDIT_LOG.length)
+      .setValues(rows);
+  } catch (err) {
+    // Swallowed on purpose. See the note above.
+    Logger.log('auditLog_ failed: ' + ((err && err.message) || String(err)));
+  }
+}
+
+// One entry per field that actually changed between two plain objects.
+function auditDiff_(action, entity, entityId, before, after, fields, reason) {
+  const out = [];
+  fields.forEach(function (f) {
+    const b = before && before[f] !== undefined ? before[f] : '';
+    const a = after && after[f] !== undefined ? after[f] : '';
+    if (String(b) === String(a)) return;
+    out.push({ action: action, entity: entity, entityId: entityId,
+      field: f, before: b, after: a, reason: reason || '' });
+  });
+  return out;
+}
+
+// ---------- duplicate detection ----------
+// Consumers match workers by EXACT name, so anything this normalization
+// changes is invisible on screen and fatal downstream. Mirror of
+// integrityNormalizeName_ — kept separate because that one belongs to the
+// read-only report and this one gates a write.
+
+function normalizeWorkerName_(name) {
+  return String(name === null || name === undefined ? '' : name)
+    .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '')
+    .replace(/\u05f4/g, '"')
+    .replace(/\u05f3/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function normalizeWorkerPhone_(phone) {
+  return String(phone === null || phone === undefined ? '' : phone).replace(/\D/g, '');
+}
+
+// Existing workers matching this name or phone. `excludeId` skips the row
+// being edited so a worker never collides with itself.
+function duplicateWorkers_(name, phone, excludeId) {
+  const n = normalizeWorkerName_(name);
+  const p = normalizeWorkerPhone_(phone);
+  const skip = String(excludeId || '');
+  return readWorkersSafe().filter(function (w) {
+    if (!w || w.id === skip) return false;
+    if (n && normalizeWorkerName_(w.name) === n) return true;
+    if (p && normalizeWorkerPhone_(w.phone) === p) return true;
+    return false;
+  }).map(function (w) {
+    return {
+      id: w.id,
+      name: w.name,
+      matchedOn: (n && normalizeWorkerName_(w.name) === n) ? 'name' : 'phone',
+    };
+  });
+}
+
 // ---------- worker actions ----------
 
 function createWorker(body) {
@@ -1099,6 +1301,19 @@ function createWorker(body) {
   const lock = LockService.getScriptLock();
   lock.waitLock(15000);
   try {
+    // Duplicate guard. A second HOUSE is a second ASSIGNMENT, not a second
+    // worker — a duplicated person is double-counted in payroll and breaks
+    // the consumers' exact-name matching. The check is a WARNING, not a
+    // veto: Moran may genuinely have two people with one name, and she says
+    // so by re-posting with confirmDuplicate:true. Without it the write is
+    // refused and the matching rows are named so she can decide.
+    const dups = duplicateWorkers_(w.name, w.phone, '');
+    if (dups.length && body.confirmDuplicate !== true) {
+      const err = httpError(409, 'עובד/ת עם שם או טלפון זהה כבר קיים/ת במערכת');
+      err.duplicates = dups;
+      throw err;
+    }
+
     const sh = sheetByName(WORKERS_TAB);
     const id = newId('w');
     const createdAt = new Date().toISOString();
@@ -1110,7 +1325,10 @@ function createWorker(body) {
       ensureHeaders(sh, HEADERS_WORKERS);
       sh.getRange(sh.getLastRow(), 8).setNumberFormat('@').setValue(w.phone);
     }
-    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, createdAt: createdAt, shift_commitment: w.shiftCommitment, startDate: w.startDate, gmachMonth: w.gmachMonth, phone: w.phone } };
+    auditLog_([{ action: 'createWorker', entity: 'worker', entityId: id,
+      field: 'name', before: '', after: w.name,
+      reason: dups.length ? 'confirmed duplicate of ' + dups.map(function (d) { return d.id; }).join(', ') : '' }]);
+    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, createdAt: createdAt, shift_commitment: w.shiftCommitment, startDate: w.startDate, gmachMonth: w.gmachMonth, phone: w.phone }, duplicates: dups };
   } finally {
     lock.releaseLock();
   }
@@ -1348,10 +1566,31 @@ function deleteAssignment(body) {
 // is the dedicated action behind the "מעבר לבית זה" button. It refuses
 // to move onto a house where the worker already has an assignment
 // (that collision is an edit, not a move).
+// A TRANSFER, not an in-place edit. Phase 2: moving a worker between houses
+// ENDS the old placement and STARTS a new one with the SAME workerId, so the
+// history of where they worked and on what terms survives in archive_v3
+// instead of being overwritten.
+//
+// What that buys, concretely:
+//   - the old house's cost stops on the transfer date, the new house's
+//     starts on it, and the two tile the month exactly — one month of
+//     salary, not two (lib/cost-engine.js, PRORATION_METHOD);
+//   - "was she at ramot in March?" is answerable;
+//   - the worker is ONE person throughout. workerId does not change, so no
+//     consumer sees a departure and an arrival.
+//
+// The new placement gets a NEW assignment id. Callers must use the returned
+// assignment, not the id they sent.
 function moveAssignment(body) {
   const id = requireBodyId(body);
   const target = String(body.house || '').trim();
   if (!isHouse(target)) throw httpError(400, 'bad house');
+  // The date the new placement starts. Defaults to today, which is what the
+  // UI sends when Moran does not pick one.
+  const effectiveFrom = body.effectiveFrom
+    ? validateRequiredDate(body.effectiveFrom, 'effectiveFrom')
+    : todayLocal();
+  const reasonDetail = String(body.reasonDetail || '').trim().slice(0, 500);
 
   const lock = LockService.getScriptLock();
   lock.waitLock(15000);
@@ -1361,11 +1600,13 @@ function moveAssignment(body) {
     if (row < 0) throw httpError(404, 'assignment not found');
 
     const cur = sh.getRange(row, 1, 1, HEADERS_ASSIGNMENTS.length).getValues()[0];
-    const workerId = String(cur[1]);
-    const fromHouse = String(cur[2]);
+    const snapshot = assignmentSnapshotFromRow_(id, cur);
+    const workerId = snapshot.workerId;
+    const fromHouse = snapshot.house;
     if (fromHouse === target) throw httpError(409, 'already at target house');
 
-    // Reject if this worker already has an assignment at the target house.
+    // Reject if this worker already has a placement at the target house —
+    // that is a second house, which is an addAssignment, not a transfer.
     const all = sh.getDataRange().getValues();
     for (let i = 1; i < all.length; i++) {
       const r = all[i];
@@ -1376,44 +1617,201 @@ function moveAssignment(body) {
       }
     }
 
-    sh.getRange(row, 3).setValue(target);  // house is column 3 (1-indexed)
+    // Idempotency: never a second archive row for one assignment.
+    const already = readArchiveV3Safe().find(function (r) { return r.assignmentId === id; });
+    if (already) {
+      const err = httpError(409, 'השיבוץ כבר הועבר לארכיב');
+      err.archiveId = already.id;
+      throw err;
+    }
+
+    const wsh = sheetByName(WORKERS_TAB);
+    const wrow = findRow(wsh, 0, workerId);
+    const name = wrow >= 0 ? String(wsh.getRange(wrow, 2).getValue() || '') : '';
+
+    // The old placement's LAST paid day is the day before the new one starts,
+    // so the two never overlap and never leave a gap.
+    const terminationDate = previousDay_(effectiveFrom);
+
+    // 1. Freeze the old placement into archive_v3.
+    const archId = newId('arc');
+    const archivedAt = new Date().toISOString();
+    sheetByName(ARCHIVE_V3_TAB).appendRow(archiveRowFor_(
+      archId, snapshot, name, terminationDate, 'מעבר תפקיד',
+      reasonDetail || ('מעבר מ' + fromHouse + ' ל' + target), archivedAt));
+
+    // 2. Start the new placement on the same terms, same worker, new id,
+    //    with effective_from set so the cost engine charges it from the
+    //    transfer date rather than from the 1st of the month.
+    const newAsgId = newId('a');
+    const createdAt = new Date().toISOString();
+    sh.appendRow([
+      newAsgId, workerId, target, snapshot.role, snapshot.roleDetail,
+      snapshot.employmentType, snapshot.salary, snapshot.pct,
+      snapshot.hourlyRate, snapshot.estHours, snapshot.sessionRate,
+      snapshot.estSessions, snapshot.retainerAmount, snapshot.notes, createdAt,
+      snapshot.allowance, snapshot.status, snapshot.statusDate,
+      snapshot.rateIndividual, snapshot.sessionsIndividual,
+      snapshot.rateGroup, snapshot.sessionsGroup,
+      snapshot.rateExternal, snapshot.externalPatients,
+      effectiveFrom,
+    ]);
+    ensureHeaders(sh, HEADERS_ASSIGNMENTS);
+
+    // 3. An absence at the house they have left no longer makes sense.
+    const autoEnded = truncateAbsencesAt_(workerId, fromHouse, terminationDate);
+
+    // 4. Remove the old live row LAST, so a failure above leaves the
+    //    original placement intact rather than losing it.
+    sh.deleteRow(row);
+
+    auditLog_([
+      { action: 'moveAssignment', entity: 'assignment', entityId: id,
+        field: 'house', before: fromHouse, after: target, reason: reasonDetail },
+      { action: 'moveAssignment', entity: 'assignment', entityId: id,
+        field: 'termination_date', before: '', after: terminationDate, reason: 'transfer' },
+      { action: 'moveAssignment', entity: 'assignment', entityId: newAsgId,
+        field: 'effective_from', before: '', after: effectiveFrom, reason: 'transfer from ' + id },
+    ]);
 
     const assignment = {
-      id: id,
+      id: newAsgId,
       workerId: workerId,
       house: target,
-      role: String(cur[3]),
-      roleDetail: String(cur[4]),
-      employmentType: String(cur[5]),
-      salary: Number(cur[6]) || 0,
-      pct: Number(cur[7]) || 0,
-      hourlyRate: Number(cur[8]) || 0,
-      estHours: Number(cur[9]) || 0,
-      sessionRate: Number(cur[10]) || 0,
-      estSessions: Number(cur[11]) || 0,
-      retainerAmount: Number(cur[12]) || 0,
-      notes: String(cur[13] || ''),
-      allowance: Number(cur[15]) || 0,
-      status: normalizeStatus(cur[16]),
-      statusDate: String(cur[17] || ''),
-      rateIndividual: Number(cur[18]) || 0,
-      sessionsIndividual: Number(cur[19]) || 0,
-      rateGroup: Number(cur[20]) || 0,
-      sessionsGroup: Number(cur[21]) || 0,
-      rateExternal: Number(cur[22]) || 0,
-      externalPatients: Number(cur[23]) || 0,
+      role: snapshot.role,
+      roleDetail: snapshot.roleDetail,
+      employmentType: snapshot.employmentType,
+      salary: snapshot.salary,
+      pct: snapshot.pct,
+      hourlyRate: snapshot.hourlyRate,
+      estHours: snapshot.estHours,
+      sessionRate: snapshot.sessionRate,
+      estSessions: snapshot.estSessions,
+      retainerAmount: snapshot.retainerAmount,
+      notes: snapshot.notes,
+      createdAt: createdAt,
+      allowance: snapshot.allowance,
+      status: snapshot.status,
+      statusDate: snapshot.statusDate,
+      rateIndividual: snapshot.rateIndividual,
+      sessionsIndividual: snapshot.sessionsIndividual,
+      rateGroup: snapshot.rateGroup,
+      sessionsGroup: snapshot.sessionsGroup,
+      rateExternal: snapshot.rateExternal,
+      externalPatients: snapshot.externalPatients,
+      effectiveFrom: effectiveFrom,
     };
-    return { ok: true, assignment: assignment };
+    return {
+      ok: true,
+      assignment: assignment,
+      previousAssignmentId: id,
+      archive: {
+        id: archId, assignmentId: id, workerId: workerId, name: name,
+        house: fromHouse, role: snapshot.role, roleDetail: snapshot.roleDetail,
+        employmentType: snapshot.employmentType,
+        terminationDate: terminationDate, reasonType: 'מעבר תפקיד',
+        reasonDetail: reasonDetail, archivedAt: archivedAt,
+        salary: snapshot.salary, pct: snapshot.pct,
+        hourlyRate: snapshot.hourlyRate, estHours: snapshot.estHours,
+        sessionRate: snapshot.sessionRate, estSessions: snapshot.estSessions,
+        retainerAmount: snapshot.retainerAmount, notes: snapshot.notes,
+        rateIndividual: snapshot.rateIndividual, sessionsIndividual: snapshot.sessionsIndividual,
+        rateGroup: snapshot.rateGroup, sessionsGroup: snapshot.sessionsGroup,
+        rateExternal: snapshot.rateExternal, externalPatients: snapshot.externalPatients,
+      },
+      autoEndedAbsences: autoEnded,
+    };
   } finally {
     lock.releaseLock();
   }
 }
 
+// The frozen terms of a live assignment row, in the shape archive_v3 and
+// a re-created assignment both need. Shared by terminateAssignment and
+// moveAssignment so a transfer can never archive a different shape from a
+// termination.
+function assignmentSnapshotFromRow_(id, r) {
+  return {
+    assignmentId: id,
+    workerId: String(r[1]),
+    house: String(r[2]),
+    role: String(r[3]),
+    roleDetail: String(r[4]),
+    employmentType: String(r[5]),
+    salary: Number(r[6]) || 0,
+    pct: Number(r[7]) || 0,
+    hourlyRate: Number(r[8]) || 0,
+    estHours: Number(r[9]) || 0,
+    sessionRate: Number(r[10]) || 0,
+    estSessions: Number(r[11]) || 0,
+    retainerAmount: Number(r[12]) || 0,
+    notes: String(r[13] || ''),
+    allowance: Number(r[15]) || 0,
+    status: normalizeStatus(r[16]),
+    statusDate: String(r[17] || ''),
+    rateIndividual: Number(r[18]) || 0,
+    sessionsIndividual: Number(r[19]) || 0,
+    rateGroup: Number(r[20]) || 0,
+    sessionsGroup: Number(r[21]) || 0,
+    rateExternal: Number(r[22]) || 0,
+    externalPatients: Number(r[23]) || 0,
+  };
+}
+
+// The archive_v3 row for a snapshot. Column order MUST match
+// HEADERS_ARCHIVE_V3 (append-only).
+function archiveRowFor_(archId, snapshot, name, terminationDate, reasonType, reasonDetail, archivedAt) {
+  return [
+    archId, snapshot.assignmentId, snapshot.workerId, name, snapshot.house,
+    snapshot.role, snapshot.roleDetail, snapshot.employmentType,
+    snapshot.salary, snapshot.pct, snapshot.hourlyRate, snapshot.estHours,
+    snapshot.sessionRate, snapshot.estSessions, snapshot.retainerAmount,
+    snapshot.notes, terminationDate, reasonType, reasonDetail, archivedAt,
+    snapshot.rateIndividual, snapshot.sessionsIndividual,
+    snapshot.rateGroup, snapshot.sessionsGroup,
+    snapshot.rateExternal, snapshot.externalPatients,
+  ];
+}
+
+// The day before a 'YYYY-MM-DD', as a 'YYYY-MM-DD'. Crosses month and year
+// boundaries correctly because Date.UTC does the arithmetic.
+function previousDay_(ymd) {
+  const t = Date.parse(ymd + 'T00:00:00Z') - 86400000;
+  return new Date(t).toISOString().slice(0, 10);
+}
+
+// Truncate any active absence for (worker, house) that runs past `cutoff`.
+// Shared by terminateAssignment and moveAssignment: an absence from a house
+// the worker has left no longer makes sense either way.
+function truncateAbsencesAt_(workerId, house, cutoff) {
+  const today = todayLocal();
+  let n = 0;
+  const absh = sheetByName(ABSENCES_TAB);
+  const vals = absh.getDataRange().getValues();
+  for (let i = 1; i < vals.length; i++) {
+    const ar = vals[i];
+    if (String(ar[0] || '').trim() === '') continue;
+    if (String(ar[1]) !== workerId) continue;
+    if (String(ar[2]) !== house) continue;
+    const aEnd = formatDateCell(ar[4]);
+    if (!(aEnd > cutoff)) continue;
+    const aStart = formatDateCell(ar[3]);
+    absh.getRange(i + 1, 5).setValue(cutoff);
+    absh.getRange(i + 1, 9).setValue(absenceStatusFor_(aStart, cutoff, today));
+    n++;
+  }
+  return n;
+}
+
 function terminateAssignment(body) {
   const id = requireBodyId(body);
   const terminationDate = validateRequiredDate(body.terminationDate, 'terminationDate');
-  const reasonType = String(body.reasonType || '').trim();
-  if (reasonType && TERMINATION_REASONS.indexOf(reasonType) < 0) {
+  // Phase 2: a reason is REQUIRED. An empty one becomes the explicit
+  // 'לא צוין' rather than a blank cell, so the record says a choice was
+  // made. Anything outside the enum is still rejected.
+  const rawReason = String(body.reasonType || '').trim();
+  const reasonType = rawReason || TERMINATION_REASON_NOT_STATED;
+  if (TERMINATION_REASONS.indexOf(reasonType) < 0) {
     throw httpError(400, 'bad reasonType');
   }
   const reasonDetail = String(body.reasonDetail || '').trim().slice(0, 500);
@@ -1421,76 +1819,44 @@ function terminateAssignment(body) {
   const lock = LockService.getScriptLock();
   lock.waitLock(15000);
   try {
+    // Idempotency: an assignment that already has an archive row must not
+    // get a second one. Double-archiving was the path to a cost counted
+    // twice (the Phase 0 report's ARCHIVED_STILL_ACTIVE finding).
+    const already = readArchiveV3Safe().find(function (r) { return r.assignmentId === id; });
+    if (already) {
+      const err = httpError(409, 'השיבוץ כבר הועבר לארכיב');
+      err.archiveId = already.id;
+      throw err;
+    }
     const sh = sheetByName(ASSIGNMENTS_TAB);
     const row = findRow(sh, 0, id);
     if (row < 0) throw httpError(404, 'assignment not found');
     const r = sh.getRange(row, 1, 1, HEADERS_ASSIGNMENTS.length).getValues()[0];
-    const snapshot = {
-      assignmentId: id,
-      workerId: String(r[1]),
-      house: String(r[2]),
-      role: String(r[3]),
-      roleDetail: String(r[4]),
-      employmentType: String(r[5]),
-      salary: Number(r[6]) || 0,
-      pct: Number(r[7]) || 0,
-      hourlyRate: Number(r[8]) || 0,
-      estHours: Number(r[9]) || 0,
-      sessionRate: Number(r[10]) || 0,
-      estSessions: Number(r[11]) || 0,
-      retainerAmount: Number(r[12]) || 0,
-      notes: String(r[13] || ''),
-      rateIndividual: Number(r[18]) || 0,
-      sessionsIndividual: Number(r[19]) || 0,
-      rateGroup: Number(r[20]) || 0,
-      sessionsGroup: Number(r[21]) || 0,
-      rateExternal: Number(r[22]) || 0,
-      externalPatients: Number(r[23]) || 0,
-    };
+    const snapshot = assignmentSnapshotFromRow_(id, r);
     // Look up worker name (frozen into the archive).
     const wsh = sheetByName(WORKERS_TAB);
     const wrow = findRow(wsh, 0, snapshot.workerId);
     const name = wrow >= 0 ? String(wsh.getRange(wrow, 2).getValue() || '') : '';
 
-    // Auto-truncate any active absence for this (worker, house) — same
-    // pattern as v2 terminateEmployee: an absence that runs past the
-    // termination date no longer makes sense.
-    const today = todayLocal();
-    let autoEnded = 0;
-    const absh = sheetByName(ABSENCES_TAB);
-    const absVals = absh.getDataRange().getValues();
-    for (let i = 1; i < absVals.length; i++) {
-      const ar = absVals[i];
-      if (String(ar[0] || '').trim() === '') continue;
-      if (String(ar[1]) !== snapshot.workerId) continue;
-      if (String(ar[2]) !== snapshot.house) continue;
-      const stored = String(ar[8] || '').trim();
-      if (stored !== 'active') continue;
-      const aEnd = formatDateCell(ar[4]);
-      if (!(aEnd > terminationDate)) continue;
-      const newStatus = terminationDate > today ? 'active' : 'ended';
-      absh.getRange(i + 1, 5).setValue(terminationDate);
-      absh.getRange(i + 1, 9).setValue(newStatus);
-      autoEnded++;
-    }
+    // Auto-truncate any absence for this (worker, house) that runs past the
+    // termination date — same pattern as v2 terminateEmployee.
+    const autoEnded = truncateAbsencesAt_(snapshot.workerId, snapshot.house, terminationDate);
 
     // Append archive row.
     const archId = newId('arc');
     const archivedAt = new Date().toISOString();
-    sheetByName(ARCHIVE_V3_TAB).appendRow([
-      archId, snapshot.assignmentId, snapshot.workerId, name, snapshot.house,
-      snapshot.role, snapshot.roleDetail, snapshot.employmentType,
-      snapshot.salary, snapshot.pct, snapshot.hourlyRate, snapshot.estHours,
-      snapshot.sessionRate, snapshot.estSessions, snapshot.retainerAmount,
-      snapshot.notes, terminationDate, reasonType, reasonDetail, archivedAt,
-      snapshot.rateIndividual, snapshot.sessionsIndividual,
-      snapshot.rateGroup, snapshot.sessionsGroup,
-      snapshot.rateExternal, snapshot.externalPatients,
-    ]);
+    sheetByName(ARCHIVE_V3_TAB).appendRow(
+      archiveRowFor_(archId, snapshot, name, terminationDate, reasonType, reasonDetail, archivedAt));
 
     // Remove the active assignment row.
     sh.deleteRow(row);
 
+    auditLog_([
+      { action: 'terminateAssignment', entity: 'assignment', entityId: id,
+        field: 'house', before: snapshot.house, after: '', reason: reasonType },
+      { action: 'terminateAssignment', entity: 'assignment', entityId: id,
+        field: 'termination_date', before: '', after: terminationDate, reason: reasonType },
+    ]);
     return {
       ok: true,
       archive: Object.assign(
@@ -1530,25 +1896,39 @@ function logAbsence(body) {
       if (!hasAsg) {
         throw httpError(409, 'העובד/ת אינו/ה משובץ/ת בבית הנבחר');
       }
-      // Reject overlapping active absences for the same (worker, house).
-      const existing = readAbsencesSafe();
+      // Reject an overlapping absence for the same (worker, house).
+      //
+      // Phase 2: this used to require status === 'active', which silently
+      // skipped every FUTURE absence — a not-yet-started row was stored as
+      // 'ended', so two overlapping planned absences were both accepted and
+      // the same leave was recorded twice. The guard now compares DATES and
+      // ignores status entirely; only an absence that has genuinely ended
+      // before this one starts is allowed through, and that is handled by
+      // datesOverlap on its own.
+      const existing = readAbsencesReadOnly_();
       const conflict = existing.find(function (x) {
         return x.workerId === a.workerId &&
           x.house === a.house &&
-          x.status === 'active' &&
           datesOverlap(x.startDate, x.endDate, a.startDate, a.endDate);
       });
-      if (conflict) throw httpError(409, 'worker already has an absence in this range');
+      if (conflict) {
+        const err = httpError(409, 'לעובד/ת כבר רשומה היעדרות בטווח התאריכים הזה');
+        err.conflictId = conflict.id;
+        throw err;
+      }
     }
 
     const today = todayLocal();
-    const status = active(a.startDate, a.endDate, today) ? 'active' : 'ended';
+    const status = absenceStatusFor_(a.startDate, a.endDate, today);
     const id = newId('ab');
     const createdAt = new Date().toISOString();
     sheetByName(ABSENCES_TAB).appendRow([
       id, a.workerId, a.house, a.startDate, a.endDate,
       a.reasonType, a.reasonDetail, a.notes, status, createdAt,
     ]);
+    auditLog_([{ action: 'logAbsence', entity: 'absence', entityId: id,
+      field: 'dates', before: '', after: a.startDate + '..' + a.endDate,
+      reason: a.workerId ? a.reasonType : 'unstaffed position' }]);
     return { ok: true, absence: Object.assign({ id: id, status: status, createdAt: createdAt }, a) };
   } finally {
     lock.releaseLock();
@@ -1568,6 +1948,8 @@ function endAbsence(body) {
     const newEnd = currentEnd && currentEnd < today ? currentEnd : today;
     sh.getRange(row, 5).setValue(newEnd);   // end_date
     sh.getRange(row, 9).setValue('ended');  // status
+    auditLog_([{ action: 'endAbsence', entity: 'absence', entityId: id,
+      field: 'end_date', before: currentEnd, after: newEnd, reason: '' }]);
     return { ok: true, id: id, endDate: newEnd, status: 'ended' };
   } finally {
     lock.releaseLock();
@@ -1631,30 +2013,110 @@ function addCoverage(body) {
       }
     }
 
+    // The replaced placement, when named, must be a real live assignment at
+    // the receiving house — otherwise the link says nothing.
+    if (c.replacedAssignmentId) {
+      const replaced = readAssignmentsSafe().find(function (x) { return x.id === c.replacedAssignmentId; });
+      if (!replaced) throw httpError(404, 'replaced assignment not found');
+      if (replaced.house !== c.receivingHouse) {
+        throw httpError(409, 'השיבוץ שמוחלף אינו בבית היעד של ההחלפה');
+      }
+    }
+
+    const existing = readCoveragesSafe();
+
+    // IDEMPOTENCY. A double-submitted form must not be paid twice. Two
+    // coverages are the same event when the worker, both houses and both
+    // dates match and the earlier one is not cancelled — so a retry returns
+    // the existing row instead of appending a second payment.
+    const same = existing.find(function (x) {
+      return !x.cancelled &&
+        x.coveringWorkerId === c.coveringWorkerId &&
+        x.coveringHouse === c.coveringHouse &&
+        x.receivingHouse === c.receivingHouse &&
+        x.startDate === c.startDate &&
+        x.endDate === c.endDate;
+    });
+    if (same) return { ok: true, coverage: same, duplicate: true };
+
+    // OVERLAP. One person cannot cover two places at once. Cancelled rows
+    // are ignored — that is the point of cancelling rather than deleting.
+    const overlap = existing.find(function (x) {
+      return !x.cancelled &&
+        x.coveringWorkerId === c.coveringWorkerId &&
+        datesOverlap(x.startDate, x.endDate, c.startDate, c.endDate);
+    });
+    if (overlap) {
+      const err = httpError(409, 'המחליף/ה כבר רשום/ה להחלפה בטווח התאריכים הזה');
+      err.conflictId = overlap.id;
+      throw err;
+    }
+
+    // AVAILABILITY. Someone who is themselves absent, or on unpaid leave,
+    // cannot be the one covering. Refused rather than warned: paying an
+    // extra to a worker who was not there is the mistake this prevents.
+    const ownAbsence = readAbsencesReadOnly_().find(function (x) {
+      return x.workerId === c.coveringWorkerId &&
+        datesOverlap(x.startDate, x.endDate, c.startDate, c.endDate);
+    });
+    if (ownAbsence) {
+      const err = httpError(409, 'המחליף/ה נעדר/ת בעצמו/ה בטווח התאריכים הזה');
+      err.conflictId = ownAbsence.id;
+      throw err;
+    }
+    const unpaidHere = readAssignmentsSafe().find(function (x) {
+      return x.workerId === c.coveringWorkerId &&
+        x.house === c.coveringHouse &&
+        UNPAID_ASSIGNMENT_STATUSES.indexOf(normalizeStatus(x.status)) >= 0;
+    });
+    if (unpaidHere) {
+      throw httpError(409, 'המחליף/ה בחל"ד או בחל"ת ואינו/ה זמין/ה להחלפה');
+    }
+
     const id = newId('c');
     const createdAt = new Date().toISOString();
-    sheetByName(COVERAGES_TAB).appendRow([
+    const sh = sheetByName(COVERAGES_TAB);
+    sh.appendRow([
       id, c.absenceId, c.coveringWorkerId,
       c.coveringHouse, c.receivingHouse,
       c.startDate, c.endDate,
       c.extraPayment, c.notes, createdAt,
+      c.replacedAssignmentId, c.role, c.shiftCount,
+      c.approvalStatus, c.approvedBy, 'false',
     ]);
-    return { ok: true, coverage: Object.assign({ id: id, createdAt: createdAt }, c) };
+    ensureHeaders(sh, HEADERS_COVERAGES);
+    auditLog_([{ action: 'addCoverage', entity: 'coverage', entityId: id,
+      field: 'extra_payment', before: '', after: c.extraPayment,
+      reason: c.coveringHouse + ' -> ' + c.receivingHouse + ' ' + c.startDate + '..' + c.endDate }]);
+    return { ok: true, coverage: Object.assign({ id: id, createdAt: createdAt, cancelled: false }, c) };
   } finally {
     lock.releaseLock();
   }
 }
 
+// Phase 2: CANCEL, not delete. The row stays so the history survives and
+// the audit trail has something to point at; the `cancelled` flag stops the
+// cost engine charging it. Idempotent — cancelling twice is a no-op.
+//
+// The action keeps its name so the frozen doPost surface and the proxy's
+// action list are unchanged.
 function deleteCoverage(body) {
   const id = requireBodyId(body);
+  const reason = String((body && body.reason) || '').trim().slice(0, 500);
   const lock = LockService.getScriptLock();
   lock.waitLock(15000);
   try {
     const sh = sheetByName(COVERAGES_TAB);
     const row = findRow(sh, 0, id);
     if (row < 0) throw httpError(404, 'coverage not found');
-    sh.deleteRow(row);
-    return { ok: true };
+    ensureHeaders(sh, HEADERS_COVERAGES);
+    const cancelledCol = HEADERS_COVERAGES.indexOf('cancelled') + 1;
+    const before = String(sh.getRange(row, cancelledCol).getValue() || '').trim().toLowerCase();
+    if (before === 'true') return { ok: true, id: id, cancelled: true, alreadyCancelled: true };
+    sh.getRange(row, cancelledCol).setValue('true');
+    auditLog_([{ action: 'deleteCoverage', entity: 'coverage', entityId: id,
+      field: 'cancelled', before: 'false', after: 'true', reason: reason }]);
+    return { ok: true, id: id, cancelled: true };
   } finally {
     lock.releaseLock();
   }
@@ -2458,6 +2920,15 @@ function formatMonthCell(cell) {
 function formatBudgetMonthCell(cell) {
   if (String(cell || '').trim() === 'default') return 'default';
   return formatMonthCell(cell);
+}
+
+// The derived absence status. Dates are the truth; the stored cell caches
+// this. Blank dates fall back to 'ended' rather than inventing a window.
+function absenceStatusFor_(startDate, endDate, today) {
+  if (!startDate || !endDate) return 'ended';
+  if (startDate > today) return 'future';
+  if (endDate < today) return 'ended';
+  return 'active';
 }
 
 function active(startDate, endDate, today) {
@@ -3758,8 +4229,7 @@ function readAbsencesReadOnly_() {
     if (String(r[0] || '').trim() === '') continue;
     const startDate = formatDateCell(r[3]);
     const endDate = formatDateCell(r[4]);
-    let status = String(r[8] || '').trim() || (active(startDate, endDate, today) ? 'active' : 'ended');
-    if (status === 'active' && endDate && endDate < today) status = 'ended';
+    const status = absenceStatusFor_(startDate, endDate, today);
     out.push({
       id: String(r[0]),
       workerId: String(r[1] || ''),
