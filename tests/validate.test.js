@@ -47,9 +47,12 @@ test('ABSENCE_REASON_TYPES: eight reasons including אישי', () => {
   ]);
 });
 
-test('TERMINATION_REASONS: five reasons', () => {
+test('TERMINATION_REASONS: five reasons plus the explicit opt-out', () => {
+  // Phase 2 made a termination reason required, so 'לא צוין' was appended
+  // as the deliberate "none given" choice. It is LAST so the five real
+  // reasons keep their order in the dropdown.
   assert.deepEqual(TERMINATION_REASONS, [
-    'התפטרות', 'פיטורין', 'סיום חוזה', 'מעבר תפקיד', 'אחר',
+    'התפטרות', 'פיטורין', 'סיום חוזה', 'מעבר תפקיד', 'אחר', 'לא צוין',
   ]);
 });
 
@@ -689,14 +692,26 @@ test('validateAction: terminateAssignment happy path + future date', () => {
   assert.equal(p.reasonDetail, 'מעבר למקום אחר');
 });
 
-test('validateAction: terminateAssignment accepts missing reason', () => {
+test('validateAction: terminateAssignment turns a missing reason into לא צוין', () => {
+  // Phase 2: a reason is required. An omitted one is no longer a blank
+  // cell — it becomes the explicit opt-out, so the record says a choice
+  // was made rather than leaving a hole nobody noticed.
   const p = validateAction({
     action: 'terminateAssignment',
     id: 'a1',
     terminationDate: '2026-05-31',
   });
-  assert.equal(p.reasonType, '');
+  assert.equal(p.reasonType, 'לא צוין');
   assert.equal(p.reasonDetail, '');
+});
+
+test('validateAction: terminateAssignment still rejects an off-enum reason', () => {
+  assert.throws(() => validateAction({
+    action: 'terminateAssignment',
+    id: 'a1',
+    terminationDate: '2026-05-31',
+    reasonType: 'כי בא לי',
+  }), /bad reasonType/);
 });
 
 test('validateAction: moveAssignment rejects an empty target house', () => {

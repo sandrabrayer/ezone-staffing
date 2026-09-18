@@ -634,6 +634,19 @@ tbody tr:hover{
   font-size:11px;font-weight:700;color:var(--muted);
   margin-inline-start:6px;
 }
+/* Absence status pills. Three states, derived from the dates: a planned
+   absence is 'future' and must be visible, which before Phase 2 it was not. */
+.abs-status-pill{
+  display:inline-block;
+  font-size:10.5px;font-weight:700;
+  padding:1px 7px;border-radius:999px;
+  margin-inline-start:6px;vertical-align:middle;
+}
+.abs-status-active{background:var(--danger,#c62828);color:#fff}
+.abs-status-future{background:var(--warning);color:#1a1200}
+.abs-status-ended{background:var(--line-strong,#ddd);color:var(--muted)}
+/* An unstaffed position is not a person being away — kept visually apart. */
+.event-row.event-unstaffed{border-inline-start:3px dashed var(--line-strong,#ccc)}
 /* Small note showing the actual quantity used when a cost IS from actuals. */
 .actual-note{
   display:inline-block;
@@ -972,7 +985,7 @@ tbody tr:hover{
       <div class="field">
         <label>שם מלא</label>
         <input id="w_name" type="text" placeholder="שם העובד/ת" maxlength="80" oninput="onWorkerNameInput()"/>
-        <div class="hint" id="w_nameDupWarning" style="display:none;color:var(--warning)">⚠️ עובד/ת בשם זהה כבר קיים/ת — שמירה תיצור רשומה נפרדת</div>
+        <div class="hint" id="w_nameDupWarning" style="display:none;color:var(--warning)">⚠️ עובד/ת בשם זהה כבר קיים/ת — בית נוסף הוא שיבוץ נוסף, לא עובד/ת חדש/ה</div>
       </div>
 
       <!-- Employment start date (תאריך תחילת עבודה). WORKER-LEVEL — one date
@@ -991,7 +1004,7 @@ tbody tr:hover{
            guides by this number. Not financial. -->
       <div class="field">
         <label>טלפון נייד</label>
-        <input id="w_phone" type="tel" inputmode="numeric" maxlength="12" placeholder="05X-XXXXXXX" autocomplete="off"/>
+        <input id="w_phone" type="tel" inputmode="numeric" maxlength="12" placeholder="05X-XXXXXXX" autocomplete="off" oninput="onWorkerNameInput()"/>
         <div class="hint">לא חובה — 10 ספרות המתחילות ב-0 (נשלח לאפליקציית הרכזים)</div>
       </div>
 
@@ -1124,6 +1137,12 @@ tbody tr:hover{
         <label>בית נוסף / מעבר בית</label>
         <select id="w_targetHouse"></select>
         <div class="hint" id="w_houseActionsHint">בחר/י בית יעד ואז "מעבר" או "הוספה". בהוספת בית תזין/י שכר נפרד לאותו בית.</div>
+        <!-- Transfer date. A transfer ENDS the old placement the day before
+             this date and STARTS the new one on it, so the two never overlap
+             and never leave a gap. Blank = today. -->
+        <label for="w_targetFrom" style="margin-top:8px;display:block">תאריך מעבר</label>
+        <input id="w_targetFrom" type="date"/>
+        <div class="hint">רלוונטי למעבר בית. ריק = היום. השיבוץ הקודם יסתיים יום לפני התאריך הזה וההיסטוריה תישמר.</div>
         <div style="display:flex;gap:8px;margin-top:8px">
           <button type="button" class="btn btn-sm btn-accent-hover" onclick="moveWorkerHouse()">מעבר לבית זה</button>
           <button type="button" class="btn btn-sm btn-accent-hover" onclick="addWorkerHouse()">הוספת בית זה</button>
@@ -1487,8 +1506,12 @@ const SHIFT_COMMITMENT_VALUES = ['3+1','4+1','5+1'];
 const ABSENCE_REASON_TYPES = [
   'חופשה','חל״ת','מחלה','חופשת לידה','ניתוח','צורך תפעולי','אישי','אחר',
 ];
+// Mirror of TERMINATION_REASONS in lib/validate.js and apps-script/Code.gs.
+// 'לא צוין' is LAST: it is the deliberate "no reason given" choice, offered
+// so that a termination with no reason is on the record rather than a blank
+// cell nobody noticed.
 const TERMINATION_REASONS = [
-  'התפטרות','פיטורין','סיום חוזה','מעבר תפקיד','אחר',
+  'התפטרות','פיטורין','סיום חוזה','מעבר תפקיד','אחר','לא צוין',
 ];
 const EMPLOYMENT_TYPE_LABELS = {
   full_time:      'משכורת חודשית מלאה',
@@ -1615,7 +1638,18 @@ async function apiFetch(path, opts){
   }
   const text = await resp.text();
   let body; try { body = text ? JSON.parse(text) : {}; } catch (e) { body = {error:'תגובה לא תקינה מהשרת'}; }
-  if (!resp.ok) throw new Error(body.error || 'שגיאה ' + resp.status);
+  if (!resp.ok) {
+    // Carry the structured detail a 4xx may attach (duplicates, conflictId,
+    // archiveId) onto the Error, so a caller can act on it instead of
+    // re-parsing a Hebrew sentence. `status` too, for the same reason.
+    const err = new Error(body.error || 'שגיאה ' + resp.status);
+    err.status = resp.status;
+    err.body = body;
+    if (body.duplicates) err.duplicates = body.duplicates;
+    if (body.conflictId) err.conflictId = body.conflictId;
+    if (body.archiveId) err.archiveId = body.archiveId;
+    throw err;
+  }
   return body;
 }
 
@@ -2518,13 +2552,54 @@ function onWorkerStatusChange(){
 // edited (so re-saving an unchanged name doesn't trigger the warning).
 // Match is exact-trim — Hebrew doesn't have case folding, and for mixed
 // English/Hebrew names the user almost always wants exact equality.
-function onWorkerNameInput(){
-  const name = document.getElementById('w_name').value.trim();
-  const warning = document.getElementById('w_nameDupWarning');
-  if (!name){ warning.style.display = 'none'; return; }
+// Normalize a name the same way the SERVER does, so the inline warning and
+// the server's 409 agree. Padding, double spaces, bidi marks and the Hebrew
+// gershayim are all invisible on screen and all fatal to the consumers'
+// exact-name matching — see normalizeWorkerName_ in apps-script/Code.gs.
+function normalizeWorkerNameClient(name){
+  return String(name == null ? '' : name)
+    .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '')
+    .replace(/\u05f4/g, '"')
+    .replace(/\u05f3/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+function normalizeWorkerPhoneClient(phone){
+  return String(phone == null ? '' : phone).replace(/\D/g, '');
+}
+
+// Existing workers matching the form's name or phone, excluding the one
+// being edited. Same rule as the server's duplicateWorkers_.
+function duplicateWorkersClient(name, phone){
+  const n = normalizeWorkerNameClient(name);
+  const p = normalizeWorkerPhoneClient(phone);
   const editingId = editingWorker && editingWorker.id;
-  const dup = WORKERS.some(w => w.name === name && w.id !== editingId);
-  warning.style.display = dup ? '' : 'none';
+  return WORKERS.filter(w => {
+    if (!w || w.id === editingId) return false;
+    if (n && normalizeWorkerNameClient(w.name) === n) return true;
+    if (p && normalizeWorkerPhoneClient(w.phone) === p) return true;
+    return false;
+  });
+}
+
+// Soft duplicate detection, on every keystroke of BOTH the name and the
+// phone. A duplicated worker is double-counted in payroll and breaks the
+// consumers' exact-name matching, and the most common cause is a second
+// house entered as a second person — so the warning says that.
+function onWorkerNameInput(){
+  const name = document.getElementById('w_name').value;
+  const phoneEl = document.getElementById('w_phone');
+  const phone = phoneEl ? phoneEl.value : '';
+  const warning = document.getElementById('w_nameDupWarning');
+  const dups = duplicateWorkersClient(name, phone);
+  if (!dups.length){ warning.style.display = 'none'; return; }
+  const byPhone = normalizeWorkerPhoneClient(phone) &&
+    dups.some(w => normalizeWorkerPhoneClient(w.phone) === normalizeWorkerPhoneClient(phone));
+  warning.textContent = byPhone
+    ? '⚠️ טלפון זהה רשום כבר ל' + dups[0].name + ' — בית נוסף הוא שיבוץ נוסף, לא עובד/ת חדש/ה'
+    : '⚠️ עובד/ת בשם זהה כבר קיים/ת — בית נוסף הוא שיבוץ נוסף, לא עובד/ת חדש/ה';
+  warning.style.display = '';
 }
 function closeWorker(){
   document.getElementById('workerOverlay').classList.remove('show');
@@ -2611,7 +2686,26 @@ async function saveWorker(){
     const workerPayload = wasEdit
       ? { action: 'updateWorker', id: workerId, worker: { name, notes, shift_commitment: shiftCommitment, startDate, phone } }
       : { action: 'createWorker', worker: { name, notes, shift_commitment: shiftCommitment, startDate, phone } };
-    const wRes = await doAction(workerPayload);
+    let wRes;
+    try {
+      wRes = await doAction(workerPayload);
+    } catch (err) {
+      // The server refuses a create whose name or phone matches an existing
+      // worker, and names the matching rows. It is a WARNING, not a veto:
+      // two people really can share a name. Moran says which by answering
+      // here, and confirmDuplicate:true is the only thing that lets it
+      // through — so a duplicate is always a deliberate act.
+      if (!wasEdit && err && err.duplicates && err.duplicates.length) {
+        const names = err.duplicates.map(d => d.name).join(', ');
+        const ok = confirm('כבר קיים/ת במערכת: ' + names +
+          '. אם זה אותו אדם בבית נוסף, יש לסגור ולהוסיף בית לעובד/ת הקיים/ת במקום ליצור רשומה חדשה.' +
+          ' ליצור בכל זאת רשומה נפרדת?');
+        if (!ok) { setBusy('workerSaveBtn', false); return; }
+        wRes = await doAction(Object.assign({}, workerPayload, { confirmDuplicate: true }));
+      } else {
+        throw err;
+      }
+    }
     if (wRes && wRes.worker && wRes.worker.id){
       upsertById(WORKERS, wRes.worker);
       workerId = wRes.worker.id;
@@ -2672,18 +2766,30 @@ async function moveWorkerHouse(){
   }
   const asg = ASSIGNMENTS.find(a => a.id === editingWorker.assignmentId);
   if (!asg){ toast('שגיאה: שיבוץ לא נמצא', true); return; }
-  if (!confirm('להעביר את ' + editingWorker.name + ' לבית ' + houseName(target) + '? השיבוץ הנוכחי יעבור לשם.')) return;
+  // Phase 2: a transfer ENDS the placement at the old house and STARTS a new
+  // one at the target with the same workerId, so the history of where they
+  // worked survives. The confirmation says so, because the effect is no
+  // longer "the row moves".
+  const effectiveFrom = document.getElementById('w_targetFrom')
+    ? document.getElementById('w_targetFrom').value
+    : '';
+  if (effectiveFrom && !/^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom)){
+    toast('תאריך מעבר לא תקין', true); return;
+  }
+  const fromTxt = effectiveFrom ? fmtDate(effectiveFrom) : fmtDate(calcTodayStr());
+  if (!confirm('להעביר את ' + editingWorker.name + ' לבית ' + houseName(target) +
+      ' מתאריך ' + fromTxt + '? השיבוץ ב' + houseName(asg.house) +
+      ' יסתיים ויישמר בהיסטוריה, ושיבוץ חדש ייפתח בבית היעד באותם תנאים.')) return;
 
   setBusy('workerSaveBtn', true);
   try {
-    // Dedicated move action — changes only the house, keeps all terms.
-    const res = await doAction({ action: 'moveAssignment', id: asg.id, house: target });
-    if (res && res.assignment && res.assignment.id){
-      upsertById(ASSIGNMENTS, res.assignment);
-    } else {
-      // Fallback: patch locally so the UI reflects the move.
-      upsertById(ASSIGNMENTS, Object.assign({}, asg, { house: target }));
-    }
+    const res = await doAction({
+      action: 'moveAssignment', id: asg.id, house: target,
+      effectiveFrom: effectiveFrom || undefined,
+    });
+    // The transfer produced a NEW assignment id and an archive row, so a
+    // local patch cannot represent it — reconcile from the server.
+    await reconcile();
     closeWorker();
     render();
     toast('העובד/ת הועבר/ה לבית ' + houseName(target));
@@ -3015,8 +3121,11 @@ function openTerminate(assignmentId){
     editingTerm.workerName + ' · ' + houseName(a.house) + ' · ' + a.role;
   document.getElementById('tm_date').value = calcTodayStr();
   document.getElementById('tm_reasonDetail').value = '';
+  // Phase 2: a reason is REQUIRED. The blank first option forces an
+  // explicit choice, and 'לא צוין' is in the list as the deliberate
+  // opt-out — so "no reason" is on the record rather than an empty cell.
   const sel = document.getElementById('tm_reasonType');
-  let html = '<option value="">— ללא ציון —</option>';
+  let html = '<option value="">יש לבחור סיבה</option>';
   TERMINATION_REASONS.forEach(r => {
     html += `<option value="${escapeHtml(r)}">${escapeHtml(r)}</option>`;
   });
@@ -3034,7 +3143,16 @@ async function saveTerminate(){
   const reasonType = document.getElementById('tm_reasonType').value;
   const reasonDetail = document.getElementById('tm_reasonDetail').value.trim();
   if (!terminationDate){ toast('יש להזין תאריך סיום', true); return; }
-  if (!confirm('להפסיק את השיבוץ של ' + editingTerm.workerName + ' בתאריך ' + fmtDate(terminationDate) + '?')) return;
+  if (!reasonType){ toast('יש לבחור סיבת סיום', true); return; }
+  if (reasonType === 'אחר' && !reasonDetail){ toast('בסיבה אחר יש לפרט', true); return; }
+  // The confirmation names the worker, the date and the reason, and says
+  // what happens after the date — a termination is not undoable from the UI.
+  const future = terminationDate > calcTodayStr();
+  const tail = future
+    ? ' העלות תמשיך להיצבר עד התאריך הזה.'
+    : ' העלות מתאפסת מהתאריך הזה.';
+  if (!confirm('להפסיק את השיבוץ של ' + editingTerm.workerName +
+      ' בתאריך ' + fmtDate(terminationDate) + '? סיבה: ' + reasonType + '.' + tail)) return;
   setBusy('termSaveBtn', true, 'שומר…');
   try {
     await doAction({
@@ -3486,7 +3604,25 @@ function renderSwitch(){
   el.innerHTML=html;
 }
 function go(v){ view=v; rosterFilter=''; render(); window.scrollTo(0,0); }
-function logout(){ clearToken(); showPinGate(); }
+// Logout tells the server to REVOKE the session before dropping the local
+// token. Before Phase 2 it only cleared localStorage, so a copied token
+// stayed valid for its full lifetime. The local token is cleared either
+// way -- if the network call fails, the user is still signed out here, and
+// the token expires on its own.
+async function logout(){
+  const t = token();
+  clearToken();
+  showPinGate();
+  if (!t) return;
+  try {
+    await fetch('/api/logout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + t },
+    });
+  } catch (err) {
+    // Deliberately silent: the user is already signed out locally.
+  }
+}
 
 function render(){
   renderSwitch();
@@ -4049,23 +4185,61 @@ function rosterTable(rows){
 // section now (rendered separately). Stub absences (empty workerId) are
 // shown as full rows with the same actions; the worker slot reads
 // "משבצת לא מאוישת".
+// The derived status of an absence — dates are the truth, the stored cell is
+// a cached hint. Mirror of absenceStatusFor_ in apps-script/Code.gs.
+// 'future' matters: before Phase 2 a planned absence was stored as 'ended',
+// so it was invisible here and skipped by the overlap guard.
+function absenceStatus(absence, today){
+  const s = String((absence && absence.startDate) || '');
+  const e = String((absence && absence.endDate) || '');
+  const t = today || calcTodayStr();
+  if (!s || !e) return 'ended';
+  if (s > t) return 'future';
+  if (e < t) return 'ended';
+  return 'active';
+}
+
+// An absence with no worker is an UNSTAFFED POSITION — nobody is missing,
+// the slot is simply empty. Kept visually distinct from an employee
+// absence, because the two mean different things to a coordinator and only
+// one of them is about a person.
+function isUnstaffedPosition(absence){
+  return !String((absence && absence.workerId) || '').trim();
+}
+
+const ABSENCE_STATUS_LABELS = {
+  active: 'פעילה',
+  future: 'עתידית',
+  ended: 'הסתיימה',
+};
+
 function renderAbsenceRow(absence){
-  const wName = escapeHtml(workerName(absence.workerId) || 'משבצת לא מאוישת');
+  const unstaffed = isUnstaffedPosition(absence);
+  const wName = escapeHtml(unstaffed ? 'משבצת לא מאוישת' : (workerName(absence.workerId) || 'עובד/ת לא מזוהה'));
   const dates = `${escapeHtml(fmtDate(absence.startDate))} – ${escapeHtml(fmtDate(absence.endDate))}`;
   const aId = escapeHtml(absence.id);
+  const status = absenceStatus(absence);
 
-  const rowActions = absence.status === 'active'
-    ? `<div class="event-action" style="display:flex;gap:6px">
+  // A FUTURE absence can be deleted but not "ended" — there is nothing to
+  // end yet. An ended one is history and gets no actions at all.
+  let rowActions = '';
+  if (status === 'active'){
+    rowActions = `<div class="event-action" style="display:flex;gap:6px">
          <button class="btn btn-sm" onclick="endAbsence('${aId}')">סיום</button>
          <button class="btn btn-sm btn-danger-hover" onclick="deleteAbsence('${aId}')">מחיקה</button>
-       </div>`
-    : '';
+       </div>`;
+  } else if (status === 'future'){
+    rowActions = `<div class="event-action" style="display:flex;gap:6px">
+         <button class="btn btn-sm btn-danger-hover" onclick="deleteAbsence('${aId}')">ביטול</button>
+       </div>`;
+  }
 
   return `
-  <div class="event-row">
+  <div class="event-row ${unstaffed ? 'event-unstaffed' : ''} abs-${status}">
     <div class="event-main">
       <span class="name">${wName}</span>
-      <span class="event-badge">היעדרות</span>
+      <span class="event-badge">${unstaffed ? 'משבצת פנויה' : 'היעדרות'}</span>
+      <span class="abs-status-pill abs-status-${status}">${ABSENCE_STATUS_LABELS[status]}</span>
       ${rowActions}
     </div>
     <div class="event-meta">
@@ -4168,7 +4342,15 @@ function houseView(id){
   // logged AT this house (i.e. where this house's workers cover
   // elsewhere). Two independent sections; coverages are no longer
   // nested under absences.
-  const houseAbsences = calcActiveAbsences(ABSENCES, today).filter(ab => ab.house === id);
+  // Absences AT this house, split three ways by date and again by whether
+  // they are about a person at all. Before Phase 2 only the active ones were
+  // reachable, so a planned absence existed in the sheet and nowhere else.
+  const houseAllAbsences = ABSENCES.filter(ab => ab && ab.house === id);
+  const absByStatus = { active: [], future: [], ended: [] };
+  houseAllAbsences.forEach(ab => { absByStatus[absenceStatus(ab, today)].push(ab); });
+  const houseAbsences = absByStatus.active;
+  const staffAbsences = houseAbsences.filter(ab => !isUnstaffedPosition(ab));
+  const unstaffedSlots = houseAbsences.filter(isUnstaffedPosition);
   const houseCoverages = COVERAGES.filter(c =>
     c.coveringHouse === id && calcIsCoverageActive(c, today, ABSENCES)
   );
@@ -4187,19 +4369,32 @@ function houseView(id){
     <div id="rosterFreelancer">${rosterTableInner(split.freelancer)}</div>
   </div>`;
 
+  // Employee absences and unstaffed positions are two different facts, so
+  // they get two lists rather than one mixed one. Future and past absences
+  // sit behind their own headings underneath.
+  function absList(rows, emptyText){
+    return rows.length
+      ? `<div class="event-list">${rows.map(renderAbsenceRow).join('')}</div>`
+      : `<div class="empty">${escapeHtml(emptyText)}</div>`;
+  }
   const absencesSection = `
   <div class="section">
     <div class="section-head">
-      <h2>היעדרויות פעילות</h2>
+      <h2>היעדרויות ומשבצות לא מאוישות</h2>
       <div style="display:flex;gap:10px;align-items:center">
-        <span class="count-pill">${houseAbsences.length}</span>
+        <span class="count-pill" title="היעדרויות פעילות">${houseAbsences.length}</span>
         <button class="btn btn-primary" onclick="openAbsence({house:'${escapeHtml(id)}'})">+ אירוע היעדרות</button>
       </div>
     </div>
     <div class="tablecard accent-edge">
-      ${houseAbsences.length
-        ? `<div class="event-list">${houseAbsences.map(renderAbsenceRow).join('')}</div>`
-        : `<div class="empty">אין כרגע היעדרויות פעילות בבית זה</div>`}
+      <h3 class="subgroup-head">היעדרויות עובדים פעילות <span class="count-pill">${staffAbsences.length}</span></h3>
+      ${absList(staffAbsences, 'אין כרגע היעדרויות עובדים בבית זה')}
+      <h3 class="subgroup-head">משבצות לא מאוישות <span class="count-pill">${unstaffedSlots.length}</span></h3>
+      ${absList(unstaffedSlots, 'אין משבצות לא מאוישות בבית זה')}
+      <h3 class="subgroup-head">היעדרויות עתידיות <span class="count-pill">${absByStatus.future.length}</span></h3>
+      ${absList(absByStatus.future, 'אין היעדרויות מתוכננות')}
+      <h3 class="subgroup-head">היסטוריית היעדרויות <span class="count-pill">${absByStatus.ended.length}</span></h3>
+      ${absList(absByStatus.ended, 'אין היעדרויות שהסתיימו')}
     </div>
   </div>`;
 

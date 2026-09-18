@@ -384,6 +384,8 @@ test('createWorker persists phone in column 8 as TEXT (number format "@") and ec
   const ctx = loadCtx();
   const sh = fakeSheet([HEADERS.slice()]);
   ctx.sheetByName = () => sh;
+  // createWorker reads the workers tab to run the Phase 2 duplicate guard.
+  ctx.sheetByNameOrNull = () => sh;
   const res = plain(ctx.createWorker({ worker: { name: 'רון', phone: '050-123-4567' } }));
   assert.strictEqual(res.worker.phone, '0501234567');
   const row = sh.rows[1];
@@ -395,6 +397,7 @@ test('createWorker without a phone writes a blank cell and no format', () => {
   const ctx = loadCtx();
   const sh = fakeSheet([HEADERS.slice()]);
   ctx.sheetByName = () => sh;
+  ctx.sheetByNameOrNull = () => sh;
   const res = plain(ctx.createWorker({ worker: { name: 'רון' } }));
   assert.strictEqual(res.worker.phone, '');
   assert.strictEqual(sh.rows[1][7], '');
