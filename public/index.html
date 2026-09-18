@@ -618,6 +618,18 @@ tbody tr:hover{
   background:var(--warning);color:#1a1200;
   vertical-align:middle;margin-inline-start:6px;
 }
+/* Missing start date: the placement IS counted, at its full amount, but
+   nobody knows since when — so its money is reported separately from both
+   the confirmed and the estimated figure. Amber, because it is a gap to
+   fill in rather than a number that is wrong. */
+.nostart-badge{
+  display:inline-block;
+  font-size:10.5px;font-weight:700;
+  padding:1px 7px;border-radius:999px;
+  background:color-mix(in srgb, var(--warning) 28%, #fff);
+  color:#5a3c00;border:1px solid var(--warning);
+  vertical-align:middle;margin-inline-start:6px;
+}
 /* Missing-data badge: a required rate or date is absent, so the number
    shown is short. Deliberately louder than the estimate badge. */
 .miss-badge{
@@ -1668,6 +1680,17 @@ let FEED_LOG = [];
 // → the dashboard renders NO banner, never a false alert. An array (possibly
 // empty) = real data → the flag logic in lib/calc.js may flag guides.
 let HADRACHOT_COMPLETED = null;
+// Whether the first-hadracha feature is CONFIGURED at all, as answered by
+// GET /api/hadrachot-status:
+//   null  — not asked yet
+//   false — the server has no hadrachot URL/secret, so the feature does not
+//           exist in this deployment
+//   true  — configured
+// While this is not `true` the whole feature renders NOTHING: no banner, and
+// no «הדרכות» row in the sync panel, which would otherwise sit there saying
+// "never synced" forever about an app that is not connected. The code stays
+// exactly where it is — restore the configuration and it all comes back.
+let HADRACHOT_CONFIGURED = null;
 let view = 'central';
 // Selected month (YYYY-MM) for the cost view. Hourly / per_session costs
 // reflect this month's actuals (falling back to the estimate + an "אומדן"
@@ -1746,7 +1769,10 @@ async function loadData(){
 async function loadHadrachotStatus(){
   try{
     const body = await apiFetch('/api/hadrachot-status');
-    if (!body || body.configured !== true) return;
+    HADRACHOT_CONFIGURED = !!(body && body.configured === true);
+    // Unconfigured is a final answer, not a failure: there is nothing to
+    // show and nothing to retry. Everything hadrachot-shaped stays hidden.
+    if (!HADRACHOT_CONFIGURED) return;
     const completed = calcParseHadrachotStatus(body.data);
     if (!completed) return;
     HADRACHOT_COMPLETED = completed;
@@ -1934,7 +1960,8 @@ function rebuildCostReport(){
 // A house's slice of the report. A house with nothing at all this month
 // still needs a zeroed shape so the views never branch on null.
 const EMPTY_HOUSE_COST = {
-  actualConfirmed: 0, estimated: 0, projectedTotal: 0, missingData: 0,
+  actualConfirmed: 0, estimated: 0, missingDataCost: 0,
+  projectedTotal: 0, missingData: 0,
   instructorsCost: 0, instructorsEstimated: 0,
   budget: null, instructorsBudget: null,
   variance: { budget: null, cost: 0, variance: null, pct: null, status: 'none' },
@@ -1956,6 +1983,18 @@ function missingBadge(what){
   const t = what ? `חסר במערכת: ${what}` : 'חסרים נתונים לחישוב מלא';
   return ` <span class="miss-badge" title="${escapeHtml(t)}">חסרים נתונים</span>`;
 }
+// The amber chip for a placement whose worker has no start date. The cost is
+// still counted in full — but it is reported in the missing-data bucket
+// rather than as confirmed money, and this is where the page says so.
+const NOSTART_CHIP_TEXT = 'חסר תאריך תחילה';
+const NOSTART_CHIP_TITLE = 'לא הוזן תאריך תחילת עבודה, כך שלא ידוע מאיזה חודש העלות נצברת. הסכום נספר בסך הכל אך אינו נחשב מאושר או אומדן';
+function noStartBadge(){
+  return ` <span class="nostart-badge" title="${escapeHtml(NOSTART_CHIP_TITLE)}">${NOSTART_CHIP_TEXT}</span>`;
+}
+// Shown wherever a total is presented in a month that recorded no real
+// hours or sessions at all: the confirmed figure is ₪0 and every shekel on
+// screen is a projection.
+const NO_ACTUALS_TEXT = 'לא הוזנו נתוני אמת';
 // Month label appended to a total, so no figure on the page is ambiguous
 // about which month it belongs to.
 function monthTag(){
@@ -1987,6 +2026,9 @@ function monthCostCellInner(a){
     tail = ` <span class="actual-note">סיים/ה לפני החודש</span>`;
   } else if (/_PRORATED$/.test(line.rule)) {
     tail = ` <span class="actual-note">${line.daysCounted} מתוך ${line.daysInMonth} ימים</span>`;
+  }
+  if (line.missingStartDate) {
+    tail += noStartBadge();
   }
   if (line.missingData && line.missingData.length) {
     tail += missingBadge(line.missingData.join(', '));
@@ -2023,8 +2065,16 @@ function totalCostMonth(){
 // without parentheses.
 function costSplitSub(t){
   const parts = [];
-  if (t.actualConfirmed) parts.push(`מאושר ${fmt(t.actualConfirmed)}`);
+  // A month with no monthly_actuals rows has no confirmed money at all, and
+  // says so instead of quietly showing nothing: ₪0 with the reason beside
+  // it. The whole figure then sits in the estimate, where the engine put it.
+  if (COST && COST.hasActuals === false) {
+    parts.push(`מאושר ${fmt(0)} · ${NO_ACTUALS_TEXT}`);
+  } else if (t.actualConfirmed) {
+    parts.push(`מאושר ${fmt(t.actualConfirmed)}`);
+  }
   if (t.estimated) parts.push(`אומדן ${fmt(t.estimated)}`);
+  if (t.missingDataCost) parts.push(`${NOSTART_CHIP_TEXT} ${fmt(t.missingDataCost)}`);
   if (t.missingData) parts.push(`${t.missingData} שיבוצים ללא נתונים מלאים`);
   return parts.join(' · ');
 }
@@ -2105,11 +2155,20 @@ function exportsSection(){
 //                 already odd.
 //   therapists:   pulls on every getData, same reasoning.
 //   hadrachot:    pulled far less often, so a week is the sensible line.
+//   `shown` — an optional gate. A consumer whose feature is not configured
+//             in this deployment is not "never synced", it simply does not
+//             exist here, and a permanent red row about it teaches Moran to
+//             ignore the panel. The row returns the moment the feature is
+//             configured again.
 const FEED_CONSUMER_META = [
   { key: 'coordinators', label: 'רכזים', what: 'מצבת מדריכים', staleHours: 24 },
   { key: 'therapists', label: 'מטפלים', what: 'מצבת מטפלים', staleHours: 24 },
-  { key: 'hadrachot', label: 'הדרכות', what: 'מצבת להדרכה', staleHours: 24 * 7 },
+  { key: 'hadrachot', label: 'הדרכות', what: 'מצבת להדרכה', staleHours: 24 * 7,
+    shown: () => HADRACHOT_CONFIGURED === true },
 ];
+function shownFeedConsumers(){
+  return FEED_CONSUMER_META.filter(m => !m.shown || m.shown());
+}
 
 // Hours since an ISO timestamp, or null when there is no usable timestamp.
 function hoursSince(iso){
@@ -2136,7 +2195,7 @@ function syncStatusSection(){
   const byKey = {};
   FEED_LOG.forEach(r => { if (r && r.consumer) byKey[r.consumer] = r; });
 
-  const rows = FEED_CONSUMER_META.map(meta => {
+  const rows = shownFeedConsumers().map(meta => {
     const r = byKey[meta.key];
     const h = r ? hoursSince(r.lastServedAt) : null;
     let cls, status;
@@ -3878,6 +3937,9 @@ const HADRACHA_MISSING_START_TEXT = 'אנשי צוות פעילים ללא תא�
 // calcFirstHadrachaFlags in lib/calc.js.
 function hadrachaBannerHtml(){
   if (!Array.isArray(HADRACHOT_COMPLETED)) return '';
+  // And nothing at all while the feature is unconfigured, even if an array
+  // somehow arrived: a reminder nobody can act on is worse than no reminder.
+  if (HADRACHOT_CONFIGURED !== true) return '';
   const flags = calcFirstHadrachaFlags(WORKERS, ASSIGNMENTS, HADRACHOT_COMPLETED, calcTodayStr());
   if (!flags.overdue.length && !flags.missingStart.length) return '';
   const overdueLine = flags.overdue.length
@@ -3924,6 +3986,7 @@ function centralView(){
           <div class="n">${fmt(houseT)}</div>
           <div class="t">עלות חודשית ${monthTag()}</div>
           ${hc.estimated ? `<div class="bonus-line">כולל אומדן ${fmt(hc.estimated)}</div>` : ''}
+          ${hc.missingDataCost ? `<div class="bonus-line">כולל ${NOSTART_CHIP_TEXT} ${fmt(hc.missingDataCost)}</div>` : ''}
           ${hc.missingData ? `<div class="bonus-line">${hc.missingData} שיבוצים ללא נתונים מלאים</div>` : ''}
           ${extra ? `<div class="bonus-line">כולל תוספות מחליפים ${fmt(extra)}</div>` : ''}
           ${pending ? `<div class="bonus-line">כולל בתקופת הודעה ${fmt(pending)}</div>` : ''}
@@ -4273,7 +4336,7 @@ function startDatesView(){
     const nameKey = escapeHtml(String(w.name||'').toLowerCase());
     return `
     <tr id="sdrow_${id}" data-name="${nameKey}" data-has-date="${w.startDate ? '1' : '0'}">
-      <td>${escapeHtml(w.name)}</td>
+      <td>${escapeHtml(w.name)}<span id="sdchip_${id}">${w.startDate ? '' : noStartBadge()}</span></td>
       <td class="note-cell">${escapeHtml(sdWorkerHouses(w.id))}</td>
       <td><input type="date" id="sd_${id}" value="${sd}" style="max-width:170px"/></td>
       <td>
@@ -4358,7 +4421,18 @@ function syncStartDateRow(workerId){
   const row = document.getElementById('sdrow_' + workerId);
   const w = workerById(workerId);
   if (row) row.setAttribute('data-has-date', (w && w.startDate) ? '1' : '0');
+  syncStartDateChip(workerId);
   applyStartDatesFilter();
+}
+
+// The amber «חסר תאריך תחילה» chip is the same one the cost cells carry, in
+// the one screen where it can actually be fixed. Toggled in place rather
+// than re-rendered, so unsaved dates and focus survive a single-row save.
+function syncStartDateChip(workerId){
+  const el = document.getElementById('sdchip_' + workerId);
+  if (!el) return;
+  const w = workerById(workerId);
+  el.innerHTML = (w && w.startDate) ? '' : noStartBadge();
 }
 
 // Batch-save every row whose date input differs from the stored value.
@@ -4379,6 +4453,7 @@ async function saveAllStartDates(){
       const row = document.getElementById('sdrow_' + u.id);
       const w = workerById(u.id);
       if (row) row.setAttribute('data-has-date', (w && w.startDate) ? '1' : '0');
+      syncStartDateChip(u.id);
     });
     applyStartDatesFilter();
     updateStartDateProgress();
