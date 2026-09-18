@@ -31,20 +31,31 @@ function loadPage() {
   return { dom, errors };
 }
 
-async function authAndBoot(dom, fixture) {
+// `opts.hadrachot` is what GET /api/hadrachot-status answers. The default
+// is the deployment as it actually stands: the feature has no configuration,
+// so the server says so and the whole feature renders nothing.
+async function authAndBoot(dom, fixture, opts) {
   const data = Object.assign({
     workers: [], assignments: [], absences: [], coverages: [], archiveV3: [],
     monthlyActuals: [], budgets: [], hearings: [], feedLog: [],
     houses: { ramot: [], asher: [], ofroni: [], rehab: [], pardes: [], sde_eliezer: [], hq: [] },
     events: [], archive: [],
   }, fixture || {});
-  dom.window.fetch = async () => ({
-    ok: true, status: 200,
-    text: async () => JSON.stringify(data),
-    json: async () => data,
-  });
+  const hadrachot = (opts && opts.hadrachot) || { configured: false };
+  dom.window.fetch = async (url) => {
+    const body = String(url).indexOf('/api/hadrachot-status') >= 0 ? hadrachot : data;
+    return {
+      ok: true, status: 200,
+      text: async () => JSON.stringify(body),
+      json: async () => body,
+    };
+  };
   dom.window.localStorage.setItem('ezone_staff_token_v1', 'fake.token');
   await dom.window.boot();
+  // boot fires loadHadrachotStatus and does not await it, by design. Let the
+  // promise chain settle so the panel reflects the answer.
+  await new Promise(r => setTimeout(r, 0));
+  await new Promise(r => setTimeout(r, 0));
 }
 
 function fullTime(id, workerId, house, salary, over) {
@@ -228,17 +239,35 @@ test('a mid-month transfer shows one month of salary split across the two houses
 // Phase 3 — the סטטוס סנכרון panel
 // ---------------------------------------------------------------------------
 
-test('the sync panel names all three consumers, even ones that never pulled', async () => {
+test('the sync panel names every CONFIGURED consumer, even ones that never pulled', async () => {
   const { dom } = loadPage();
   await authAndBoot(dom, {});
   const text = dom.window.document.body.textContent;
   assert.match(text, /סטטוס סנכרון/);
-  ['רכזים', 'מטפלים', 'הדרכות'].forEach(label => {
+  ['רכזים', 'מטפלים'].forEach(label => {
     assert.match(text, new RegExp(label), label + ' must be listed');
   });
   const never = [...dom.window.document.querySelectorAll('tr.sync-never')];
-  assert.equal(never.length, 3, 'with nothing in the log, all three read "never"');
+  assert.equal(never.length, 2, 'with nothing in the log, both read "never"');
   assert.match(never[0].textContent, /לא סונכרן מעולם/);
+  dom.window.close();
+});
+
+test('an unconfigured consumer is hidden entirely rather than reading "never synced" forever', async () => {
+  const { dom } = loadPage();
+  await authAndBoot(dom, {});            // hadrachot: { configured: false }
+  const rows = [...dom.window.document.querySelectorAll('.budget-table tr')];
+  assert.strictEqual(rows.find(r => /הדרכות/.test(r.textContent)), undefined,
+    'a feature that does not exist in this deployment must not render a dead row');
+  dom.window.close();
+});
+
+test('configure it and the row comes straight back — the code never went away', async () => {
+  const { dom } = loadPage();
+  await authAndBoot(dom, {}, { hadrachot: { configured: true, data: { completed: [] } } });
+  const rows = [...dom.window.document.querySelectorAll('.budget-table tr')];
+  assert.ok(rows.find(r => /הדרכות/.test(r.textContent)),
+    'configured → the consumer is listed again');
   dom.window.close();
 });
 
@@ -266,10 +295,8 @@ test('a recent pull reads as synced, a long-ago one as stale', async () => {
   assert.match(ther.textContent, /לפני 5 ימים/);
   assert.match(ther.textContent, /לא סונכרן זמן רב/);
 
-  // hadrachot pulls far less often, so five days would NOT be stale there —
-  // but it has not pulled at all here.
-  const hadr = rows.find(r => /הדרכות/.test(r.textContent));
-  assert.ok(hadr.classList.contains('sync-never'));
+  // hadrachot is unconfigured in this deployment, so it has no row at all.
+  assert.strictEqual(rows.find(r => /הדרכות/.test(r.textContent)), undefined);
   dom.window.close();
 });
 
@@ -281,7 +308,7 @@ test('the hadrachot consumer has a longer staleness threshold than the other two
       { consumer: 'hadrachot', lastServedAt: fiveDaysAgo, lastRowCount: 12, serveCount: 2, status: 'ok' },
       { consumer: 'coordinators', lastServedAt: fiveDaysAgo, lastRowCount: 12, serveCount: 2, status: 'ok' },
     ],
-  });
+  }, { hadrachot: { configured: true, data: { completed: [] } } });
   const rows = [...dom.window.document.querySelectorAll('.budget-table tr')];
   const hadr = rows.find(r => /הדרכות/.test(r.textContent));
   const coord = rows.find(r => /רכזים/.test(r.textContent));
@@ -301,7 +328,101 @@ test('an unusable timestamp reads as never synced rather than crashing', async (
     ],
   });
   const rows = [...dom.window.document.querySelectorAll('tr.sync-never')];
-  assert.equal(rows.length, 3);
+  assert.equal(rows.length, 2, 'the two configured consumers');
   dom.window.close();
   assert.equal(errors.length, 0, 'no script errors');
+});
+
+// ---------------------------------------------------------------------------
+// missing start dates, and a month with no real data
+// ---------------------------------------------------------------------------
+
+test('a placement whose worker has no start date wears the amber חסר תאריך תחילה chip', async () => {
+  const { dom, errors } = loadPage();
+  await authAndBoot(dom, {
+    workers: [
+      { id: 'w1', name: 'ללא תאריך', notes: '', createdAt: '', startDate: '' },
+      { id: 'w2', name: 'עם תאריך', notes: '', createdAt: '', startDate: '2020-01-01' },
+    ],
+    assignments: [fullTime('a1', 'w1', 'ramot', 3000), fullTime('a2', 'w2', 'ramot', 5000)],
+  });
+  dom.window.onMonthChange('2026-09');
+  dom.window.go('ramot');
+  const doc = dom.window.document;
+
+  const chips = [...doc.querySelectorAll('.nostart-badge')];
+  assert.equal(chips.length, 1, 'exactly the undated placement is chipped');
+  assert.match(chips[0].textContent, /חסר תאריך תחילה/);
+  assert.match(chips[0].getAttribute('title'), /תאריך תחילת עבודה/,
+    'the chip explains itself on hover');
+
+  dom.window.close();
+  assert.equal(errors.length, 0, 'no script errors');
+});
+
+test('its cost is still counted in the total, and reported in its own bucket', async () => {
+  const { dom } = loadPage();
+  await authAndBoot(dom, {
+    workers: [
+      { id: 'w1', name: 'ללא תאריך', notes: '', createdAt: '', startDate: '' },
+      { id: 'w2', name: 'עם תאריך', notes: '', createdAt: '', startDate: '2020-01-01' },
+    ],
+    assignments: [fullTime('a1', 'w1', 'ramot', 3000), fullTime('a2', 'w2', 'ramot', 5000)],
+    monthlyActuals: [{ id: 'm1', assignmentId: 'a2', month: '2026-09', actualHours: 1 }],
+  });
+  dom.window.onMonthChange('2026-09');
+
+  assert.match(networkTotalText(dom), /8,?000/, 'the worker is counted, not dropped');
+  const sub = [...dom.window.document.querySelectorAll('.stat .sub')].map(e => e.textContent).join(' ');
+  assert.match(sub, /חסר תאריך תחילה ₪?3,?000/, 'the missing-data bucket is named and sized');
+  assert.match(sub, /מאושר ₪?5,?000/, 'and it is NOT inside the confirmed figure');
+  dom.window.close();
+});
+
+test('the start-dates screen shows the same chip, where it can be fixed', async () => {
+  const { dom } = loadPage();
+  await authAndBoot(dom, {
+    workers: [
+      { id: 'w1', name: 'ללא תאריך', notes: '', createdAt: '', startDate: '' },
+      { id: 'w2', name: 'עם תאריך', notes: '', createdAt: '', startDate: '2020-01-01' },
+    ],
+    assignments: [fullTime('a1', 'w1', 'ramot', 3000), fullTime('a2', 'w2', 'ramot', 5000)],
+  });
+  dom.window.go('startdates');
+  const doc = dom.window.document;
+  const chips = [...doc.querySelectorAll('.nostart-badge')];
+  assert.equal(chips.length, 1);
+  assert.ok(doc.getElementById('sdrow_w1').contains(chips[0]), 'on the undated row');
+  dom.window.close();
+});
+
+test('a month with no recorded actuals says so, instead of calling the projection confirmed', async () => {
+  const { dom } = loadPage();
+  await authAndBoot(dom, {
+    workers: [{ id: 'w1', name: 'ותיקה', notes: '', createdAt: '', startDate: '2020-01-01' }],
+    assignments: [fullTime('a1', 'w1', 'ramot', 10000)],
+    monthlyActuals: [],
+  });
+  dom.window.onMonthChange('2026-09');
+  const sub = [...dom.window.document.querySelectorAll('.stat .sub')].map(e => e.textContent).join(' ');
+
+  assert.match(sub, /מאושר ₪?0/, 'confirmed-actual is ₪0');
+  assert.match(sub, /לא הוזנו נתוני אמת/, 'and the page says why');
+  assert.match(sub, /אומדן ₪?10,?000/, 'the whole figure sits in the estimate');
+  assert.match(networkTotalText(dom), /10,?000/, 'the total itself does not move');
+  dom.window.close();
+});
+
+test('record one actual and the confirmed figure comes back', async () => {
+  const { dom } = loadPage();
+  await authAndBoot(dom, {
+    workers: [{ id: 'w1', name: 'ותיקה', notes: '', createdAt: '', startDate: '2020-01-01' }],
+    assignments: [fullTime('a1', 'w1', 'ramot', 10000)],
+    monthlyActuals: [{ id: 'm1', assignmentId: 'a1', month: '2026-09', actualHours: 0 }],
+  });
+  dom.window.onMonthChange('2026-09');
+  const sub = [...dom.window.document.querySelectorAll('.stat .sub')].map(e => e.textContent).join(' ');
+  assert.match(sub, /מאושר ₪?10,?000/);
+  assert.ok(!/לא הוזנו נתוני אמת/.test(sub));
+  dom.window.close();
 });

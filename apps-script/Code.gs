@@ -3891,35 +3891,135 @@ function computeGuidesForCoordinators_() {
 /* ============================================================
    Data integrity report — runDataIntegrityReportNow()
    ------------------------------------------------------------
-   EDITOR-RUN AND READ-ONLY. It never edits, deletes, renames or
-   reorders a single existing cell. The only write it can make is
-   creating ONE brand-new tab (runDataIntegrityReportToSheetNow),
-   named IntegrityReport_YYYYMMDD — and if that name is taken it
-   picks IntegrityReport_YYYYMMDD_HHmm rather than touching the
-   existing one.
+   EDITOR-RUN. The computation itself is a PURE, write-free
+   function; the run wrapper writes TWO report tabs and nothing
+   else:
+
+     «דוח תקינות»   — one row per finding, WITH the worker name,
+                      the house and the employment type, so a
+                      finding can be acted on without looking an
+                      id up anywhere. Overwritten each run.
+     «ניקוי נתונים» — one row per duplicate GROUP or record, with
+                      an empty «החלטה» column and a dropdown.
+                      Overwritten each run, except that decisions
+                      already entered are carried over by their
+                      key, so a rebuild never erases Moran's work.
+
+   Every write goes through integrityWriteReportTab_, which REFUSES
+   any tab name that is not one of those two. A data tab can
+   therefore never be touched by the report, and rows are always
+   written with setValues over a cleared tab — never appended.
 
    How to run it: see docs/STAFFING_DATA_INTEGRITY_REPORT.md.
 
-     runDataIntegrityReportNow()          → logs only (Execution log)
-     runDataIntegrityReportToSheetNow()   → logs + writes a NEW tab
+     runDataIntegrityReportNow()          → logs + the two tabs
+     runDataIntegrityReportToSheetNow()   → the same, plus a dated
+                                            IntegrityReport_ snapshot tab
+     applyCleanupDecisionsNow(dryRun)     → acts on «החלטה».
+                                            DRY RUN unless dryRun === false.
 
    The whole computation is the pure function
    computeDataIntegrityReport_(data, todayYmd), so it is unit-tested
    in tests/data-integrity.test.js against fixtures without a sheet.
 
    Finding codes are ASCII (stored values stay ASCII — Hebrew is
-   display only, and the Hebrew explanations live in the docs).
+   display only, and the Hebrew explanations live in the docs and in
+   the «מה לעשות» column of the report tab).
    ============================================================ */
 
 // Severity ranking used to sort the findings, worst first.
 const INTEGRITY_SEVERITY_ORDER = { error: 0, warn: 1, info: 2 };
 
-// Columns of the IntegrityReport_YYYYMMDD tab. Written once, to a tab that
-// did not exist a moment earlier — no append-only concern applies.
-const INTEGRITY_REPORT_HEADERS = [
-  'severity', 'code', 'entity', 'entity_id', 'worker_id', 'assignment_id',
-  'house', 'detail',
+// Display-only Hebrew for the severity column of the report tab.
+const INTEGRITY_SEVERITY_LABELS = { error: 'שגיאה', warn: 'אזהרה', info: 'מידע' };
+
+// The two tabs the report owns. NOTHING else may be written by it —
+// integrityWriteReportTab_ enforces this by name.
+const INTEGRITY_REPORT_TAB = 'דוח תקינות';
+const CLEANUP_TAB = 'ניקוי נתונים';
+const INTEGRITY_WRITABLE_TABS = [INTEGRITY_REPORT_TAB, CLEANUP_TAB];
+
+// Where a worker row goes when a cleanup decision archives it. APPEND-ONLY,
+// like every other tab: a worker is moved here, never deleted, so the row
+// (and the reason it was retired) survives forever.
+const WORKERS_ARCHIVE_TAB = 'workers_archive';
+const HEADERS_WORKERS_ARCHIVE = [
+  'id', 'name', 'notes', 'created_at', 'shift_commitment', 'start_date',
+  'gmach_month', 'phone', 'decision', 'reason', 'keeper_id', 'archived_at',
 ];
+
+// Columns of the Moran-facing «דוח תקינות» tab. Hebrew headers because this
+// tab exists to be read by a person; the VALUES in `code` stay ASCII.
+const INTEGRITY_SHEET_HEADERS = [
+  'חומרה', 'קוד', 'סוג רשומה', 'מזהה', 'שם העובד/ת', 'בית', 'סוג העסקה',
+  'סיווג', 'מה לעשות', 'פירוט', 'מזהים בקבוצה', 'מומלץ לשמור',
+  'worker_id', 'assignment_id',
+];
+
+// Columns of the dated IntegrityReport_YYYYMMDD snapshot tab (ASCII, for
+// export / diffing). Written once, to a tab that did not exist a moment
+// earlier — no append-only concern applies.
+const INTEGRITY_REPORT_HEADERS = [
+  'severity', 'code', 'entity', 'entity_id', 'worker_id', 'worker_name',
+  'house_id', 'employment_type', 'assignment_id', 'classification',
+  'members', 'recommended_keeper', 'detail',
+];
+
+// Columns of the «ניקוי נתונים» tab. «החלטה» is the ONLY column Moran fills
+// in; «מפתח» is the technical key that carries a decision across rebuilds
+// and must not be edited.
+const CLEANUP_SHEET_HEADERS = [
+  'קוד', 'סוג רשומה', 'שם העובד/ת', 'בית', 'מה לעשות', 'פירוט',
+  'מזהים בקבוצה', 'מומלץ לשמור', 'החלטה', 'הערה', 'מפתח',
+];
+const CLEANUP_DECISION_COL = CLEANUP_SHEET_HEADERS.indexOf('החלטה') + 1;
+const CLEANUP_KEY_COL = CLEANUP_SHEET_HEADERS.indexOf('מפתח') + 1;
+const CLEANUP_NOTE_COL = CLEANUP_SHEET_HEADERS.indexOf('הערה') + 1;
+const CLEANUP_CODE_COL = CLEANUP_SHEET_HEADERS.indexOf('קוד') + 1;
+const CLEANUP_NAME_COL = CLEANUP_SHEET_HEADERS.indexOf('שם העובד/ת') + 1;
+const CLEANUP_MEMBERS_COL = CLEANUP_SHEET_HEADERS.indexOf('מזהים בקבוצה') + 1;
+const CLEANUP_KEEPER_COL = CLEANUP_SHEET_HEADERS.indexOf('מומלץ לשמור') + 1;
+
+// The four decisions, as the dropdown offers them. Stored in Hebrew because
+// the cell is Moran's, not a feed's.
+const CLEANUP_KEEP = 'השאר';
+const CLEANUP_MERGE = 'מזג';
+const CLEANUP_ARCHIVE = 'העבר לארכיב';
+const CLEANUP_FIX = 'תקן';
+const CLEANUP_DECISIONS = [CLEANUP_KEEP, CLEANUP_MERGE, CLEANUP_ARCHIVE, CLEANUP_FIX];
+
+// Which codes are worth a cleanup decision. Everything else is reported but
+// not offered as an action — there is nothing a decision could do about it.
+const CLEANUP_CODES = [
+  'DUP_WORKER_NAME', 'DUP_WORKER_PHONE', 'SMOKE_RECORD',
+  'WORKER_NO_ASSIGNMENT', 'BLANK_NAME',
+];
+
+// One short Hebrew sentence per code: what Moran should actually do. Display
+// only — the machine-readable half of every finding stays in `code`/`detail`.
+const INTEGRITY_ADVICE_HE = {
+  DUP_WORKER_NAME: 'לבדוק אם זו אותה עובדת. אם כן — למזג לתוך המזהה המומלץ ולהעביר את השאר לארכיב',
+  DUP_WORKER_PHONE: 'אותו מספר טלפון בשתי רשומות. לבדוק אם זו אותה עובדת ולמזג',
+  DUP_ASSIGNMENT: 'שתי שורות שיבוץ לאותה עובדת באותו בית — העלות נספרת פעמיים. למחוק את המיותרת',
+  ORPHAN_ASSIGNMENT: 'שיבוץ ללא עובדת. להצמיד לעובדת קיימת או להעביר לארכיב',
+  ARCHIVED_STILL_ACTIVE: 'השיבוץ נמצא גם בארכיב וגם במצבת הפעילה — העלות נספרת פעמיים',
+  FUTURE_START_ACTIVE: 'תאריך תחילת העבודה עתידי אך השיבוץ מחויב כבר היום. לתקן את התאריך',
+  INVALID_HOUSE: 'מזהה בית שאינו מוכר. לתקן לאחד מהבתים המוגדרים',
+  INVALID_EMPLOYMENT_TYPE: 'סוג העסקה שאינו מוכר. לתקן לאחד מסוגי ההעסקה המוגדרים',
+  NEGATIVE_RATE: 'סכום שלילי. לתקן את הסכום בשיבוץ',
+  BLANK_NAME: 'רשומת עובד/ת ללא שם — נעלמת מכל המסכים. להשלים שם או להעביר לארכיב',
+  MISSING_START_DATE: 'להשלים תאריך תחילת עבודה במסך וותק ותאריכי קליטה. עד אז העלות מסומנת כחסרת נתונים',
+  MISSING_RATE: 'להשלים את הסכום או הכמות בשיבוץ — אחרת הוא עולה 0 בכל חודש',
+  SMOKE_RECORD: 'נראית כרשומת בדיקה. אם אינה אמיתית — להעביר לארכיב',
+  NAME_SYNC_RISK: 'השם לא יתאים לאפליקציות הרכזים והמטפלים. לתקן רווחים וגרשיים',
+  ABSENCE_OVERLAP: 'שתי היעדרויות חופפות לאותה עובדת ובית. לאחד או לקצר אחת מהן',
+  ORPHAN_ABSENCE: 'היעדרות ללא עובדת קיימת. להצמיד לעובדת או למחוק',
+  ORPHAN_COVERAGE: 'החלפה ללא עובדת קיימת. להצמיד לעובדת או למחוק',
+  DANGLING_COVERAGE_LINK: 'ההחלפה מצביעה על היעדרות שאינה קיימת. אפשר להשאיר — היא נספרת כהחלפה עצמאית',
+  UNSTAFFED_POSITION: 'תקן לא מאויש ולא היעדרות של עובד/ת. אין צורך בפעולה',
+  ORPHAN_ACTUALS: 'שורת נתוני אמת לשיבוץ שאינו קיים. אפשר למחוק',
+  WORKER_NO_ASSIGNMENT: 'עובד/ת ללא שיבוץ פעיל. לבדוק מול הסיווג אם עזב/ה או מעולם לא שובץ/ה',
+};
 
 // Names that look like smoke-test / demo leftovers rather than real people.
 // Matched case-insensitively against the normalized name.
@@ -3959,6 +4059,10 @@ const INTEGRITY_REQUIRED_RATE_FIELDS = {
   fixed_retainer: ['retainerAmount'],
 };
 
+// Every finding carries the SAME shape. workerName / houseId /
+// employmentType are filled in by the enrichment pass at the end of
+// computeDataIntegrityReport_ when the check itself did not supply them —
+// a report that shows only ids cannot be acted on.
 function integrityFinding_(severity, code, entity, entityId, detail, extra) {
   const f = {
     severity: severity,
@@ -3966,16 +4070,43 @@ function integrityFinding_(severity, code, entity, entityId, detail, extra) {
     entity: entity,
     entityId: String(entityId || ''),
     workerId: '',
+    workerName: '',
     assignmentId: '',
-    house: '',
+    houseId: '',
+    employmentType: '',
+    classification: '',
+    members: [],
+    memberDetails: [],
+    recommendedKeeper: '',
     detail: String(detail || ''),
   };
   if (extra) {
     if (extra.workerId) f.workerId = String(extra.workerId);
+    if (extra.workerName) f.workerName = String(extra.workerName);
     if (extra.assignmentId) f.assignmentId = String(extra.assignmentId);
-    if (extra.house) f.house = String(extra.house);
+    if (extra.house) f.houseId = String(extra.house);
+    if (extra.houseId) f.houseId = String(extra.houseId);
+    if (extra.employmentType) f.employmentType = String(extra.employmentType);
+    if (extra.classification) f.classification = String(extra.classification);
+    if (extra.members) f.members = extra.members.slice();
+    if (extra.memberDetails) f.memberDetails = extra.memberDetails.slice();
+    if (extra.recommendedKeeper) f.recommendedKeeper = String(extra.recommendedKeeper);
   }
   return f;
+}
+
+// Distinct values of one field across a list of assignments, joined for
+// display: 'ramot + asher'. Empty when the worker holds no placement.
+function integrityJoinField_(list, field) {
+  const seen = {};
+  const out = [];
+  (list || []).forEach(function (a) {
+    const v = String((a && a[field]) || '');
+    if (!v || seen[v]) return;
+    seen[v] = true;
+    out.push(v);
+  });
+  return out.join(' + ');
 }
 
 // The whole report, as a pure function of the data. `data` is the shape
@@ -3994,39 +4125,109 @@ function computeDataIntegrityReport_(data, todayYmd) {
 
   const workerById = {};
   workers.forEach(function (w) { if (w && w.id) workerById[w.id] = w; });
+  const assignmentById = {};
+  const assignmentsByWorker = {};
+  assignments.forEach(function (a) {
+    if (!a) return;
+    if (a.id) assignmentById[a.id] = a;
+    const k = String(a.workerId || '');
+    if (k) (assignmentsByWorker[k] = assignmentsByWorker[k] || []).push(a);
+  });
+  const archiveByWorker = {};
+  archive.forEach(function (r) {
+    if (!r) return;
+    const k = String(r.workerId || '');
+    if (k) (archiveByWorker[k] = archiveByWorker[k] || []).push(r);
+  });
 
-  // ---- 1/2. duplicate workers by normalized name and by phone ----
-  const byName = {};
-  const byPhone = {};
-  workers.forEach(function (w) {
-    if (!w) return;
-    const n = integrityNormalizeName_(w.name);
-    if (n) (byName[n] = byName[n] || []).push(w);
-    const p = integrityNormalizePhone_(w.phone);
-    if (p) (byPhone[p] = byPhone[p] || []).push(w);
-  });
-  Object.keys(byName).forEach(function (n) {
-    const group = byName[n];
-    if (group.length < 2) return;
-    group.forEach(function (w) {
-      findings.push(integrityFinding_(
-        'error', 'DUP_WORKER_NAME', 'worker', w.id,
-        'same normalized name as ' + (group.length - 1) + ' other worker row(s): ids ' +
-          group.map(function (g) { return g.id; }).join(', '),
-        { workerId: w.id }));
+  // ---- 1/2. duplicate workers, ONE finding per GROUP ----
+  // A row per member was unreadable: ten rows for four real questions, each
+  // repeating the other members' ids in its own text. One row per group
+  // carries every member's name, phone, houses, assignment count and
+  // created timestamp, plus the id worth keeping.
+  function memberDetail_(w) {
+    const live = assignmentsByWorker[w.id] || [];
+    const arch = archiveByWorker[w.id] || [];
+    return {
+      id: String(w.id || ''),
+      name: String(w.name || ''),
+      phone: String(w.phone || ''),
+      houses: integrityJoinField_(live, 'house') || integrityJoinField_(arch, 'house'),
+      employmentTypes: integrityJoinField_(live, 'employmentType'),
+      assignmentCount: live.length,
+      archivedCount: arch.length,
+      createdAt: String(w.createdAt || ''),
+      startDate: String(w.startDate || ''),
+    };
+  }
+
+  // The keeper is the OLDEST id that actually carries assignments — merging
+  // into an empty row would move every placement for nothing. With no member
+  // holding a placement, the oldest row wins and the reason says so.
+  function recommendKeeper_(members) {
+    function older(a, b) {
+      const ac = a.createdAt || '';
+      const bc = b.createdAt || '';
+      if (ac !== bc) return ac < bc ? a : b;     // blank sorts first — oldest unknown
+      return a.id < b.id ? a : b;
+    }
+    const withWork = members.filter(function (m) { return m.assignmentCount > 0; });
+    const pool = withWork.length ? withWork : members;
+    let best = pool[0];
+    pool.forEach(function (m) { best = older(best, m); });
+    return {
+      id: best.id,
+      reason: withWork.length
+        ? 'oldest id that carries assignments'
+        : 'no member carries an assignment — oldest id by created_at',
+    };
+  }
+
+  function duplicateGroupFindings_(code, keyFn, what) {
+    const by = {};
+    workers.forEach(function (w) {
+      if (!w) return;
+      const k = keyFn(w);
+      if (!k) return;
+      (by[k] = by[k] || []).push(w);
     });
-  });
-  Object.keys(byPhone).forEach(function (p) {
-    const group = byPhone[p];
-    if (group.length < 2) return;
-    group.forEach(function (w) {
+    Object.keys(by).sort().forEach(function (k) {
+      const group = by[k];
+      if (group.length < 2) return;
+      const members = group.map(memberDetail_);
+      members.sort(function (x, y) {
+        const c = String(x.createdAt) < String(y.createdAt) ? -1
+          : (String(x.createdAt) > String(y.createdAt) ? 1 : 0);
+        return c !== 0 ? c : (x.id < y.id ? -1 : (x.id > y.id ? 1 : 0));
+      });
+      const keeper = recommendKeeper_(members);
+      const ids = members.map(function (m) { return m.id; });
+      const detail = group.length + ' worker rows share the same ' + what + ' "' + k + '"; ' +
+        members.map(function (m) {
+          return m.id + ' = ' + (m.name || '(no name)') +
+            ', phone ' + (m.phone || '-') +
+            ', houses ' + (m.houses || '-') +
+            ', ' + m.assignmentCount + ' assignment(s)' +
+            (m.archivedCount ? ' + ' + m.archivedCount + ' archived' : '') +
+            ', created ' + (m.createdAt || '-');
+        }).join(' | ') +
+        '; keep ' + keeper.id + ' — ' + keeper.reason;
       findings.push(integrityFinding_(
-        'error', 'DUP_WORKER_PHONE', 'worker', w.id,
-        'phone shared with ' + (group.length - 1) + ' other worker row(s): ids ' +
-          group.map(function (g) { return g.id; }).join(', '),
-        { workerId: w.id }));
+        'error', code, 'worker_group', ids.join(','), detail,
+        {
+          members: ids,
+          memberDetails: members,
+          recommendedKeeper: keeper.id,
+          workerName: members.map(function (m) { return m.name; }).join(' | '),
+          houseId: integrityJoinField_(members, 'houses'),
+        }));
     });
-  });
+  }
+
+  duplicateGroupFindings_('DUP_WORKER_NAME',
+    function (w) { return integrityNormalizeName_(w.name); }, 'normalized name');
+  duplicateGroupFindings_('DUP_WORKER_PHONE',
+    function (w) { return integrityNormalizePhone_(w.phone); }, 'phone');
 
   // ---- 3. duplicate assignments (same worker at the same house twice) ----
   const byWorkerHouse = {};
@@ -4043,26 +4244,42 @@ function computeDataIntegrityReport_(data, todayYmd) {
         'error', 'DUP_ASSIGNMENT', 'assignment', a.id,
         'worker has ' + group.length + ' assignment rows at the same house: ids ' +
           group.map(function (g) { return g.id; }).join(', '),
-        { workerId: a.workerId, assignmentId: a.id, house: a.house }));
+        { workerId: a.workerId, assignmentId: a.id, house: a.house,
+          employmentType: a.employmentType }));
     });
   });
 
-  // ---- 4. workers with no assignment at all (and none archived either) ----
+  // ---- 4. workers with no assignment at all ----
+  // Cross-checked against archive_v3 and CLASSIFIED rather than lumped:
+  // a worker with an archived placement probably left, and a worker with no
+  // trace anywhere was probably never staffed. Nothing is archived
+  // automatically on the strength of this — it is a reading, not a verdict.
   const workersWithAssignment = {};
   assignments.forEach(function (a) { if (a && a.workerId) workersWithAssignment[a.workerId] = true; });
-  const workersWithArchive = {};
-  archive.forEach(function (a) { if (a && a.workerId) workersWithArchive[a.workerId] = true; });
   workers.forEach(function (w) {
     if (!w || !w.id) return;
     if (workersWithAssignment[w.id]) return;
-    const archivedOnly = !!workersWithArchive[w.id];
+    const arch = archiveByWorker[w.id] || [];
+    const departed = arch.length > 0;
+    let detail;
+    if (departed) {
+      const last = arch.slice().sort(function (x, y) {
+        return String(x.terminationDate || '') < String(y.terminationDate || '') ? 1 : -1;
+      })[0];
+      detail = 'probably departed: ' + arch.length + ' archived placement(s), last at ' +
+        String(last.house || '-') + ' terminated ' + String(last.terminationDate || '-') +
+        ' — no live assignment remains';
+    } else {
+      detail = 'never assigned: no assignment row and no archived placement — ' +
+        'the worker costs nothing and appears nowhere';
+    }
     findings.push(integrityFinding_(
-      archivedOnly ? 'info' : 'warn',
-      'WORKER_NO_ASSIGNMENT', 'worker', w.id,
-      archivedOnly
-        ? 'no current assignment; only archived placements remain'
-        : 'no assignment row and no archived placement — the worker costs nothing and appears nowhere',
-      { workerId: w.id }));
+      departed ? 'info' : 'warn',
+      'WORKER_NO_ASSIGNMENT', 'worker', w.id, detail,
+      { workerId: w.id,
+        classification: departed ? 'probably_departed' : 'never_assigned',
+        houseId: integrityJoinField_(arch, 'house'),
+        employmentType: integrityJoinField_(arch, 'employmentType') }));
   });
 
   // ---- 5. orphan assignments (workerId missing from the workers tab) ----
@@ -4072,7 +4289,8 @@ function computeDataIntegrityReport_(data, todayYmd) {
     findings.push(integrityFinding_(
       'error', 'ORPHAN_ASSIGNMENT', 'assignment', a.id,
       'worker_id "' + String(a.workerId || '') + '" has no row in the workers tab — silently dropped from every feed',
-      { workerId: a.workerId, assignmentId: a.id, house: a.house }));
+      { workerId: a.workerId, assignmentId: a.id, house: a.house,
+        employmentType: a.employmentType }));
   });
 
   // ---- 6/7. start dates: missing, and future dates counted as active ----
@@ -4083,7 +4301,8 @@ function computeDataIntegrityReport_(data, todayYmd) {
     if (!sd) {
       findings.push(integrityFinding_(
         'warn', 'MISSING_START_DATE', 'worker', w.id,
-        'no start date; every month-aware rule that needs one falls back to "always employed"',
+        'no start date; the cost line is tagged missingStartDate and its cost is ' +
+          'reported in the missing-data bucket, NOT in confirmed or estimated',
         { workerId: w.id }));
       return;
     }
@@ -4108,7 +4327,8 @@ function computeDataIntegrityReport_(data, todayYmd) {
       'error', 'ARCHIVED_STILL_ACTIVE', 'assignment', a.id,
       'assignment is archived (termination ' + String(arc.terminationDate || '') +
         ') but the live assignments tab still carries the row — cost is counted twice',
-      { workerId: a.workerId, assignmentId: a.id, house: a.house }));
+      { workerId: a.workerId, assignmentId: a.id, house: a.house,
+        employmentType: a.employmentType }));
   });
 
   // ---- 9. invalid house ids ----
@@ -4120,7 +4340,7 @@ function computeDataIntegrityReport_(data, todayYmd) {
       extra));
   }
   assignments.forEach(function (a) {
-    if (a) checkHouse('assignment', a.id, a.house, { workerId: a.workerId, assignmentId: a.id, house: a.house });
+    if (a) checkHouse('assignment', a.id, a.house, { workerId: a.workerId, assignmentId: a.id, house: a.house, employmentType: a.employmentType });
   });
   absences.forEach(function (x) {
     if (x) checkHouse('absence', x.id, x.house, { workerId: x.workerId, house: x.house });
@@ -4137,7 +4357,8 @@ function computeDataIntegrityReport_(data, todayYmd) {
   // ---- 10. missing / zero / negative rates ----
   assignments.forEach(function (a) {
     if (!a) return;
-    const extra = { workerId: a.workerId, assignmentId: a.id, house: a.house };
+    const extra = { workerId: a.workerId, assignmentId: a.id, house: a.house,
+      employmentType: a.employmentType };
     const type = String(a.employmentType || '');
     if (EMPLOYMENT_TYPES.indexOf(type) < 0) {
       findings.push(integrityFinding_(
@@ -4289,8 +4510,6 @@ function computeDataIntegrityReport_(data, todayYmd) {
   });
 
   // Monthly actuals pointing at an assignment that no longer exists.
-  const assignmentById = {};
-  assignments.forEach(function (a) { if (a && a.id) assignmentById[a.id] = a; });
   actuals.forEach(function (r) {
     if (!r) return;
     if (r.assignmentId && assignmentById[r.assignmentId]) return;
@@ -4298,6 +4517,31 @@ function computeDataIntegrityReport_(data, todayYmd) {
       'info', 'ORPHAN_ACTUALS', 'monthly_actuals', r.id,
       'assignment_id "' + String(r.assignmentId || '') + '" is not in the assignments tab (terminated or deleted)',
       { assignmentId: r.assignmentId }));
+  });
+
+  // ---- enrichment: never ship a row that is only ids ----
+  findings.forEach(function (f) {
+    if (!f.workerName && f.workerId) {
+      const w = workerById[f.workerId];
+      if (w) {
+        f.workerName = String(w.name || '');
+      } else {
+        const arch = archiveByWorker[f.workerId] || [];
+        f.workerName = arch.length ? String(arch[0].name || '') : '';
+      }
+    }
+    const a = f.assignmentId ? assignmentById[f.assignmentId] : null;
+    if (a) {
+      if (!f.houseId) f.houseId = String(a.house || '');
+      if (!f.employmentType) f.employmentType = String(a.employmentType || '');
+      if (!f.workerName && a.workerId && workerById[a.workerId]) {
+        f.workerName = String(workerById[a.workerId].name || '');
+      }
+    } else if (f.workerId) {
+      const list = assignmentsByWorker[f.workerId] || [];
+      if (!f.houseId) f.houseId = integrityJoinField_(list, 'house');
+      if (!f.employmentType) f.employmentType = integrityJoinField_(list, 'employmentType');
+    }
   });
 
   function severityRank(sev) {
@@ -4314,9 +4558,13 @@ function computeDataIntegrityReport_(data, todayYmd) {
 
   const byCode = {};
   const bySeverity = { error: 0, warn: 0, info: 0 };
+  const byClassification = {};
   findings.forEach(function (f) {
     byCode[f.code] = (byCode[f.code] || 0) + 1;
     bySeverity[f.severity] = (bySeverity[f.severity] || 0) + 1;
+    if (f.classification) {
+      byClassification[f.classification] = (byClassification[f.classification] || 0) + 1;
+    }
   });
 
   return {
@@ -4333,6 +4581,7 @@ function computeDataIntegrityReport_(data, todayYmd) {
     findings: findings,
     bySeverity: bySeverity,
     byCode: byCode,
+    byClassification: byClassification,
   };
 }
 
@@ -4385,22 +4634,178 @@ function readAllForIntegrity_() {
   };
 }
 
-// One line per finding in the Execution log, plus a summary. NO WRITES.
+/* ---------- writing the report tabs ---------- */
+
+// The ONE write path of the whole report. It refuses by name to write
+// anywhere except the two report tabs, so no bug in a row builder can reach
+// a data tab; and it always CLEARS and rewrites, so a tab can never grow by
+// appending an older run's rows underneath a newer one.
+function integrityWriteReportTab_(name, rows) {
+  if (INTEGRITY_WRITABLE_TABS.indexOf(name) < 0) {
+    throw new Error('integrityWriteReportTab_: refusing to write to "' + name +
+      '" — only ' + INTEGRITY_WRITABLE_TABS.join(' / ') + ' may be written');
+  }
+  const book = ss();
+  let sh = book.getSheetByName(name);
+  if (!sh) sh = book.insertSheet(name);
+  // Sheets keeps a cell's data validation through clear(), so a run that
+  // produces fewer rows than the last one would leave dropdowns hanging
+  // under the final row. Drop them explicitly first.
+  if (typeof sh.getMaxRows === 'function' && typeof sh.getMaxColumns === 'function') {
+    const all = sh.getRange(1, 1, sh.getMaxRows(), sh.getMaxColumns());
+    if (all && typeof all.clearDataValidations === 'function') all.clearDataValidations();
+  }
+  sh.clear();
+  const width = rows.reduce(function (m, r) { return Math.max(m, r.length); }, 0);
+  if (rows.length && width) {
+    const padded = rows.map(function (r) {
+      const out = r.slice();
+      while (out.length < width) out.push('');
+      return out;
+    });
+    sh.getRange(1, 1, padded.length, width).setValues(padded);
+  }
+  sh.setFrozenRows(1);
+  return sh;
+}
+
+// One row per finding, in the Hebrew Moran-facing shape.
+function integritySheetRow_(f) {
+  return [
+    INTEGRITY_SEVERITY_LABELS[f.severity] || f.severity,
+    f.code,
+    f.entity,
+    f.entityId,
+    f.workerName,
+    f.houseId,
+    f.employmentType,
+    f.classification,
+    INTEGRITY_ADVICE_HE[f.code] || '',
+    f.detail,
+    (f.members || []).join(', '),
+    f.recommendedKeeper,
+    f.workerId,
+    f.assignmentId,
+  ];
+}
+
+// The same finding in the ASCII snapshot shape.
+function integritySnapshotRow_(f) {
+  return [
+    f.severity, f.code, f.entity, f.entityId, f.workerId, f.workerName,
+    f.houseId, f.employmentType, f.assignmentId, f.classification,
+    (f.members || []).join(' '), f.recommendedKeeper, f.detail,
+  ];
+}
+
+/* ---------- the «ניקוי נתונים» worksheet ---------- */
+
+// The stable key of a cleanup row. It is what carries a decision across
+// rebuilds: same group / same record → same key → the decision survives.
+function cleanupKeyFor_(f) {
+  return f.code + ':' + ((f.members || []).length ? f.members.join('+') : f.entityId);
+}
+
+// Which findings deserve a decision row. Duplicate GROUPS come first (one
+// row each, not one per member), then the record-level codes.
+function cleanupFindings_(report) {
+  return (report.findings || []).filter(function (f) {
+    return CLEANUP_CODES.indexOf(f.code) >= 0;
+  });
+}
+
+// Decisions already entered, keyed by «מפתח». Read before the rebuild so a
+// re-run never erases Moran's work — the whole point of a worksheet she
+// fills in over days rather than in one sitting.
+function readCleanupDecisions_() {
+  const out = {};
+  const sh = sheetByNameOrNull(CLEANUP_TAB);
+  if (!sh) return out;
+  const values = sh.getDataRange().getValues();
+  if (values.length < 2) return out;
+  for (let i = 1; i < values.length; i++) {
+    const r = values[i];
+    const key = String(r[CLEANUP_KEY_COL - 1] || '').trim();
+    if (!key) continue;
+    out[key] = {
+      decision: String(r[CLEANUP_DECISION_COL - 1] || '').trim(),
+      note: String(r[CLEANUP_NOTE_COL - 1] || '').trim(),
+    };
+  }
+  return out;
+}
+
+function cleanupSheetRow_(f, previous) {
+  const key = cleanupKeyFor_(f);
+  const prev = previous[key] || {};
+  // A record-level finding has no group, so its own id goes in the ids
+  // column: the row must name what it is about without anyone decoding the
+  // key, and applyCleanupDecisionsNow reads the same column either way.
+  const ids = (f.members || []).length ? f.members : [f.entityId];
+  return [
+    f.code,
+    f.entity,
+    f.workerName,
+    f.houseId,
+    INTEGRITY_ADVICE_HE[f.code] || '',
+    f.detail,
+    ids.join(', '),
+    f.recommendedKeeper,
+    prev.decision || '',
+    prev.note || '',
+    key,
+  ];
+}
+
+// Rebuild «ניקוי נתונים». Overwritten, never appended; decisions are carried
+// over by key. The «החלטה» column gets the four-value dropdown so a decision
+// is picked, never typed — a typo there would simply be ignored by
+// applyCleanupDecisionsNow, which is worse than being impossible.
+function writeCleanupTab_(report) {
+  const previous = readCleanupDecisions_();
+  const items = cleanupFindings_(report);
+  const rows = [CLEANUP_SHEET_HEADERS].concat(items.map(function (f) {
+    return cleanupSheetRow_(f, previous);
+  }));
+  const sh = integrityWriteReportTab_(CLEANUP_TAB, rows);
+  if (items.length && typeof SpreadsheetApp.newDataValidation === 'function') {
+    const rule = SpreadsheetApp.newDataValidation()
+      .requireValueInList(CLEANUP_DECISIONS, true)
+      .setAllowInvalid(false)
+      .build();
+    sh.getRange(2, CLEANUP_DECISION_COL, items.length, 1).setDataValidation(rule);
+  }
+  return { sheet: sh, count: items.length, carriedOver: Object.keys(previous).length };
+}
+
+/* ---------- running it ---------- */
+
+// Logs every finding AND writes the two report tabs. Data tabs are never
+// touched — integrityWriteReportTab_ refuses anything else by name.
 function runDataIntegrityReportNow() {
   const report = computeDataIntegrityReport_(readAllForIntegrity_(), todayLocal());
   Logger.log('E-ZONE staffing data integrity report — ' + report.today);
   Logger.log('rows: ' + JSON.stringify(report.counts));
   Logger.log('findings by severity: ' + JSON.stringify(report.bySeverity));
   Logger.log('findings by code: ' + JSON.stringify(report.byCode));
+  Logger.log('findings by classification: ' + JSON.stringify(report.byClassification));
   report.findings.forEach(function (f) {
-    Logger.log([f.severity, f.code, f.entity, f.entityId, f.house, f.detail].join(' | '));
+    Logger.log([f.severity, f.code, f.entity, f.entityId, f.workerName,
+      f.houseId, f.employmentType, f.classification, f.detail].join(' | '));
   });
-  Logger.log('READ-ONLY: nothing was written. Run runDataIntegrityReportToSheetNow() to also create a new IntegrityReport_ tab.');
+
+  const rows = [INTEGRITY_SHEET_HEADERS].concat(report.findings.map(integritySheetRow_));
+  integrityWriteReportTab_(INTEGRITY_REPORT_TAB, rows);
+  const cleanup = writeCleanupTab_(report);
+  Logger.log('Wrote ' + report.findings.length + ' finding(s) to «' + INTEGRITY_REPORT_TAB +
+    '» and ' + cleanup.count + ' decision row(s) to «' + CLEANUP_TAB +
+    '». Both tabs are overwritten each run; no data tab was touched.');
   return report;
 }
 
-// Same report, plus ONE brand-new tab. Never touches an existing tab: if
-// today's name is taken it adds the time rather than overwriting.
+// Same report, plus ONE brand-new dated snapshot tab for export / diffing.
+// Never touches an existing tab: if today's name is taken it adds the time
+// rather than overwriting.
 function runDataIntegrityReportToSheetNow() {
   const report = runDataIntegrityReportNow();
   const book = ss();
@@ -4414,11 +4819,303 @@ function runDataIntegrityReportToSheetNow() {
     return report;
   }
   const sh = book.insertSheet(name);
-  const rows = [INTEGRITY_REPORT_HEADERS].concat(report.findings.map(function (f) {
-    return [f.severity, f.code, f.entity, f.entityId, f.workerId, f.assignmentId, f.house, f.detail];
-  }));
+  const rows = [INTEGRITY_REPORT_HEADERS].concat(report.findings.map(integritySnapshotRow_));
   sh.getRange(1, 1, rows.length, INTEGRITY_REPORT_HEADERS.length).setValues(rows);
   sh.setFrozenRows(1);
   Logger.log('Wrote ' + report.findings.length + ' finding(s) to the NEW tab ' + name + '. No existing tab was touched.');
   return report;
+}
+
+/* ============================================================
+   Guided cleanup — applyCleanupDecisionsNow(dryRun)
+   ------------------------------------------------------------
+   Reads the «החלטה» column of «ניקוי נתונים» and acts on it.
+
+     השאר          — nothing happens. The finding is accepted as-is.
+     מזג           — keep the chosen id, move the other members'
+                     assignments, absences and coverages onto it,
+                     then ARCHIVE the emptied worker rows with a
+                     reason. Nothing is deleted: an archived worker
+                     row is MOVED to workers_archive, where it keeps
+                     its id, its name and the reason it was retired.
+     העבר לארכיב   — archive that one worker row, same way. Refused
+                     while the worker still holds a live assignment,
+                     because that would orphan cost.
+     תקן           — a manual edit. Reported, never performed.
+
+   DRY RUN BY DEFAULT. Nothing is written unless dryRun === false —
+   not the sheet, not the audit log. applyCleanupDecisionsNow() with
+   no argument is always safe to run.
+
+   Every applied change is written to the audit log, one row per
+   field, exactly like a mutation from the app.
+   ============================================================ */
+
+function workersArchiveSheet_() {
+  const book = ss();
+  let sh = book.getSheetByName(WORKERS_ARCHIVE_TAB);
+  if (!sh) {
+    sh = book.insertSheet(WORKERS_ARCHIVE_TAB);
+    sh.getRange(1, 1, 1, HEADERS_WORKERS_ARCHIVE.length).setValues([HEADERS_WORKERS_ARCHIVE]);
+    sh.setFrozenRows(1);
+  }
+  return sh;
+}
+
+// Move ONE worker row out of `workers` and into `workers_archive`, with the
+// decision and reason that retired it. The row survives in full — this is a
+// move, never a delete.
+function cleanupArchiveWorker_(workerId, decision, reason, keeperId) {
+  const sh = sheetByName(WORKERS_TAB);
+  const row = findRow(sh, 0, workerId);
+  if (row < 0) return null;
+  const r = sh.getRange(row, 1, 1, HEADERS_WORKERS.length).getValues()[0];
+  const archivedAt = new Date().toISOString();
+  workersArchiveSheet_().appendRow([
+    String(r[0] || ''), String(r[1] || ''), String(r[2] || ''), String(r[3] || ''),
+    String(r[4] || ''), formatDateCell(r[5]), String(r[6] || ''), formatPhoneCell(r[7]),
+    decision, reason, keeperId || '', archivedAt,
+  ]);
+  sh.deleteRow(row);
+  return { id: String(r[0] || ''), name: String(r[1] || ''), archivedAt: archivedAt };
+}
+
+// Repoint every row that references `fromId` at `toId`. Returns what moved,
+// so the caller can log it and report it. `conflictHouses` are houses where
+// the keeper ALREADY holds a placement: moving a second row there would
+// create the double count the report exists to find, so those rows stay put.
+function cleanupMoveWorkerRows_(fromId, toId, conflictHouses) {
+  const moved = { assignments: [], absences: [], coverages: [], conflicts: [] };
+
+  const ash = sheetByName(ASSIGNMENTS_TAB);
+  const avals = ash.getDataRange().getValues();
+  for (let i = 1; i < avals.length; i++) {
+    if (String(avals[i][1]) !== String(fromId)) continue;
+    const house = String(avals[i][2] || '');
+    if (conflictHouses.indexOf(house) >= 0) {
+      moved.conflicts.push({ assignmentId: String(avals[i][0]), house: house });
+      continue;
+    }
+    ash.getRange(i + 1, 2).setValue(toId);
+    moved.assignments.push(String(avals[i][0]));
+  }
+
+  const bsh = sheetByNameOrNull(ABSENCES_TAB);
+  if (bsh) {
+    const bvals = bsh.getDataRange().getValues();
+    for (let i = 1; i < bvals.length; i++) {
+      if (String(bvals[i][1]) !== String(fromId)) continue;
+      bsh.getRange(i + 1, 2).setValue(toId);
+      moved.absences.push(String(bvals[i][0]));
+    }
+  }
+
+  const csh = sheetByNameOrNull(COVERAGES_TAB);
+  if (csh) {
+    const cvals = csh.getDataRange().getValues();
+    for (let i = 1; i < cvals.length; i++) {
+      if (String(cvals[i][2]) !== String(fromId)) continue;
+      csh.getRange(i + 1, 3).setValue(toId);
+      moved.coverages.push(String(cvals[i][0]));
+    }
+  }
+  return moved;
+}
+
+// Read the decision rows as plain objects. Rows with no decision, or with a
+// decision outside the four values, are reported and skipped — never guessed
+// at.
+function readCleanupPlan_() {
+  const sh = sheetByNameOrNull(CLEANUP_TAB);
+  if (!sh) return [];
+  const values = sh.getDataRange().getValues();
+  if (values.length < 2) return [];
+  const out = [];
+  for (let i = 1; i < values.length; i++) {
+    const r = values[i];
+    const key = String(r[CLEANUP_KEY_COL - 1] || '').trim();
+    if (!key) continue;
+    out.push({
+      row: i + 1,
+      key: key,
+      code: String(r[CLEANUP_CODE_COL - 1] || '').trim(),
+      workerName: String(r[CLEANUP_NAME_COL - 1] || '').trim(),
+      members: String(r[CLEANUP_MEMBERS_COL - 1] || '')
+        .split(',').map(function (s) { return s.trim(); }).filter(Boolean),
+      keeper: String(r[CLEANUP_KEEPER_COL - 1] || '').trim(),
+      decision: String(r[CLEANUP_DECISION_COL - 1] || '').trim(),
+      note: String(r[CLEANUP_NOTE_COL - 1] || '').trim(),
+    });
+  }
+  return out;
+}
+
+// dryRun defaults to TRUE. Only the explicit `false` applies anything.
+function applyCleanupDecisionsNow(dryRun) {
+  const apply = (dryRun === false);
+  const result = {
+    dryRun: !apply,
+    rows: 0,
+    planned: [],
+    applied: [],
+    skipped: [],
+    conflicts: [],
+  };
+
+  // The lock is taken BEFORE the decisions are read, not after: reading a
+  // plan and then acting on a roster someone else changed in between is
+  // exactly how a merge lands on the wrong row.
+  const lock = LockService.getScriptLock();
+  if (apply) lock.waitLock(30000);
+  try {
+    const rows = readCleanupPlan_();
+    result.rows = rows.length;
+    if (!rows.length) {
+      Logger.log('«' + CLEANUP_TAB + '» has no rows. Run runDataIntegrityReportNow() first.');
+      return result;
+    }
+    const workers = readWorkersSafe();
+    const workerById = {};
+    workers.forEach(function (w) { workerById[w.id] = w; });
+    const assignments = readAssignmentsSafe();
+    const byWorker = {};
+    assignments.forEach(function (a) {
+      (byWorker[a.workerId] = byWorker[a.workerId] || []).push(a);
+    });
+
+    rows.forEach(function (r) {
+      if (!r.decision) { result.skipped.push({ key: r.key, why: 'no decision' }); return; }
+      if (CLEANUP_DECISIONS.indexOf(r.decision) < 0) {
+        result.skipped.push({ key: r.key, why: 'unrecognized decision "' + r.decision + '"' });
+        return;
+      }
+      if (r.decision === CLEANUP_KEEP) {
+        result.skipped.push({ key: r.key, why: 'השאר — accepted as-is' });
+        return;
+      }
+      if (r.decision === CLEANUP_FIX) {
+        result.skipped.push({ key: r.key, why: 'תקן — a manual edit, never performed automatically' });
+        return;
+      }
+
+      if (r.decision === CLEANUP_MERGE) {
+        const keeper = r.keeper || r.members[0];
+        if (!keeper || !workerById[keeper]) {
+          result.skipped.push({ key: r.key, why: 'keeper "' + keeper + '" is not a worker row' });
+          return;
+        }
+        const others = r.members.filter(function (id) { return id && id !== keeper; });
+        if (!others.length) {
+          result.skipped.push({ key: r.key, why: 'nothing to merge — the group has one member' });
+          return;
+        }
+        const keeperHouses = (byWorker[keeper] || []).map(function (a) { return a.house; });
+        others.forEach(function (id) {
+          if (!workerById[id]) {
+            result.skipped.push({ key: r.key, why: 'member "' + id + '" is not a worker row' });
+            return;
+          }
+          const mine = byWorker[id] || [];
+          const conflicts = mine.filter(function (a) { return keeperHouses.indexOf(a.house) >= 0; });
+          const plan = {
+            key: r.key, decision: r.decision, keeper: keeper, member: id,
+            name: (workerById[id] || {}).name || '',
+            assignments: mine.map(function (a) { return a.id; }),
+            conflicts: conflicts.map(function (a) { return a.id + '@' + a.house; }),
+          };
+          result.planned.push(plan);
+          if (conflicts.length) {
+            result.conflicts.push(plan);
+            result.skipped.push({ key: r.key,
+              why: 'member "' + id + '" holds a placement at a house the keeper already staffs — ' +
+                'merging would double count. Resolve ' + plan.conflicts.join(', ') + ' by hand first' });
+            return;
+          }
+          // The houses that were already the keeper's BEFORE this member is
+          // merged — the move must be judged against those, not against the
+          // list it is about to extend.
+          const blocked = keeperHouses.slice();
+          // The keeper now staffs these houses too, so a LATER member in the
+          // same group merging a placement at one of them is a conflict. Dry
+          // run and apply share this line, so the plan matches the outcome.
+          mine.forEach(function (a) {
+            if (keeperHouses.indexOf(a.house) < 0) keeperHouses.push(a.house);
+          });
+          // Keep the in-memory roster in step with the decisions already
+          // taken in THIS run: a later «העבר לארכיב» on the keeper must see
+          // the placements it has just been given, or it would archive a
+          // worker who now carries cost.
+          byWorker[keeper] = (byWorker[keeper] || []).concat(mine);
+          byWorker[id] = [];
+          if (!apply) return;
+          const moved = cleanupMoveWorkerRows_(id, keeper, blocked);
+          const reason = 'merge into ' + keeper;
+          const archived = cleanupArchiveWorker_(id, CLEANUP_MERGE, reason, keeper);
+          const entries = [];
+          moved.assignments.forEach(function (aid) {
+            entries.push({ action: 'applyCleanupDecisions', entity: 'assignment', entityId: aid,
+              field: 'worker_id', before: id, after: keeper, reason: reason });
+          });
+          moved.absences.forEach(function (bid) {
+            entries.push({ action: 'applyCleanupDecisions', entity: 'absence', entityId: bid,
+              field: 'worker_id', before: id, after: keeper, reason: reason });
+          });
+          moved.coverages.forEach(function (cid) {
+            entries.push({ action: 'applyCleanupDecisions', entity: 'coverage', entityId: cid,
+              field: 'covering_worker_id', before: id, after: keeper, reason: reason });
+          });
+          entries.push({ action: 'applyCleanupDecisions', entity: 'worker', entityId: id,
+            field: 'tab', before: WORKERS_TAB, after: WORKERS_ARCHIVE_TAB, reason: reason });
+          auditLog_(entries);
+          result.applied.push(Object.assign({}, plan, {
+            movedAssignments: moved.assignments,
+            movedAbsences: moved.absences,
+            movedCoverages: moved.coverages,
+            archived: !!archived,
+          }));
+        });
+        return;
+      }
+
+      // CLEANUP_ARCHIVE — one record, no keeper.
+      const id = r.members.length === 1 ? r.members[0] : (r.key.split(':')[1] || '');
+      if (!id || !workerById[id]) {
+        result.skipped.push({ key: r.key, why: 'row does not name a single worker to archive' });
+        return;
+      }
+      const live = byWorker[id] || [];
+      const plan = { key: r.key, decision: r.decision, member: id,
+        name: (workerById[id] || {}).name || '', assignments: live.map(function (a) { return a.id; }) };
+      result.planned.push(plan);
+      if (live.length) {
+        result.skipped.push({ key: r.key,
+          why: 'worker "' + id + '" still holds ' + live.length + ' live assignment(s) — ' +
+            'terminate them first, archiving now would orphan their cost' });
+        return;
+      }
+      if (!apply) return;
+      const reason = r.note || ('cleanup decision ' + r.code);
+      const archived = cleanupArchiveWorker_(id, CLEANUP_ARCHIVE, reason, '');
+      auditLog_([{ action: 'applyCleanupDecisions', entity: 'worker', entityId: id,
+        field: 'tab', before: WORKERS_TAB, after: WORKERS_ARCHIVE_TAB, reason: reason }]);
+      result.applied.push(Object.assign({}, plan, { archived: !!archived }));
+    });
+  } finally {
+    if (apply) lock.releaseLock();
+  }
+
+  Logger.log((result.dryRun ? 'DRY RUN — nothing was written. ' : 'APPLIED. ') +
+    result.rows + ' decision row(s): ' + result.planned.length + ' planned, ' +
+    result.applied.length + ' applied, ' + result.skipped.length + ' skipped, ' +
+    result.conflicts.length + ' conflict(s).');
+  result.planned.forEach(function (p) {
+    Logger.log('plan | ' + p.decision + ' | ' + p.member + ' ' + p.name +
+      ' | assignments ' + (p.assignments.join(', ') || '-') +
+      (p.keeper ? ' | keeper ' + p.keeper : ''));
+  });
+  result.skipped.forEach(function (s) { Logger.log('skip | ' + s.key + ' | ' + s.why); });
+  if (result.dryRun) {
+    Logger.log('Run applyCleanupDecisionsNow(false) to apply. Nothing above has happened yet.');
+  }
+  return result;
 }

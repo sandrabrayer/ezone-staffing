@@ -61,7 +61,7 @@ its own Script Property secret — no secret unlocks another feed.
 | **`role`** | ASCII, computed server-side: `מדריך/ה`→`guide`, `מנהל/ת`→`manager`, `רכז/ת`→`coordinator`, and `מטפל/ת` **with** `role_detail` `עו"ס` → `social_worker`. `role_detail` itself never leaves the feed. The detail is normalized before comparing (gershayim ״ → ASCII `"`) because hand-entered cells mix quote characters. |
 | **`active`** | `(a.status \|\| 'active') === 'active'` — per assignment |
 | **Error handling / retry** | as above |
-| **Failure visibility** | staffing-side the `feed_log` row and the «סטטוס סנכרון» panel; this consumer pulls rarely, so its staleness threshold is 7 days rather than 24 h. |
+| **Failure visibility** | staffing-side the `feed_log` row and the «סטטוס סנכרון» panel; this consumer pulls rarely, so its staleness threshold is 7 days rather than 24 h. **The row is shown only while the hadrachot integration is configured** (see §4): an app that is not connected is not "never synced", and a permanently red row teaches its reader to ignore the panel. |
 
 ## 4. Hadrachot app → staffing — first-supervision status (the only inbound feed)
 
@@ -69,11 +69,11 @@ its own Script Property secret — no secret unlocks another feed.
 |---|---|
 | **Source of truth** | the **hadrachot** app |
 | **Endpoint** | staffing `GET /api/hadrachot-status` (Express) → proxies `HADRACHOT_STATUS_URL` with `HADRACHOT_STATUS_SECRET` |
-| **Key** | Railway env vars `HADRACHOT_STATUS_URL` + `HADRACHOT_STATUS_SECRET` — **both optional** |
+| **Key** | Railway env vars `HADRACHOT_STATUS_URL` + `HADRACHOT_STATUS_SECRET` — **both optional, and neither is currently set.** Railway carries exactly six service variables: `APPS_SCRIPT_URL`, `MORAN_PIN`, `PORT`, `SESSION_DAYS`, `SESSION_SECRET`, `SHARED_SECRET`. The integration is therefore **out of scope**, and the app renders nothing for it. |
 | **Direction** | hadrachot → staffing |
 | **Frequency** | once per dashboard render |
 | **Payload** | relayed verbatim under `data`; staffing never interprets it server-side. All flag logic (the 30-day grace rule, `firstHadrachaFlags`) is client-side in `lib/calc.js`. |
-| **Error handling** | **unconfigured** → `200 {configured:false}`; **any upstream failure** → `5xx` with a generic body. In **both** cases the client renders **nothing** — never a false alert. The browser never sees the secret. |
+| **Error handling** | **unconfigured** → `200 {configured:false}`; **any upstream failure** → `5xx` with a generic body. In **both** cases the client renders **nothing** — never a false alert. The browser never sees the secret. The client stores the answer in `HADRACHOT_CONFIGURED`: while it is not `true`, **the whole feature is invisible** — no «הדרכה ראשונה» banner and no «הדרכות» row in the sync panel — and an unconfigured answer is final, so nothing is retried. **The code is kept, not deleted**: set the two env vars and everything returns on the next load. |
 | **Retry** | none |
 | **Failure visibility** | **none — silent by design.** A misconfigured URL and a healthy "nobody is overdue" look identical to Moran. The `feed_log` panel does NOT cover this: it logs feeds staffing *serves*, not the one it *consumes*. What is missing, and the two-step fix, is written up in [`CONSUMER_MIGRATION.md`](CONSUMER_MIGRATION.md). |
 

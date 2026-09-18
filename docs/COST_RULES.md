@@ -21,15 +21,38 @@ estimate into a confirmed number.
 | | |
 |---|---|
 | `lines[]` | one per assignment **and** one per coverage |
-| `totals` | `actualConfirmed`, `estimated`, `projectedTotal`, `missingData` |
+| `totals` | `actualConfirmed`, `estimated`, `missingDataCost`, `projectedTotal`, `missingData` |
 | `byHouse[house]` | the same totals, plus `instructorsCost`, `budget`, `instructorsBudget`, `variance`, `instructorsVariance` |
 | `rulesApplied` | how many lines each rule produced — a one-glance sanity check |
 
-`actualConfirmed + estimated === projectedTotal`, always, and the houses
-always sum to the network. Both are pinned by tests.
+`actualConfirmed + estimated + missingDataCost === projectedTotal`, always,
+and the houses always sum to the network. Both are pinned by tests.
 
 `missingData` on `totals` is a **count of lines**, not a sum of shekels: a
 line with a missing rate contributes 0 to the money and 1 to this counter.
+`missingDataCost` is the shekels — see the three buckets below.
+
+`hasActuals` says whether **this month** recorded any real hours or sessions
+at all, and `actualsForMonth` how many rows. It is per month, not per sheet:
+August having data says nothing about September.
+
+### Three money buckets
+
+`source` says how a line was **priced**. `bucket` says how far the number can
+be **trusted**, and those are different questions:
+
+| `bucket` | Meaning |
+|---|---|
+| `confirmed` | a recorded actual, or a confirmed zero such as an unpaid status |
+| `estimated` | the estimate on the assignment — or **anything at all** in a month with no recorded actuals |
+| `missing` | priced in full, but the worker has **no start date**, so nobody knows since when it accrues |
+| `none` | nothing priced it; the line costs 0 |
+
+The third bucket exists because a number computed from incomplete data is
+neither confirmed nor an estimate: it is a number nobody should defend until
+the gap is filled. It is still **counted in `projectedTotal`** — the worker is
+not dropped — and the UI marks every such line with an amber
+**«חסר תאריך תחילה»** chip.
 
 ### Every line carries a trace
 
@@ -78,8 +101,17 @@ explained on the spot instead of being argued about.
   over the `default` row; a month row whose instructors line is blank falls
   through to the default; no row at all means **`אין תקציב`**, not zero.
 * **A missing start date is flagged, never guessed at.** The placement is
-  priced as if always employed and the line carries `missingData:
-  ['startDate']` — a wrong start date is worse than a missing one.
+  priced as if always employed — a wrong start date is worse than a missing
+  one — and the line carries `missingData: ['startDate']` **and**
+  `missingStartDate: true`, which sends its money to `missingDataCost`
+  instead of letting it pass as confirmed. The bill does not move; what
+  changes is that the page stops presenting it as solid. See
+  `MISSING_START_DATE_HANDLING` below.
+* **A month with no recorded actuals reports no confirmed money.** With
+  `monthly_actuals` empty for the month, `actualConfirmed` is **₪0**, the
+  whole figure sits in `estimated`, and the UI says **«לא הוזנו נתוני אמת»**
+  beside it. One recorded row is enough to bucket the month line by line
+  again. See `ZERO_ACTUALS_POLICY` below.
 
 ---
 
@@ -135,3 +167,32 @@ an appended `effective_from` column, not a change of rule.
 ### 6 · Coverage payments go to the receiving house, once
 
 Stated here because it is a money decision, not a technical one. Today: yes.
+
+### 7 · `MISSING_START_DATE_HANDLING` — currently `'missing_data_bucket'`
+
+**A placement whose worker has no start date is still priced in full — but is
+that cost confirmed money, or missing-data money?** Today:
+**missing-data money**. It is counted in the total, tagged on the line, shown
+with an amber «חסר תאריך תחילה» chip, and reported in `missingDataCost`.
+
+The alternative, `'always_employed'`, is what the app did before: the blank
+cell was read as "employed for the whole of history" and the cost landed in
+`actualConfirmed` as if it were solid. Thirty workers were being billed for
+every month of history on the strength of a blank cell, with nothing on
+screen saying so. The pricing is identical under both settings; only the
+honesty of the presentation changes.
+
+**The fix is not a rule change — it is filling the dates in.** The
+«וותק ותאריכי קליטה» screen lists exactly those workers, chip and all.
+
+### 8 · `ZERO_ACTUALS_POLICY` — currently `'estimate_only'`
+
+**In a month where no real hours or sessions were recorded at all, may any
+figure be called confirmed?** Today: **no**. `actualConfirmed` is ₪0 and the
+whole month is an estimate, labelled «לא הוזנו נתוני אמת».
+
+`monthly_actuals` is currently empty for every month, so this is the state
+the app is actually in. The alternative, `'trust_terms'`, would count
+contractual amounts — a salary, a retainer, a coverage payment — as confirmed
+even with nothing recorded. That is defensible, and it is Moran's call, not
+this file's.
