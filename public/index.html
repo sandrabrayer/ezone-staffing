@@ -634,6 +634,41 @@ tbody tr:hover{
   font-size:11px;font-weight:700;color:var(--muted);
   margin-inline-start:6px;
 }
+/* The blocking load-error state. A failed initial load used to be a toast
+   that faded after three seconds over an empty screen, leaving no way back
+   except a manual refresh. */
+.load-error{padding:32px 24px;text-align:center}
+.load-error h2{margin:0 0 8px;font-size:18px}
+.load-error p{margin:0 0 16px;color:var(--muted)}
+/* Visually hidden but present for assistive technology. Used where the
+   visible design already makes a field's purpose obvious but a screen
+   reader would otherwise read an unlabelled box. NOT display:none — that
+   would remove it from the accessibility tree too. */
+.sr-only{
+  position:absolute;width:1px;height:1px;padding:0;margin:-1px;
+  overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0;
+}
+.pin-label{display:block;font-size:14px;color:var(--muted);margin-bottom:6px;text-align:start}
+/* A VISIBLE focus ring on everything keyboard-reachable. The browser
+   default is easy to lose against this palette, and without it a
+   keyboard-only pass through a modal is guesswork. :focus-visible so a
+   mouse click does not draw one. */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible{
+  outline:3px solid var(--accent, #1565c0);
+  outline-offset:2px;
+  border-radius:4px;
+}
+/* The דוחות button grid. Wraps at any width; each button is a full tap
+   target on a phone. */
+.export-grid{
+  display:flex;flex-wrap:wrap;gap:8px;padding:12px;
+}
+.export-btn{min-height:40px}
 /* Sync-status dots. The question this panel answers is binary enough that a
    colour is the right amount of signal: green pulled recently, amber has not
    pulled in a while, grey has never pulled at all. */
@@ -963,14 +998,23 @@ tr.sync-never td{color:var(--muted)}
   <div class="pin-card">
     <div class="brand-big">E-ZONE</div>
     <div class="sub">ניהול כוח אדם · גישה למורן בלבד</div>
-    <input id="pinInput" type="password" inputmode="numeric" maxlength="12" autocomplete="off"/>
-    <div class="pin-err" id="pinErr"></div>
+    <label for="pinInput" class="pin-label">קוד כניסה</label>
+    <input id="pinInput" type="password" inputmode="numeric" maxlength="12" autocomplete="off"
+           aria-describedby="pinErr"/>
+    <!-- role=alert so a screen reader announces a wrong code instead of it
+         only changing colour. aria-live keeps it announced on re-entry. -->
+    <div class="pin-err" id="pinErr" role="alert" aria-live="assertive"></div>
     <button class="btn btn-primary" id="pinSubmit">כניסה</button>
   </div>
 </div>
 
 <!-- Boot loader -->
-<div class="boot" id="boot"><div class="spin"></div></div>
+<!-- Loading state. role=status + aria-live so a screen reader says the app
+     is loading instead of announcing nothing; the spinner alone is silent. -->
+<div class="boot" id="boot" role="status" aria-live="polite">
+  <div class="spin"></div>
+  <span class="sr-only">טוען נתונים</span>
+</div>
 
 <div class="topbar" id="topbar" style="display:none">
   <div class="wrap">
@@ -987,7 +1031,7 @@ tr.sync-never td{color:var(--muted)}
      sub-header rather than a picker. Per-type cost fields toggle via
      data-wcost-field, mirroring the assignment modal. On edit, the
      worker's assignment at this house (if any) prefills the terms. -->
-<div class="overlay" id="workerOverlay">
+<div class="overlay" id="workerOverlay" role="dialog" aria-modal="true" aria-label="עובד/ת">
   <div class="modal">
     <div class="modal-head">
       <h3 id="workerModalTitle">עובד/ת חדש/ה</h3>
@@ -995,7 +1039,7 @@ tr.sync-never td{color:var(--muted)}
     </div>
     <div class="modal-body">
       <div class="field">
-        <label>שם מלא</label>
+        <label for="w_name">שם מלא</label>
         <input id="w_name" type="text" placeholder="שם העובד/ת" maxlength="80" oninput="onWorkerNameInput()"/>
         <div class="hint" id="w_nameDupWarning" style="display:none;color:var(--warning)">⚠️ עובד/ת בשם זהה כבר קיים/ת — בית נוסף הוא שיבוץ נוסף, לא עובד/ת חדש/ה</div>
       </div>
@@ -1005,7 +1049,7 @@ tr.sync-never td{color:var(--muted)}
            (existing employees start empty; a wrong date is worse than none).
            Feeds the roster column and the GuidesRoster digest tab. -->
       <div class="field">
-        <label>תאריך תחילת עבודה</label>
+        <label for="w_startDate">תאריך תחילת עבודה</label>
         <input id="w_startDate" type="date"/>
         <div class="hint">לא חובה — ניתן להשלים מאוחר יותר</div>
       </div>
@@ -1015,7 +1059,7 @@ tr.sync-never td{color:var(--muted)}
            through getGuidesForCoordinators, which schedules and WhatsApps
            guides by this number. Not financial. -->
       <div class="field">
-        <label>טלפון נייד</label>
+        <label for="w_phone">טלפון נייד</label>
         <input id="w_phone" type="tel" inputmode="numeric" maxlength="12" placeholder="05X-XXXXXXX" autocomplete="off" oninput="onWorkerNameInput()"/>
         <div class="hint">לא חובה — 10 ספרות המתחילות ב-0 (נשלח לאפליקציית הרכזים)</div>
       </div>
@@ -1028,7 +1072,7 @@ tr.sync-never td{color:var(--muted)}
            מדריך/ה role; onWorkerRoleChange clears + hides it otherwise.
            Values are ASCII enum keys shared with lib/shift-compliance.js. -->
       <div class="field hidden" id="w_shiftCommitment_wrap">
-        <label>התחייבות משמרות שבועית</label>
+        <label for="w_shiftCommitment">התחייבות משמרות שבועית</label>
         <select id="w_shiftCommitment">
           <option value="">ללא התחייבות</option>
           <option value="3+1">3+1 — שלוש חול ואחת סופ״ש</option>
@@ -1044,32 +1088,32 @@ tr.sync-never td{color:var(--muted)}
            where per-house terms must be edited from the roster row. -->
       <div id="w_terms">
         <div class="field">
-          <label>תפקיד</label>
+          <label for="w_role">תפקיד</label>
           <select id="w_role" onchange="onWorkerRoleChange()"></select>
         </div>
         <div class="field hidden" id="w_roleDetail_wrap">
-          <label id="w_roleDetail_label">פירוט תפקיד</label>
+          <label for="w_roleDetail" id="w_roleDetail_label">פירוט תפקיד</label>
           <input id="w_roleDetail" type="text" maxlength="80"/>
         </div>
         <div class="field">
-          <label>סוג העסקה</label>
+          <label for="w_type">סוג העסקה</label>
           <select id="w_type" onchange="onWorkerTypeChange()"></select>
         </div>
         <div class="field" data-wcost-field="salary">
-          <label>שכר ברוטו חודשי (₪)</label>
+          <label for="w_salary">שכר ברוטו חודשי (₪)</label>
           <input id="w_salary" type="number" min="0" step="100" placeholder="0"/>
         </div>
         <div class="field" data-wcost-field="pct">
-          <label>חלקיות משרה (%)</label>
+          <label for="w_pct">חלקיות משרה (%)</label>
           <input id="w_pct" type="number" min="1" max="100" placeholder="100"/>
           <div class="hint">לידיעה בלבד — הסכום למעלה הוא העלות בפועל</div>
         </div>
         <div class="field" data-wcost-field="hourlyRate">
-          <label>תעריף שעה (₪)</label>
+          <label for="w_hourlyRate">תעריף שעה (₪)</label>
           <input id="w_hourlyRate" type="number" min="0" step="1" placeholder="0"/>
         </div>
         <div class="field" data-wcost-field="estHours">
-          <label>שעות בחודש (הערכה)</label>
+          <label for="w_estHours">שעות בחודש (הערכה)</label>
           <input id="w_estHours" type="number" min="0" step="1" placeholder="0"/>
         </div>
         <!-- per_session (תשלום לפי מפגש): three independent rate groups.
@@ -1078,27 +1122,27 @@ tr.sync-never td{color:var(--muted)}
              The legacy single pair (w_sessionRate/w_estSessions) is retired
              from the form; existing rows are migrated to rate_individual. -->
         <div class="field" data-wcost-field="rateIndividual">
-          <label>תעריף למפגש פרטני (₪)</label>
+          <label for="w_rateIndividual">תעריף למפגש פרטני (₪)</label>
           <input id="w_rateIndividual" type="number" min="0" step="10" placeholder="0" oninput="updateWorkerPerSessionTotal()"/>
         </div>
         <div class="field" data-wcost-field="sessionsIndividual">
-          <label>מפגשים פרטניים בחודש</label>
+          <label for="w_sessionsIndividual">מפגשים פרטניים בחודש</label>
           <input id="w_sessionsIndividual" type="number" min="0" step="1" placeholder="0" oninput="updateWorkerPerSessionTotal()"/>
         </div>
         <div class="field" data-wcost-field="rateGroup">
-          <label>תעריף למפגש קבוצתי (₪)</label>
+          <label for="w_rateGroup">תעריף למפגש קבוצתי (₪)</label>
           <input id="w_rateGroup" type="number" min="0" step="10" placeholder="0" oninput="updateWorkerPerSessionTotal()"/>
         </div>
         <div class="field" data-wcost-field="sessionsGroup">
-          <label>מפגשים קבוצתיים בחודש</label>
+          <label for="w_sessionsGroup">מפגשים קבוצתיים בחודש</label>
           <input id="w_sessionsGroup" type="number" min="0" step="1" placeholder="0" oninput="updateWorkerPerSessionTotal()"/>
         </div>
         <div class="field" data-wcost-field="rateExternal">
-          <label>תעריף למטופל חוץ (₪)</label>
+          <label for="w_rateExternal">תעריף למטופל חוץ (₪)</label>
           <input id="w_rateExternal" type="number" min="0" step="10" placeholder="0" oninput="updateWorkerPerSessionTotal()"/>
         </div>
         <div class="field" data-wcost-field="externalPatients">
-          <label>מספר מטופלי חוץ</label>
+          <label for="w_externalPatients">מספר מטופלי חוץ</label>
           <input id="w_externalPatients" type="number" min="0" step="1" placeholder="0" oninput="updateWorkerPerSessionTotal()"/>
         </div>
         <div class="field hidden" id="w_perSessionTotal_wrap">
@@ -1106,12 +1150,12 @@ tr.sync-never td{color:var(--muted)}
           <div class="money" id="w_perSessionTotal">₪0</div>
         </div>
         <div class="field" data-wcost-field="retainerAmount">
-          <label>ריטיינר חודשי (₪)</label>
+          <label for="w_retainerAmount">ריטיינר חודשי (₪)</label>
           <input id="w_retainerAmount" type="number" min="0" step="100" placeholder="0"/>
         </div>
         <!-- Allowance: applies to every employment type. -->
         <div class="field">
-          <label>רכב / דלק</label>
+          <label for="w_allowance">רכב / דלק</label>
           <select id="w_allowance">
             <option value="0">ללא</option>
             <option value="2000">דלק בלבד – 2,000 ₪</option>
@@ -1124,7 +1168,7 @@ tr.sync-never td{color:var(--muted)}
              computation only (the stored amount survives a revert) and the
              month is recorded automatically server-side (gmach_month). -->
         <div class="field">
-          <label>סטטוס</label>
+          <label for="w_status">סטטוס</label>
           <select id="w_status" onchange="onWorkerStatusChange()">
             <option value="active">פעיל/ה</option>
             <option value="chld">חל"ד</option>
@@ -1134,7 +1178,7 @@ tr.sync-never td{color:var(--muted)}
           <div class="hint hidden" id="w_gmach_hint">בסטטוס גמ"ח השכר מפסיק להיספר מיידית. העובד/ת יופיע/תופיע במצבת עד סוף החודש ולאחר מכן יעבור/תעבור לרשימת העובדים שסיימו</div>
         </div>
         <div class="field hidden" id="w_statusDate_wrap">
-          <label>תאריך תחילת החופשה</label>
+          <label for="w_statusDate">תאריך תחילת החופשה</label>
           <input id="w_statusDate" type="date"/>
           <div class="hint">בזמן חל"ד/חל"ת השכר אינו נספר בעלויות</div>
         </div>
@@ -1146,7 +1190,7 @@ tr.sync-never td{color:var(--muted)}
            worker's house is fixed by the tab they were added from.
            Populated + toggled in openWorker(). -->
       <div id="w_houseActions" class="field" style="display:none;border-top:1px solid var(--line);padding-top:12px;margin-top:4px">
-        <label>בית נוסף / מעבר בית</label>
+        <label for="w_targetHouse">בית נוסף / מעבר בית</label>
         <select id="w_targetHouse"></select>
         <div class="hint" id="w_houseActionsHint">בחר/י בית יעד ואז "מעבר" או "הוספה". בהוספת בית תזין/י שכר נפרד לאותו בית.</div>
         <!-- Transfer date. A transfer ENDS the old placement the day before
@@ -1162,13 +1206,13 @@ tr.sync-never td{color:var(--muted)}
       </div>
 
       <div class="field">
-        <label>הערות</label>
+        <label for="w_notes">הערות</label>
         <textarea id="w_notes" placeholder="הערות פנימיות" maxlength="500"></textarea>
       </div>
     </div>
     <div class="modal-foot">
       <button class="btn btn-primary" id="workerSaveBtn" onclick="saveWorker()">שמירה</button>
-      <button class="btn btn-ghost" onclick="closeWorker()">ביטול</button>
+      <button class="btn btn-ghost" onclick="closeOpenModal()">ביטול</button>
       <button class="btn btn-danger-hover" id="workerDeleteBtn" onclick="deleteWorker()" style="margin-inline-start:auto;display:none">מחיקה</button>
       <button class="btn btn-danger-hover" id="workerDeleteCascadeBtn" onclick="deleteWorkerCascade()" style="margin-inline-start:auto;display:none">מחיקת עובד/ת + כל השיבוצים</button>
     </div>
@@ -1183,7 +1227,7 @@ tr.sync-never td{color:var(--muted)}
        the dropdowns and shows the values in the sub-header instead).
      - Per-type cost fields are toggled by onAssignmentTypeChange()
        reading data-cost-field. Notes stays visible regardless of type. -->
-<div class="overlay" id="assignmentOverlay">
+<div class="overlay" id="assignmentOverlay" role="dialog" aria-modal="true" aria-label="שיבוץ">
   <div class="modal">
     <div class="modal-head">
       <h3 id="assignmentModalTitle">הוספת שיבוץ</h3>
@@ -1191,52 +1235,52 @@ tr.sync-never td{color:var(--muted)}
     </div>
     <div class="modal-body">
       <div class="field" id="asg_worker_wrap">
-        <label>עובד/ת</label>
+        <label for="asg_worker">עובד/ת</label>
         <select id="asg_worker" onchange="onAssignmentWorkerChange()"></select>
       </div>
       <div class="field" id="asg_house_wrap">
-        <label>בית</label>
+        <label for="asg_house">בית</label>
         <select id="asg_house" onchange="updateAssignmentSubHeader()"></select>
       </div>
       <div class="field">
-        <label>תפקיד</label>
+        <label for="asg_role">תפקיד</label>
         <select id="asg_role" onchange="onAssignmentRoleChange()"></select>
       </div>
       <div class="field hidden" id="asg_roleDetail_wrap">
-        <label id="asg_roleDetail_label">פירוט תפקיד</label>
+        <label for="asg_roleDetail" id="asg_roleDetail_label">פירוט תפקיד</label>
         <input id="asg_roleDetail" type="text" maxlength="80"/>
       </div>
       <div class="field">
-        <label>סוג העסקה</label>
+        <label for="asg_type">סוג העסקה</label>
         <select id="asg_type" onchange="onAssignmentTypeChange()"></select>
       </div>
       <div class="field" data-cost-field="salary">
-        <label>שכר ברוטו חודשי (₪)</label>
+        <label for="asg_salary">שכר ברוטו חודשי (₪)</label>
         <input id="asg_salary" type="number" min="0" step="100" placeholder="0"/>
       </div>
       <div class="field" data-cost-field="pct">
-        <label>חלקיות משרה (%)</label>
+        <label for="asg_pct">חלקיות משרה (%)</label>
         <input id="asg_pct" type="number" min="1" max="100" placeholder="100"/>
         <div class="hint">לידיעה בלבד — הסכום למעלה הוא העלות בפועל</div>
       </div>
       <div class="field" data-cost-field="hourlyRate">
-        <label>תעריף שעה (₪)</label>
+        <label for="asg_hourlyRate">תעריף שעה (₪)</label>
         <input id="asg_hourlyRate" type="number" min="0" step="1" placeholder="0"/>
       </div>
       <div class="field" data-cost-field="estHours">
-        <label>שעות בחודש (הערכה)</label>
+        <label for="asg_estHours">שעות בחודש (הערכה)</label>
         <input id="asg_estHours" type="number" min="0" step="1" placeholder="0"/>
       </div>
       <div class="field" data-cost-field="sessionRate">
-        <label>תעריף למפגש (₪)</label>
+        <label for="asg_sessionRate">תעריף למפגש (₪)</label>
         <input id="asg_sessionRate" type="number" min="0" step="10" placeholder="0"/>
       </div>
       <div class="field" data-cost-field="estSessions">
-        <label>מפגשים בחודש (הערכה)</label>
+        <label for="asg_estSessions">מפגשים בחודש (הערכה)</label>
         <input id="asg_estSessions" type="number" min="0" step="1" placeholder="0"/>
       </div>
       <div class="field" data-cost-field="retainerAmount">
-        <label>ריטיינר חודשי (₪)</label>
+        <label for="asg_retainerAmount">ריטיינר חודשי (₪)</label>
         <input id="asg_retainerAmount" type="number" min="0" step="100" placeholder="0"/>
       </div>
       <!-- Allowance: applies to every employment type (not gated by
@@ -1244,7 +1288,7 @@ tr.sync-never td{color:var(--muted)}
            ALLOWANCE_VALUES in lib/calc.js / lib/validate.js. Added on top
            of the base cost in the monthly total. -->
       <div class="field">
-        <label>רכב / דלק</label>
+        <label for="asg_allowance">רכב / דלק</label>
         <select id="asg_allowance">
           <option value="0">ללא</option>
           <option value="2000">דלק בלבד – 2,000 ₪</option>
@@ -1252,13 +1296,13 @@ tr.sync-never td{color:var(--muted)}
         </select>
       </div>
       <div class="field">
-        <label>הערות</label>
+        <label for="asg_notes">הערות</label>
         <textarea id="asg_notes" placeholder="הערות פנימיות (תנאים מיוחדים, ימי עבודה וכו')" maxlength="500"></textarea>
       </div>
     </div>
     <div class="modal-foot">
       <button class="btn btn-primary" id="assignmentSaveBtn" onclick="saveAssignment()">שמירה</button>
-      <button class="btn btn-ghost" onclick="closeAssignment()">ביטול</button>
+      <button class="btn btn-ghost" onclick="closeOpenModal()">ביטול</button>
     </div>
   </div>
 </div>
@@ -1266,7 +1310,7 @@ tr.sync-never td{color:var(--muted)}
 <!-- Terminate modal: ends a single assignment, snapshots to archive_v3.
      Future dates are allowed (e.g. "end of next month" announcements);
      cost continues counting until that date arrives. -->
-<div class="overlay" id="termOverlay">
+<div class="overlay" id="termOverlay" role="dialog" aria-modal="true" aria-label="סיום שיבוץ">
   <div class="modal">
     <div class="modal-head">
       <h3>הפסקת שיבוץ</h3>
@@ -1274,31 +1318,31 @@ tr.sync-never td{color:var(--muted)}
     </div>
     <div class="modal-body">
       <div class="field">
-        <label>תאריך סיום</label>
+        <label for="tm_date">תאריך סיום</label>
         <input id="tm_date" type="date"/>
         <div class="hint">מותר גם תאריך עתידי. העלות תמשיך להיספר בעלות הבית עד התאריך הזה.</div>
       </div>
       <div class="field">
-        <label>סיבת סיום</label>
+        <label for="tm_reasonType">סיבת סיום</label>
         <select id="tm_reasonType">
           <option value="">— ללא ציון —</option>
         </select>
       </div>
       <div class="field">
-        <label>הערה</label>
+        <label for="tm_reasonDetail">הערה</label>
         <textarea id="tm_reasonDetail" placeholder="פירוט חופשי" maxlength="500"></textarea>
       </div>
     </div>
     <div class="modal-foot">
       <button class="btn btn-primary" id="termSaveBtn" onclick="saveTerminate()">אישור הפסקת שיבוץ</button>
-      <button class="btn btn-ghost" onclick="closeTerminate()">ביטול</button>
+      <button class="btn btn-ghost" onclick="closeOpenModal()">ביטול</button>
     </div>
   </div>
 </div>
 
 <!-- Budget editor. Sets a per-house monthly salary budget for the selected
      month (or the 'default' fallback when the "כברירת מחדל" box is ticked). -->
-<div class="overlay" id="budgetOverlay">
+<div class="overlay" id="budgetOverlay" role="dialog" aria-modal="true" aria-label="תקציב">
   <div class="modal">
     <div class="modal-head">
       <h3>תקציב שכר חודשי</h3>
@@ -1306,17 +1350,17 @@ tr.sync-never td{color:var(--muted)}
     </div>
     <div class="modal-body">
       <div class="field">
-        <label>תקציב כולל ₪</label>
+        <label for="bg_amount">תקציב כולל ₪</label>
         <input id="bg_amount" type="number" min="0" step="100" inputmode="numeric" placeholder="לדוגמה 120000" oninput="onBudgetInput()"/>
       </div>
       <div class="field">
-        <label>תקציב מדריכים ₪</label>
+        <label for="bg_instructors">תקציב מדריכים ₪</label>
         <input id="bg_instructors" type="number" min="0" step="100" inputmode="numeric" placeholder="לא חובה" oninput="onBudgetInput()"/>
         <div class="hint">שכר המדריכים בלבד. השאירי ריק אם אין תקציב מדריכים נפרד.</div>
         <div class="hint bud-warn" id="bg_instructors_warn" style="display:none"></div>
       </div>
       <div class="field">
-        <label class="checkline">
+        <label for="bg_default" class="checkline">
           <input id="bg_default" type="checkbox"/>
           קבע/י כברירת מחדל לכל החודשים (ולא רק לחודש הנבחר)
         </label>
@@ -1325,7 +1369,7 @@ tr.sync-never td{color:var(--muted)}
     </div>
     <div class="modal-foot">
       <button class="btn btn-primary" id="budgetSaveBtn" onclick="saveBudget()">שמירת תקציב</button>
-      <button class="btn btn-ghost" onclick="closeBudget()">ביטול</button>
+      <button class="btn btn-ghost" onclick="closeOpenModal()">ביטול</button>
     </div>
   </div>
 </div>
@@ -1336,7 +1380,7 @@ tr.sync-never td{color:var(--muted)}
      picks the house (it's set by the opener, which is always a per-house
      view button). The worker dropdown is filtered to workers with an
      active assignment at the opener's house. -->
-<div class="overlay" id="absenceOverlay">
+<div class="overlay" id="absenceOverlay" role="dialog" aria-modal="true" aria-label="היעדרות">
   <div class="modal">
     <div class="modal-head">
       <h3>אירוע היעדרות</h3>
@@ -1344,36 +1388,36 @@ tr.sync-never td{color:var(--muted)}
     </div>
     <div class="modal-body">
       <div class="field">
-        <label>עובד/ת</label>
+        <label for="ab_worker">עובד/ת</label>
         <select id="ab_worker"></select>
         <div class="hint">רק עובדי/ות הבית. רישום ללא עובד/ת ספציפי/ת אפשרי לתיעוד משבצת לא מאוישת.</div>
       </div>
       <div class="field-row">
         <div class="field">
-          <label>מתאריך</label>
+          <label for="ab_startDate">מתאריך</label>
           <input id="ab_startDate" type="date"/>
         </div>
         <div class="field">
-          <label>עד</label>
+          <label for="ab_endDate">עד</label>
           <input id="ab_endDate" type="date"/>
         </div>
       </div>
       <div class="field">
-        <label>סיבה</label>
+        <label for="ab_reasonType">סיבה</label>
         <select id="ab_reasonType"></select>
       </div>
       <div class="field">
-        <label>פירוט</label>
+        <label for="ab_reasonDetail">פירוט</label>
         <textarea id="ab_reasonDetail" placeholder="פירוט חופשי" maxlength="500"></textarea>
       </div>
       <div class="field">
-        <label>הערות</label>
+        <label for="ab_notes">הערות</label>
         <textarea id="ab_notes" placeholder="הערות פנימיות" maxlength="500"></textarea>
       </div>
     </div>
     <div class="modal-foot">
       <button class="btn btn-primary" id="absenceSaveBtn" onclick="saveAbsence()">שמירה</button>
-      <button class="btn btn-ghost" onclick="closeAbsence()">ביטול</button>
+      <button class="btn btn-ghost" onclick="closeOpenModal()">ביטול</button>
     </div>
   </div>
 </div>
@@ -1390,7 +1434,7 @@ tr.sync-never td{color:var(--muted)}
        - extraPayment (accrues to receivingHouse)
      There is no UI entry from absence rows; the only launch path is
      the "+ אירוע החלפה" button on a house view. -->
-<div class="overlay" id="coverageOverlay">
+<div class="overlay" id="coverageOverlay" role="dialog" aria-modal="true" aria-label="החלפה">
   <div class="modal">
     <div class="modal-head">
       <h3>אירוע החלפה</h3>
@@ -1398,43 +1442,43 @@ tr.sync-never td{color:var(--muted)}
     </div>
     <div class="modal-body">
       <div class="field">
-        <label>מחליף/ה</label>
+        <label for="cv_worker">מחליף/ה</label>
         <select id="cv_worker"></select>
         <div class="hint">רק עובדי/ות עם שיבוץ פעיל בבית הנוכחי.</div>
       </div>
       <div class="field">
-        <label>בית שמקבל את ההחלפה</label>
+        <label for="cv_receivingHouse">בית שמקבל את ההחלפה</label>
         <select id="cv_receivingHouse" onchange="onCoverageReceivingHouseChange()"></select>
         <div class="hint">הבית שאליו הולכת ההחלפה. תוספת התשלום נספרת בעלות בית זה.</div>
       </div>
       <div class="field">
-        <label>היעדרות מקושרת</label>
+        <label for="cv_absenceId">היעדרות מקושרת</label>
         <select id="cv_absenceId"></select>
         <div class="hint">אופציונלי. רק היעדרויות פעילות בבית היעד מופיעות.</div>
       </div>
       <div class="field-row">
         <div class="field">
-          <label>מתאריך</label>
+          <label for="cv_startDate">מתאריך</label>
           <input id="cv_startDate" type="date"/>
         </div>
         <div class="field">
-          <label>עד</label>
+          <label for="cv_endDate">עד</label>
           <input id="cv_endDate" type="date"/>
         </div>
       </div>
       <div class="field">
-        <label>תוספת תשלום (₪)</label>
+        <label for="cv_extraPayment">תוספת תשלום (₪)</label>
         <input id="cv_extraPayment" type="number" min="0" step="100" placeholder="0"/>
         <div class="hint">סכום שמשולם למחליף/ה מעבר לשכר הרגיל. נספר בעלות הבית שמקבל את ההחלפה.</div>
       </div>
       <div class="field">
-        <label>הערות</label>
+        <label for="cv_notes">הערות</label>
         <textarea id="cv_notes" placeholder="הערות פנימיות" maxlength="500"></textarea>
       </div>
     </div>
     <div class="modal-foot">
       <button class="btn btn-primary" id="coverageSaveBtn" onclick="saveCoverage()">שמירה</button>
-      <button class="btn btn-ghost" onclick="closeCoverage()">ביטול</button>
+      <button class="btn btn-ghost" onclick="closeOpenModal()">ביטול</button>
     </div>
   </div>
 </div>
@@ -1443,7 +1487,7 @@ tr.sync-never td{color:var(--muted)}
      lists every existing worker; result is a two-value dropdown whose
      ASCII values (warning / dismissal) are the stored contract — the
      Hebrew labels אזהרה / פיטורין live only in the UI. -->
-<div class="overlay" id="hearingOverlay">
+<div class="overlay" id="hearingOverlay" role="dialog" aria-modal="true" aria-label="שימוע">
   <div class="modal">
     <div class="modal-head">
       <h3 id="hearingModalTitle">שימוע חדש</h3>
@@ -1451,19 +1495,19 @@ tr.sync-never td{color:var(--muted)}
     </div>
     <div class="modal-body">
       <div class="field">
-        <label>עובד/ת</label>
+        <label for="hr_worker">עובד/ת</label>
         <select id="hr_worker"></select>
       </div>
       <div class="field">
-        <label>תאריך השימוע</label>
+        <label for="hr_date">תאריך השימוע</label>
         <input id="hr_date" type="date"/>
       </div>
       <div class="field">
-        <label>סיבה</label>
+        <label for="hr_reason">סיבה</label>
         <textarea id="hr_reason" placeholder="פירוט חופשי" maxlength="500"></textarea>
       </div>
       <div class="field">
-        <label>תוצאה</label>
+        <label for="hr_result">תוצאה</label>
         <select id="hr_result">
           <option value="warning">אזהרה</option>
           <option value="dismissal">פיטורין</option>
@@ -1472,15 +1516,19 @@ tr.sync-never td{color:var(--muted)}
     </div>
     <div class="modal-foot">
       <button class="btn btn-primary" id="hearingSaveBtn" onclick="saveHearing()">שמירה</button>
-      <button class="btn btn-ghost" onclick="closeHearing()">ביטול</button>
+      <button class="btn btn-ghost" onclick="closeOpenModal()">ביטול</button>
     </div>
   </div>
 </div>
 
-<div class="toast" id="toast"></div>
+<!-- Save confirmations and errors. role=status + aria-live so every
+     confirmation is ANNOUNCED, not only shown: a screen-reader user
+     otherwise gets no feedback that a save succeeded. -->
+<div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 
 <script src="/lib/calc.js"></script>
 <script src="/lib/cost-engine.js"></script>
+<script src="/lib/exports.js"></script>
 <script>
 /* ============================================================
    E-ZONE — ניהול כוח אדם (גרסת ענן, v3)
@@ -1588,6 +1636,14 @@ const {
   lineForAssignmentId: engineLineFor,
   RULES_TO_CONFIRM: ENGINE_RULES_TO_CONFIRM,
 } = window.CostEngine;
+
+// The read-only CSV exports (lib/exports.js). They are handed THIS render's
+// cost report, which is what makes an exported number identical to the one
+// on screen rather than merely similar.
+const {
+  buildExport: buildCsvExport,
+  exportKinds: csvExportKinds,
+} = window.StaffingExports;
 
 // Set by the dashboard search when a result is clicked → go(house) navigates,
 // then render() flashes the matching roster row. Cleared after it fires.
@@ -1973,6 +2029,75 @@ function costSplitSub(t){
   return parts.join(' · ');
 }
 
+// ---------- CSV exports ----------
+
+// Everything the export builders need, assembled from the page's own state
+// and THIS render's cost report.
+function exportContext(){
+  const houseNames = {};
+  HOUSES.forEach(h => { houseNames[h.id] = h.name; });
+  return {
+    workers: WORKERS, assignments: ASSIGNMENTS, absences: ABSENCES,
+    coverages: COVERAGES, budgets: BUDGETS, archive: ARCHIVE_V3,
+    monthlyActuals: MONTHLY_ACTUALS,
+    month: ensureMonth(), today: calcTodayStr(),
+    houseNames: houseNames,
+    // The report the screen is currently showing. Handing it over is the
+    // whole mechanism: an export cannot disagree with the page.
+    report: COST,
+  };
+}
+
+// Build one report and hand it to the browser as a download. Read-only:
+// nothing is posted, nothing is stored, no request is made.
+function downloadExport(kind){
+  let out;
+  try {
+    out = buildCsvExport(kind, exportContext());
+  } catch (err) {
+    toast('שגיאה בהפקת הדוח', true);
+    return;
+  }
+  if (!out.rowCount){
+    toast('אין נתונים לדוח ' + out.label);
+    return;
+  }
+  try {
+    const blob = new Blob([out.csv], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = out.filename;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    // Revoke on the next tick so the click has taken the URL first.
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+    toast('הורד ' + out.label + ' · ' + out.rowCount + ' שורות');
+  } catch (err) {
+    toast('שגיאה בהורדת הדוח', true);
+  }
+}
+
+// The דוחות section. Read-only by construction — every button builds a file
+// from data already on screen and downloads it. Nothing here writes.
+function exportsSection(){
+  const buttons = csvExportKinds().map(k => `
+    <button type="button" class="btn btn-sm btn-accent-hover export-btn"
+            onclick="downloadExport('${escapeHtml(k.kind)}')">${escapeHtml(k.label)}</button>`).join('');
+  return `
+  <div class="section">
+    <div class="section-head">
+      <h2>דוחות להורדה</h2>
+    </div>
+    <div class="tablecard">
+      <div class="section-note">כל הדוחות הם קריאה בלבד ונבנים מהנתונים שמוצגים כרגע על המסך, לחודש ${escapeHtml(fmtMonth(ensureMonth()))}. הקבצים נפתחים באקסל בעברית.</div>
+      <div class="export-grid">${buttons}</div>
+    </div>
+  </div>`;
+}
+
 // ---------- sync status panel ----------
 // Which consumers pull from staffing, and how long a gap is worth worrying
 // about. These are DISPLAY thresholds only — nothing acts on them.
@@ -2202,7 +2327,7 @@ function openBudget(houseId){
   document.getElementById('bg_instructors').value = instr;
   document.getElementById('bg_default').checked = false;
   onBudgetInput();
-  document.getElementById('budgetOverlay').classList.add('show');
+  document.getElementById('budgetOverlay').classList.add('show'); clearFormDirty();
   const inp = document.getElementById('bg_amount');
   if (inp && inp.focus) inp.focus();
 }
@@ -2219,7 +2344,7 @@ function onBudgetInput(){
   else { el.textContent = ''; el.style.display = 'none'; }
 }
 function closeBudget(){
-  document.getElementById('budgetOverlay').classList.remove('show');
+  document.getElementById('budgetOverlay').classList.remove('show'); clearFormDirty();
   editingBudget = null;
 }
 async function saveBudget(){
@@ -2247,7 +2372,7 @@ async function saveBudget(){
     if (res && res.budget) upsertById(BUDGETS, res.budget);
     closeBudget();
     render();
-    toast('התקציב נשמר');
+    toastSaved('התקציב נשמר');
   } catch (err) {
     toast(err.message || 'שגיאה בשמירה', true);
   } finally {
@@ -2320,6 +2445,13 @@ function termsHtml(a){
     default:
       return `<div class="money">—</div>`;
   }
+}
+
+// A successful save is announced AND clears the unsaved-work flag, so the
+// discard question can never fire after a save that worked.
+function toastSaved(msg){
+  clearFormDirty();
+  toast(msg);
 }
 
 function toast(msg, isErr){
@@ -2557,7 +2689,7 @@ function openWorker(workerId, house){
   onWorkerRoleChange();
   onWorkerTypeChange();
   onWorkerNameInput();
-  document.getElementById('workerOverlay').classList.add('show');
+  document.getElementById('workerOverlay').classList.add('show'); clearFormDirty();
   setTimeout(() => document.getElementById('w_name').focus(), 50);
 }
 
@@ -2696,7 +2828,7 @@ function onWorkerNameInput(){
   warning.style.display = '';
 }
 function closeWorker(){
-  document.getElementById('workerOverlay').classList.remove('show');
+  document.getElementById('workerOverlay').classList.remove('show'); clearFormDirty();
   editingWorker = null;
 }
 
@@ -2806,7 +2938,7 @@ async function saveWorker(){
     } else if (!wasEdit){
       // Couldn't determine the new id — fall back to a reconcile and stop.
       await reconcile(); closeWorker(); render();
-      toast('העובד/ת נשמר/ה'); return;
+      toastSaved('העובד/ת נשמר/ה'); return;
     }
 
     // 2) Assignment terms at this house (create or update).
@@ -2886,7 +3018,7 @@ async function moveWorkerHouse(){
     await reconcile();
     closeWorker();
     render();
-    toast('העובד/ת הועבר/ה לבית ' + houseName(target));
+    toastSaved('העובד/ת הועבר/ה לבית ' + houseName(target));
   } catch (err) {
     await reconcile(); render();
     toast(err.message || 'שגיאה בהעברה', true);
@@ -3110,11 +3242,11 @@ function openAssignment(opts){
 
   onAssignmentRoleChange();
   onAssignmentTypeChange();
-  document.getElementById('assignmentOverlay').classList.add('show');
+  document.getElementById('assignmentOverlay').classList.add('show'); clearFormDirty();
 }
 
 function closeAssignment(){
-  document.getElementById('assignmentOverlay').classList.remove('show');
+  document.getElementById('assignmentOverlay').classList.remove('show'); clearFormDirty();
   editingAssignment = null;
 }
 
@@ -3224,10 +3356,10 @@ function openTerminate(assignmentId){
     html += `<option value="${escapeHtml(r)}">${escapeHtml(r)}</option>`;
   });
   sel.innerHTML = html;
-  document.getElementById('termOverlay').classList.add('show');
+  document.getElementById('termOverlay').classList.add('show'); clearFormDirty();
 }
 function closeTerminate(){
-  document.getElementById('termOverlay').classList.remove('show');
+  document.getElementById('termOverlay').classList.remove('show'); clearFormDirty();
   editingTerm = null;
 }
 
@@ -3259,7 +3391,7 @@ async function saveTerminate(){
     await reconcile();
     closeTerminate();
     render();
-    toast('השיבוץ הופסק');
+    toastSaved('השיבוץ הופסק');
   } catch (err) {
     toast(err.message || 'שגיאה בשמירה', true);
   } finally {
@@ -3315,11 +3447,11 @@ function openAbsence(opts){
   document.getElementById('ab_endDate').value = today;
   document.getElementById('ab_reasonDetail').value = '';
   document.getElementById('ab_notes').value = '';
-  document.getElementById('absenceOverlay').classList.add('show');
+  document.getElementById('absenceOverlay').classList.add('show'); clearFormDirty();
 }
 
 function closeAbsence(){
-  document.getElementById('absenceOverlay').classList.remove('show');
+  document.getElementById('absenceOverlay').classList.remove('show'); clearFormDirty();
   editingAbsence = null;
 }
 
@@ -3348,7 +3480,7 @@ async function saveAbsence(){
     }
     closeAbsence();
     render();
-    toast('ההיעדרות נשמרה');
+    toastSaved('ההיעדרות נשמרה');
     // v3.1: no follow-up "add coverage?" prompt. If Moran wants to log a
     // coverage, she clicks "+ אירוע החלפה" on the house view explicitly.
   } catch (err) {
@@ -3463,11 +3595,11 @@ function openCoverage(opts){
   document.getElementById('cv_endDate').value = today;
   document.getElementById('cv_extraPayment').value = '';
   document.getElementById('cv_notes').value = '';
-  document.getElementById('coverageOverlay').classList.add('show');
+  document.getElementById('coverageOverlay').classList.add('show'); clearFormDirty();
 }
 
 function closeCoverage(){
-  document.getElementById('coverageOverlay').classList.remove('show');
+  document.getElementById('coverageOverlay').classList.remove('show'); clearFormDirty();
   editingCoverage = null;
 }
 
@@ -3512,7 +3644,7 @@ async function saveCoverage(){
     }
     closeCoverage();
     render();
-    toast('ההחלפה נרשמה');
+    toastSaved('ההחלפה נרשמה');
   } catch (err) {
     toast(err.message || 'שגיאה בשמירה', true);
   } finally {
@@ -3562,11 +3694,11 @@ function openHearing(hearingId){
   document.getElementById('hr_reason').value = h ? (h.reason || '') : '';
   document.getElementById('hr_result').value =
     h && HEARING_RESULT_VALUES.indexOf(String(h.result)) >= 0 ? String(h.result) : 'warning';
-  document.getElementById('hearingOverlay').classList.add('show');
+  document.getElementById('hearingOverlay').classList.add('show'); clearFormDirty();
 }
 
 function closeHearing(){
-  document.getElementById('hearingOverlay').classList.remove('show');
+  document.getElementById('hearingOverlay').classList.remove('show'); clearFormDirty();
   editingHearing = null;
 }
 
@@ -3592,7 +3724,7 @@ async function saveHearing(){
     else await reconcile();
     closeHearing();
     render();
-    toast(payload.action === 'updateHearing' ? 'השימוע עודכן' : 'השימוע נשמר');
+    toastSaved(payload.action === 'updateHearing' ? 'השימוע עודכן' : 'השימוע נשמר');
   } catch (err) {
     toast(err.message || 'שגיאה בשמירה', true);
   } finally {
@@ -3810,6 +3942,7 @@ function centralView(){
 
   ${hadrachaBannerHtml()}
 
+  <label for="dashSearch" class="sr-only">חיפוש עובד/ת לפי שם</label>
   <input type="text" id="dashSearch" dir="rtl" placeholder="חיפוש עובד/ת לפי שם…" oninput="dashboardSearch(this.value)"
          style="width:100%;font-size:16px;padding:10px 12px;border:1px solid var(--line-strong);border-radius:8px;margin-bottom:16px;box-sizing:border-box"/>
   <div id="dashResults" class="dash-results" style="display:none"></div>
@@ -3856,6 +3989,8 @@ function centralView(){
   </div>
 
   ${budgetSummarySection()}
+
+  ${exportsSection()}
 
   ${syncStatusSection()}
   </div>`;
@@ -4247,7 +4382,7 @@ async function saveAllStartDates(){
     });
     applyStartDatesFilter();
     updateStartDateProgress();
-    toast('נשמרו ' + updates.length + ' תאריכים');
+    toastSaved('נשמרו ' + updates.length + ' תאריכים');
   } catch (err) {
     toast(err.message || 'שגיאה בשמירה', true);
   } finally {
@@ -4575,6 +4710,7 @@ function houseView(id){
          survives re-renders; oninput updates the two tables in place
          (see onRosterFilterInput) to keep focus while typing. -->
     <div class="roster-search">
+      <label for="rosterSearch" class="sr-only">חיפוש עובד/ת בבית זה לפי שם</label>
       <input
         type="text"
         id="rosterSearch"
@@ -4595,23 +4731,180 @@ function houseView(id){
 /* ---------- boot ---------- */
 
 async function boot(){
-  document.getElementById('boot').style.display='flex';
+  const bootEl = document.getElementById('boot');
+  bootEl.style.display='flex';
   try{
     await loadData();
-    document.getElementById('boot').style.display='none';
+    bootEl.style.display='none';
     hidePinGate();
     render();
     // Fire-and-forget: the banner appears on the next render if the feed
     // answers; any failure leaves the dashboard exactly as it is.
     loadHadrachotStatus();
   } catch(err){
-    document.getElementById('boot').style.display='none';
+    bootEl.style.display='none';
     if (err.message && err.message.indexOf('פג תוקף') === 0){
       return;
     }
-    toast(err.message || 'שגיאה בטעינה', true);
-    showPinGate();
+    // A 401 is an auth problem — back to the PIN gate. Anything else is a
+    // load failure, and gets a PERSISTENT error state with a retry button
+    // rather than a toast that fades away over an empty screen.
+    if (err.status === 401){
+      toast(err.message || 'שגיאה בטעינה', true);
+      showPinGate();
+      return;
+    }
+    hidePinGate();
+    showLoadError(err.message);
   }
+}
+
+/* ---------- accessibility: keyboard, unsaved work, error state ---------- */
+
+// Every modal, with the function that closes it. Escape closes whichever is
+// open, and Tab is kept inside it — without that, a keyboard user tabs out
+// of an open dialog into the page behind it and cannot tell where they are.
+const MODALS = [
+  { overlay: 'workerOverlay', close: () => closeWorker() },
+  { overlay: 'assignmentOverlay', close: () => closeAssignment() },
+  { overlay: 'termOverlay', close: () => closeTerminate() },
+  { overlay: 'budgetOverlay', close: () => closeBudget() },
+  { overlay: 'absenceOverlay', close: () => closeAbsence() },
+  { overlay: 'coverageOverlay', close: () => closeCoverage() },
+  { overlay: 'hearingOverlay', close: () => closeHearing() },
+];
+
+function openModalEntry(){
+  for (const m of MODALS){
+    const el = document.getElementById(m.overlay);
+    if (el && el.classList.contains('show')) return { meta: m, el: el };
+  }
+  return null;
+}
+
+// Whether the currently open form has edits the user has not saved. Set by
+// any input inside a modal, cleared when one opens or closes.
+let formDirty = false;
+function markFormDirty(){ formDirty = true; }
+function clearFormDirty(){ formDirty = false; }
+
+// The one question asked before throwing away typed work. Used by Escape,
+// by the backdrop click, and by the ביטול buttons.
+function confirmDiscardIfDirty(){
+  if (!formDirty) return true;
+  return confirm('יש שינויים שלא נשמרו. לסגור בלי לשמור?');
+}
+
+function closeOpenModal(){
+  const open = openModalEntry();
+  if (!open) return false;
+  if (!confirmDiscardIfDirty()) return true;   // handled: stay open
+  clearFormDirty();
+  open.meta.close();
+  return true;
+}
+
+// Focusable elements inside a container, in tab order, skipping the hidden
+// ones. This page shows and hides the per-type cost fields by setting
+// `style.display` on their wrapper, so that is what the visibility test
+// looks at — deliberately NOT offsetParent, which depends on layout and is
+// therefore untestable, and not getComputedStyle, which would miss nothing
+// here and cost a reflow per element.
+function isFieldHidden(node){
+  let n = node;
+  while (n && n.nodeType === 1){
+    if (n.hasAttribute && (n.hasAttribute('hidden') || n.getAttribute('aria-hidden') === 'true')) return true;
+    if (n.style && n.style.display === 'none') return true;
+    n = n.parentElement;
+  }
+  return false;
+}
+
+function focusablesIn(el){
+  return [...el.querySelectorAll(
+    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]),' +
+    ' textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+    .filter(n => !isFieldHidden(n));
+}
+
+document.addEventListener('keydown', (e) => {
+  const open = openModalEntry();
+
+  if (e.key === 'Escape'){
+    if (open){ e.preventDefault(); closeOpenModal(); }
+    return;
+  }
+
+  // Ctrl/Cmd+Enter saves the open form, so a keyboard user never has to tab
+  // past every field to reach the save button.
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && open){
+    const save = open.el.querySelector('.modal-foot .btn-primary');
+    if (save && !save.disabled){ e.preventDefault(); save.click(); }
+    return;
+  }
+
+  // Keep Tab inside the open dialog.
+  if (e.key === 'Tab' && open){
+    const items = focusablesIn(open.el);
+    if (!items.length) return;
+    const first = items[0];
+    const last = items[items.length - 1];
+    if (e.shiftKey && document.activeElement === first){
+      e.preventDefault(); last.focus();
+    } else if (!e.shiftKey && document.activeElement === last){
+      e.preventDefault(); first.focus();
+    }
+  }
+});
+
+// Any edit inside a modal marks it dirty. One delegated listener rather than
+// an oninput on sixty fields.
+document.addEventListener('input', (e) => {
+  if (e.target && e.target.closest && e.target.closest('.overlay.show')) markFormDirty();
+});
+document.addEventListener('change', (e) => {
+  if (e.target && e.target.closest && e.target.closest('.overlay.show')) markFormDirty();
+});
+
+// Clicking the backdrop is the same as pressing Escape — and asks the same
+// question. A click INSIDE the dialog must not close it.
+MODALS.forEach(m => {
+  const el = document.getElementById(m.overlay);
+  if (!el) return;
+  el.addEventListener('mousedown', (e) => {
+    if (e.target === el) { e.preventDefault(); closeOpenModal(); }
+  });
+});
+
+// Leaving the page with unsaved work in an open form. The browser shows its
+// own wording; all we can do is ask for the prompt.
+window.addEventListener('beforeunload', (e) => {
+  if (!formDirty || !openModalEntry()) return;
+  e.preventDefault();
+  e.returnValue = '';
+});
+
+// A blocking error state for the initial load, so a failure is not just a
+// toast that fades after three seconds on an empty screen.
+function showLoadError(message){
+  const app = document.getElementById('app');
+  if (!app) return;
+  app.style.display = '';
+  app.innerHTML = `
+  <div class="section">
+    <div class="tablecard">
+      <div class="load-error" role="alert">
+        <h2>לא ניתן לטעון את הנתונים</h2>
+        <p>${escapeHtml(message || 'שגיאה בטעינה')}</p>
+        <button class="btn btn-primary" onclick="retryBoot()">נסי שוב</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+async function retryBoot(){
+  document.getElementById('app').innerHTML = '';
+  await boot();
 }
 
 document.getElementById('pinSubmit').addEventListener('click', submitPin);
