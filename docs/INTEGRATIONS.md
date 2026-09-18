@@ -28,7 +28,7 @@ its own Script Property secret — no secret unlocks another feed.
 | **Matching** | exact name, **phone as secondary key**, upsert under `LockService` |
 | **Error handling** | wrong / missing / unset secret → `401 {error}`, never data. Orphaned assignments and blank names are skipped silently. |
 | **Retry** | none on the staffing side. The consumer's sync takes `tryLock(2s)`; on failure it skips the sync entirely. |
-| **Failure visibility** | **consumer-side**: feed down ⇒ **zero writes**, the last-synced local roster is served, `rosterSource:'local'` and an amber «לא סונכרן מהסטאפינג» notice. **Staffing-side: none today** — staffing cannot tell whether the coordinators app has pulled in the last hour, day or week. → Phase 3 adds a `lastFeedServed` log and a «סטטוס סנכרון» panel. |
+| **Failure visibility** | **consumer-side**: feed down ⇒ **zero writes**, the last-synced local roster is served, `rosterSource:'local'` and an amber «לא סונכרן מהסטאפינג» notice. **Staffing-side: the `feed_log` tab and the «סטטוס סנכרון» panel** (Phase 3) show when this consumer last pulled and how many rows it got. Amber past 24 h, grey if it has never pulled. |
 
 ## 2. Therapists app — therapist roster
 
@@ -47,7 +47,7 @@ its own Script Property secret — no secret unlocks another feed.
 | **Onward coupling** | downstream matching (including outpatient `TherapistRates`) is exact-string, so a rename must go through staffing **+** the therapists app's `migrateTherapistNames` **+** a `TherapistRates` row rename, together |
 | **Error handling** | same fail-closed `401`. Orphans and blank names skipped. |
 | **Retry** | none. Unset or unreachable ⇒ **no writes**; the last-synced list is served. |
-| **Failure visibility** | consumer-side amber «לא סונכרנה» toast. Staffing-side: none today → Phase 3. |
+| **Failure visibility** | consumer-side amber «לא סונכרנה» toast; staffing-side the `feed_log` row and the «סטטוס סנכרון» panel, amber past 24 h. |
 
 ## 3. Hadrachot app (הדרכות) — supervision-relevant roster
 
@@ -60,7 +60,8 @@ its own Script Property secret — no secret unlocks another feed.
 | **Payload** | `{ guides: [ { name, house, role, active, startDate } ] }` — one entry **per assignment** (not per worker), sorted by house then name |
 | **`role`** | ASCII, computed server-side: `מדריך/ה`→`guide`, `מנהל/ת`→`manager`, `רכז/ת`→`coordinator`, and `מטפל/ת` **with** `role_detail` `עו"ס` → `social_worker`. `role_detail` itself never leaves the feed. The detail is normalized before comparing (gershayim ״ → ASCII `"`) because hand-entered cells mix quote characters. |
 | **`active`** | `(a.status \|\| 'active') === 'active'` — per assignment |
-| **Error handling / retry / visibility** | as above |
+| **Error handling / retry** | as above |
+| **Failure visibility** | staffing-side the `feed_log` row and the «סטטוס סנכרון» panel; this consumer pulls rarely, so its staleness threshold is 7 days rather than 24 h. |
 
 ## 4. Hadrachot app → staffing — first-supervision status (the only inbound feed)
 
@@ -74,7 +75,7 @@ its own Script Property secret — no secret unlocks another feed.
 | **Payload** | relayed verbatim under `data`; staffing never interprets it server-side. All flag logic (the 30-day grace rule, `firstHadrachaFlags`) is client-side in `lib/calc.js`. |
 | **Error handling** | **unconfigured** → `200 {configured:false}`; **any upstream failure** → `5xx` with a generic body. In **both** cases the client renders **nothing** — never a false alert. The browser never sees the secret. |
 | **Retry** | none |
-| **Failure visibility** | **none — silent by design.** A misconfigured URL and a healthy "nobody is overdue" look identical to Moran. → Phase 3 documents what is missing. |
+| **Failure visibility** | **none — silent by design.** A misconfigured URL and a healthy "nobody is overdue" look identical to Moran. The `feed_log` panel does NOT cover this: it logs feeds staffing *serves*, not the one it *consumes*. What is missing, and the two-step fix, is written up in [`CONSUMER_MIGRATION.md`](CONSUMER_MIGRATION.md). |
 
 ## 5. NewGuides digest (outbound, spreadsheet-to-spreadsheet)
 
@@ -103,11 +104,22 @@ its own Script Property secret — no secret unlocks another feed.
 
 ## Contract summary — what may change
 
-| Feed | May add | May never do |
+| Feed | Current key set | May never do |
 |---|---|---|
-| `getGuidesForCoordinators` | `workerId`, `assignmentId`, `feedGeneratedAt`, `syncedAt` | remove/rename `name`, `phone`, `active`, `houses`, `startDate`; change a worker name; expose money |
-| `getTherapistsForTherapists` | `workerId`, `assignmentId`, `feedGeneratedAt` | remove/rename `name`, `active`, `houses`, `startDate`; expose money |
-| `getGuidesForHadrachot` | `workerId`, `assignmentId`, `feedGeneratedAt` | remove/rename `name`, `house`, `role`, `active`, `startDate`; expose `role_detail` or money |
+| `getGuidesForCoordinators` | `workerId`, `assignmentIds`, `name`, `phone`, `active`, `houses`, `startDate` | remove or rename any of them; change a worker name; expose money |
+| `getTherapistsForTherapists` | `workerId`, `assignmentIds`, `name`, `active`, `houses`, `startDate` | remove or rename any of them; expose money |
+| `getGuidesForHadrachot` | `workerId`, `assignmentId`, `name`, `house`, `role`, `active`, `startDate` | remove or rename any of them; expose `role_detail` or money |
+
+All three responses also carry **`feedGeneratedAt`** at the **top level** —
+it is a property of the feed, not of a worker, so it is not repeated on every
+entry. A consumer that wants a per-row timestamp calls that field `syncedAt`:
+its own field, at its own write time.
+
+`workerId` + `assignmentId(s)` were added in Phase 3, **additively**. The
+coordinators and therapists feeds are one entry per **worker**, so their ids
+are a sorted **list** — a scalar would be wrong for a worker at two houses.
+The hadrachot feed is one entry per **placement**, so both of its ids are
+scalars. See [`CONSUMER_MIGRATION.md`](CONSUMER_MIGRATION.md).
 
 Each feed's exact key set is pinned by a guard test
 (`tests/coordinators-endpoint.test.js`, `tests/therapists-endpoint.test.js`,

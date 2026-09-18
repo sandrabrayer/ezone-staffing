@@ -155,18 +155,33 @@ function byName(ctx) {
 // Field filtering
 // ---------------------------------------------------------------------------
 
-test('computeGuidesForCoordinators_ emits ONLY name/phone/active/houses/startDate', () => {
+// THE FROZEN KEY SET. Fields may be ADDED; none may be removed or renamed.
+// Phase 3 added workerId + assignmentIds, so this pin moved — deliberately,
+// which is the whole point of pinning it. The five original fields are
+// asserted individually below so a removal fails loudly even if someone
+// updates the list without thinking.
+test('computeGuidesForCoordinators_ emits exactly the contracted key set', () => {
   const ctx = loadCtx();
   seedReaders(ctx);
   const rows = feed(ctx);
   assert.ok(rows.length > 0, 'fixture should yield entries');
   rows.forEach(g => {
-    assert.deepStrictEqual(Object.keys(g).sort(), ['active', 'houses', 'name', 'phone', 'startDate']);
+    assert.deepStrictEqual(Object.keys(g).sort(),
+      ['active', 'assignmentIds', 'houses', 'name', 'phone', 'startDate', 'workerId']);
+    // The original five, unchanged.
     assert.strictEqual(typeof g.name, 'string');
     assert.strictEqual(typeof g.phone, 'string');
     assert.strictEqual(typeof g.active, 'boolean');
     assert.ok(Array.isArray(g.houses));
     assert.strictEqual(typeof g.startDate, 'string');
+    // Added in Phase 3.
+    assert.strictEqual(typeof g.workerId, 'string');
+    assert.ok(g.workerId, 'workerId is never blank — it is the point of the field');
+    assert.ok(Array.isArray(g.assignmentIds));
+    // assignmentIds describes the SAME placements as houses, so an entry with
+    // houses must have ids, and both must be sorted.
+    assert.deepStrictEqual(g.assignmentIds, g.assignmentIds.slice().sort());
+    if (g.houses.length) assert.ok(g.assignmentIds.length, 'houses without ids would be a lie');
   });
 });
 
@@ -174,9 +189,14 @@ test('salary and every other stripped field is ABSENT from the feed (keys AND se
   const ctx = loadCtx();
   seedReaders(ctx);
   const text = JSON.stringify(feed(ctx));
+  // NOTE: `workerId` and `assignmentIds` left this list in Phase 3 — they are
+  // now published ON PURPOSE, additively, so the consumer can match on
+  // something that survives a rename. Everything financial or private stays
+  // forbidden, and `"id"` stays forbidden because the raw row id is not part
+  // of the contract.
   ['salary', 'pct', 'hourlyRate', 'estHours', 'sessionRate', 'estSessions', 'retainerAmount',
     'allowance', 'rateIndividual', 'rateGroup', 'rateExternal', 'notes', 'roleDetail', 'role_detail',
-    'employmentType', 'shift_commitment', 'gmachMonth', 'gmach_month', 'workerId', 'terminationDate',
+    'employmentType', 'shift_commitment', 'gmachMonth', 'gmach_month', 'terminationDate',
     'reasonType', '"id"'].forEach(k => {
     assert.ok(!text.includes(k), `${k} must not leave the feed`);
   });

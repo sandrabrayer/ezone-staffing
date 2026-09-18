@@ -40,7 +40,7 @@ function loadPage() {
 async function authAndBoot(dom, fixture) {
   const data = Object.assign({
     workers: [], assignments: [], absences: [], coverages: [], archiveV3: [],
-    monthlyActuals: [], budgets: [], hearings: [],
+    monthlyActuals: [], budgets: [], hearings: [], feedLog: [],
     houses: { ramot: [], asher: [], ofroni: [], rehab: [], pardes: [], sde_eliezer: [], hq: [] },
     events: [], archive: [],
   }, fixture || {});
@@ -228,4 +228,86 @@ test('a mid-month transfer shows one month of salary split across the two houses
   assert.match(networkTotalText(dom), /3,?000/,
     'one month of salary across both houses, not two');
   dom.window.close();
+});
+
+// ---------------------------------------------------------------------------
+// Phase 3 — the סטטוס סנכרון panel
+// ---------------------------------------------------------------------------
+
+test('the sync panel names all three consumers, even ones that never pulled', async () => {
+  const { dom } = loadPage();
+  await authAndBoot(dom, {});
+  const text = dom.window.document.body.textContent;
+  assert.match(text, /סטטוס סנכרון/);
+  ['רכזים', 'מטפלים', 'הדרכות'].forEach(label => {
+    assert.match(text, new RegExp(label), label + ' must be listed');
+  });
+  const never = [...dom.window.document.querySelectorAll('tr.sync-never')];
+  assert.equal(never.length, 3, 'with nothing in the log, all three read "never"');
+  assert.match(never[0].textContent, /לא סונכרן מעולם/);
+  dom.window.close();
+});
+
+test('a recent pull reads as synced, a long-ago one as stale', async () => {
+  const { dom } = loadPage();
+  const now = Date.now();
+  await authAndBoot(dom, {
+    feedLog: [
+      { consumer: 'coordinators', lastServedAt: new Date(now - 2 * 3600000).toISOString(),
+        lastRowCount: 42, serveCount: 9, status: 'ok' },
+      { consumer: 'therapists', lastServedAt: new Date(now - 5 * 86400000).toISOString(),
+        lastRowCount: 7, serveCount: 3, status: 'ok' },
+    ],
+  });
+  const doc = dom.window.document;
+  const rows = [...doc.querySelectorAll('.budget-table tr')];
+
+  const coord = rows.find(r => /רכזים/.test(r.textContent));
+  assert.ok(coord.classList.contains('sync-ok'), 'two hours ago is fine');
+  assert.match(coord.textContent, /לפני 2 שעות/);
+  assert.match(coord.textContent, /42/, 'and says how many rows it got');
+
+  const ther = rows.find(r => /מטפלים/.test(r.textContent));
+  assert.ok(ther.classList.contains('sync-stale'), 'five days of silence is not');
+  assert.match(ther.textContent, /לפני 5 ימים/);
+  assert.match(ther.textContent, /לא סונכרן זמן רב/);
+
+  // hadrachot pulls far less often, so five days would NOT be stale there —
+  // but it has not pulled at all here.
+  const hadr = rows.find(r => /הדרכות/.test(r.textContent));
+  assert.ok(hadr.classList.contains('sync-never'));
+  dom.window.close();
+});
+
+test('the hadrachot consumer has a longer staleness threshold than the other two', async () => {
+  const { dom } = loadPage();
+  const fiveDaysAgo = new Date(Date.now() - 5 * 86400000).toISOString();
+  await authAndBoot(dom, {
+    feedLog: [
+      { consumer: 'hadrachot', lastServedAt: fiveDaysAgo, lastRowCount: 12, serveCount: 2, status: 'ok' },
+      { consumer: 'coordinators', lastServedAt: fiveDaysAgo, lastRowCount: 12, serveCount: 2, status: 'ok' },
+    ],
+  });
+  const rows = [...dom.window.document.querySelectorAll('.budget-table tr')];
+  const hadr = rows.find(r => /הדרכות/.test(r.textContent));
+  const coord = rows.find(r => /רכזים/.test(r.textContent));
+  assert.ok(hadr.classList.contains('sync-ok'),
+    'hadrachot pulls rarely, so five days is normal for it');
+  assert.ok(coord.classList.contains('sync-stale'),
+    'the coordinators app pulls on every house open, so five days is not');
+  dom.window.close();
+});
+
+test('an unusable timestamp reads as never synced rather than crashing', async () => {
+  const { dom, errors } = loadPage();
+  await authAndBoot(dom, {
+    feedLog: [
+      { consumer: 'coordinators', lastServedAt: '', lastRowCount: 0, serveCount: 0, status: 'ok' },
+      { consumer: 'therapists', lastServedAt: 'not a date', lastRowCount: 0, serveCount: 0, status: 'ok' },
+    ],
+  });
+  const rows = [...dom.window.document.querySelectorAll('tr.sync-never')];
+  assert.equal(rows.length, 3);
+  dom.window.close();
+  assert.equal(errors.length, 0, 'no script errors');
 });
