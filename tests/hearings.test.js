@@ -108,11 +108,21 @@ test('Code.gs: all four hearing actions are dispatched, defined, and validated',
 
 function buildInlinedHtml() {
   const calcSrc = fs.readFileSync(path.join(ROOT, 'lib', 'calc.js'), 'utf8');
-  const inlined = html.replace(
+  const withCalc = html.replace(
     /<script src="\/lib\/calc\.js"><\/script>/,
     `<script>${calcSrc}</script>`,
   );
-  assert.notEqual(inlined, html, 'expected the calc.js script tag');
+  // The cost engine loads as a second classic script, exactly like calc.js
+  // in the browser. Inlined here so jsdom never reaches for the network.
+  const engineSrc = fs.readFileSync(path.join(ROOT, 'lib', 'cost-engine.js'), 'utf8');
+  const inlined = withCalc.replace(
+    /<script src="\/lib\/cost-engine\.js"><\/script>/,
+    `<script>${engineSrc}</script>`,
+  );
+  if (inlined === withCalc) {
+    throw new Error('expected <script src="/lib/cost-engine.js"></script> in public/index.html');
+  }
+  assert.notEqual(withCalc, html, 'expected the calc.js script tag');
   return inlined;
 }
 

@@ -45,6 +45,12 @@ app.get('/lib/calc.js', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.sendFile(path.join(__dirname, 'lib', 'calc.js'));
 });
+// The monthly cost engine. Same rule as calc.js: it is pure, client-safe
+// arithmetic over data the browser already holds, and contains no secret.
+app.get('/lib/cost-engine.js', (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache');
+  res.sendFile(path.join(__dirname, 'lib', 'cost-engine.js'));
+});
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
