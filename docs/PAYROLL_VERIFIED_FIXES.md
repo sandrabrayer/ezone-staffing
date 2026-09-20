@@ -12,6 +12,23 @@ pass the literal `false`**.
 
 ---
 
+## The production baseline, before any fix
+
+Taken with `logMonthTotalsNow()` on the live sheet:
+
+| Month | Total | Confirmed | Estimated | Missing-data |
+|---|---|---|---|---|
+| 2026-08 | ₪856,443 | ₪0 | ₪690,718 | ₪165,725 |
+| 2026-09 | ₪1,003,028 | ₪0 | ₪810,083 | ₪192,945 |
+| 2026-10 | ₪1,013,600 | ₪0 | ₪820,655 | ₪192,945 |
+
+Confirmed is ₪0 in every month because `monthly_actuals` is empty — that is
+`ZERO_ACTUALS_POLICY` working, not a fault. Roughly a fifth of each month
+sits in the missing-data bucket. Re-run the same command after each fix, and
+the difference is the fix.
+
+---
+
 ## The order to run things
 
 | # | Run | What it does | Writes? |
@@ -42,6 +59,20 @@ logMonthTotalsNow(['2026-01','2026-02'])
 
 Logs, per month: the total, the three buckets, whether any real hours or
 sessions were recorded, and a per-house breakdown with budget and variance.
+
+Two things the log is careful about:
+
+* **The variance is a signed number**, not an object — `variance +40000
+  (under · 20% of budget · ok)`, or `-9000 (OVER …)`. Positive means under
+  budget, since variance is budget minus cost. A house with no budget says
+  `no budget set`.
+* **A house whose figure is mostly missing-data money is called out** where
+  the number is, rather than three screens away in the integrity report:
+  above `MISSING_DATA_HOUSE_ALERT_PCT` (50%) the line reads
+  `!! sde_eliezer: 100% of its total is missing-data money (13000 of
+  13000) — that figure cannot be defended until the missing dates and rates
+  are filled in`. The same houses come back in `missingDataAlerts`, so a
+  caller can act on them without parsing the log.
 It **writes nothing at all** — not a tab, not the audit log — so it is always
 safe, and a test asserts that it touches nothing.
 
@@ -82,13 +113,18 @@ The first month each worker appears in the payroll book. The true start is
 **that month or earlier**, so what is written is the 1st of that month *and*
 `start_date_source = 'payroll_floor'`:
 
-| | |
-|---|---|
-| 2026-01 | sergei makarov · שחר מזור · מעיין דלומי · חנן וייל |
-| 2026-02 | אלה שפירא |
-| 2026-03 | עדי איזנברג |
-| 2026-05 | בן ציון אדרי |
-| 2026-06 | אורן סילמניק |
+| Worker id | Name | Floor |
+|---|---|---|
+| `wmppe7df8du66` | sergei makarov | 2026-01 |
+| `wmppe7ki6k9oi` | שחר מזור | 2026-01 |
+| `wmppe7np0sv8u` | מעיין דלומי | 2026-01 |
+| `wmppeb6asz4v7` | חנן וייל | 2026-01 |
+| `wmppe9mr3fv2z` | אלה שפירא | 2026-02 |
+| `wmppe805nlehh` | עדי איזנברג | 2026-03 |
+| `wmppeeqxzqs7m` | בן ציון אדרי | 2026-05 |
+| `wmrc0am7cy2gv` | אורן סילמניק | 2026-06 |
+
+The **id** is the target; the name is a cross-check for a human reader.
 
 **A floor is not a date.** It never overwrites a date a person entered, it
 shows a grey dashed «תאריך משוער» chip wherever it appears, it carries a
@@ -101,9 +137,16 @@ money (short version: nothing — only to what the page may claim).
 
 ### E · the rename
 
-«אתי (אסתר) דבוש» → «אתי אסתר דבוש». Parentheses in a Hebrew name break
-copy-paste rendering in a bidi context, and every consumer app matches this
-person by exact name.
+Worker `wmrrld1h8vpg7`. Parentheses in a Hebrew name break copy-paste
+rendering in a bidi context, and every consumer app matches this person by
+exact name.
+
+The new name is **computed from whatever the sheet currently holds**, not
+from a literal typed into the fact: the bracket characters are removed
+(ASCII and fullwidth), the whitespace they leave behind is collapsed, and
+every word survives — «אתי (אסתר) דבוש» → «אתי אסתר דבוש». A stored name
+with no brackets is reported as nothing to do. A literal target would only
+be one more string to mistype.
 
 ### F · the ~20 freelancers — deliberately untouched
 
@@ -111,16 +154,27 @@ Per-session therapists and freelancers are invoice-based and do not appear
 in the payroll book at all. **No date is invented for them.** They keep their
 `MISSING_START_DATE` finding and their amber chip until somebody knows.
 
-### Fail loudly
+### The matching rule — the id is authoritative
 
-A verified fact names a person. If the name resolves to **no** worker, or to
-**more than one**, the whole run aborts **before a single write** — in a dry
-run exactly as in an apply run, so an ambiguity is found while it is still
-cheap. The log says which name and which ids, and nothing else in the batch
-is applied either: a partially applied batch would be the worst of both.
+A, D and E each name a **worker id**, which is what «דוח תקינות» prints and
+what every row is keyed on. That id is the target:
 
-Running it twice is free: each fact recognises its own result and reports
-"already in place" rather than failing to find a name it has itself changed.
+| | |
+|---|---|
+| The id is **not in the roster** | **ABORT** the whole run, before a single write. The target does not exist, and nothing else in the batch is applied either. |
+| The id is there, the **name differs** | **WARN and proceed.** The id wins. The warning names both strings and is logged as `WARN │ …`, because one of the two is wrong and only a person can say which — but a label never decides which row gets written. |
+
+A **name mismatch alone never aborts.** That is the change: the first
+production run aborted on two transcribed names that were perfectly good
+people, which is a correct failure of the old rule and a useless one.
+
+**C is the exception**, because the leavers carry no id: the name is their
+only identifier, so there a name matching **more than one** worker still
+aborts, and a name matching **none** means the row was already archived.
+
+Both kinds of check run **in a dry run exactly as in an apply run**, so an
+ambiguity is found while it is still cheap. Running the whole thing twice is
+free: each fact recognises its own result and reports "already in place".
 
 ---
 
