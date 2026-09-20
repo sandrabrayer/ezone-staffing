@@ -204,9 +204,18 @@ test('exported totals equal the engine report the screen renders', () => {
   assert.strictEqual(Number(totals[4]), report.totals.projectedTotal);
   assert.strictEqual(Number(totals[5]), report.totals.actualConfirmed);
   assert.strictEqual(Number(totals[6]), report.totals.estimated);
-  assert.strictEqual(Number(totals[7]), report.totals.missingData);
-  assert.strictEqual(report.totals.actualConfirmed + report.totals.estimated,
+  assert.strictEqual(Number(totals[7]), report.totals.missingDataCost,
+    'the third bucket is exported too, not folded into one of the others');
+  assert.strictEqual(Number(totals[8]), report.totals.missingData);
+  assert.strictEqual(
+    report.totals.actualConfirmed + report.totals.estimated + report.totals.missingDataCost,
     report.totals.projectedTotal, 'the engine invariant still holds');
+
+  // And line by line: the three money columns reconstruct the cost column.
+  rows.slice(1, -1).forEach(r => {
+    assert.strictEqual(Number(r[5]) + Number(r[6]) + Number(r[7]), Number(r[4]),
+      'every exported line splits its cost across exactly one bucket');
+  });
 });
 
 test('passing the screen\'s own report is what guarantees the match', () => {

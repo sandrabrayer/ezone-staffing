@@ -219,6 +219,35 @@ test('fail-quiet: banner renders nothing without usable data, and boot never awa
     'a slow/unreachable feed must never delay app boot');
 });
 
+test('unconfigured means INVISIBLE: no banner and no sync row, code untouched', () => {
+  const fn = html.slice(html.indexOf('function hadrachaBannerHtml'),
+    html.indexOf('function centralView'));
+  assert.ok(/if \(HADRACHOT_CONFIGURED !== true\) return '';/.test(fn),
+    'the banner is gated on the feature being configured, not only on the payload');
+
+  // The feed-sync panel is gated the same way: a consumer that does not
+  // exist in this deployment must not sit there reading "never synced".
+  assert.ok(/shown: \(\) => HADRACHOT_CONFIGURED === true/.test(html),
+    'the הדרכות row is gated on the same flag');
+  assert.ok(/function shownFeedConsumers\(\)/.test(html),
+    'and the panel renders only the consumers that are shown');
+
+  // Kept, not deleted: everything still exists behind the flag.
+  ['function hadrachaBannerHtml', 'calcFirstHadrachaFlags', 'calcParseHadrachotStatus',
+    "key: 'hadrachot'"].forEach(needle => {
+    assert.ok(html.includes(needle), 'the code stays in place: ' + needle);
+  });
+});
+
+test('the configured flag is set from the server answer, and unconfigured is final', () => {
+  const fn = html.slice(html.indexOf('async function loadHadrachotStatus'),
+    html.indexOf('async function loadHadrachotStatus') + 900);
+  assert.ok(/HADRACHOT_CONFIGURED = !!\(body && body\.configured === true\);/.test(fn),
+    'the flag mirrors the server contract exactly');
+  assert.ok(/if \(!HADRACHOT_CONFIGURED\) return;/.test(fn),
+    'an unconfigured answer stops there — nothing to show, nothing to retry');
+});
+
 test('the Hebrew banner strings contain no parentheses', () => {
   for (const name of ['HADRACHA_BANNER_TITLE', 'HADRACHA_OVERDUE_TEXT', 'HADRACHA_MISSING_START_TEXT']) {
     const m = new RegExp(`const ${name} = '([^']*)';`).exec(html);

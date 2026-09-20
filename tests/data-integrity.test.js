@@ -1,19 +1,26 @@
 'use strict';
 
 // Guards for runDataIntegrityReportNow() / computeDataIntegrityReport_ in
-// apps-script/Code.gs — the Phase 0 read-only diagnostic.
+// apps-script/Code.gs — the Phase 0 diagnostic.
 //
 // Code.gs has no JS harness, so (as in tests/coordinators-endpoint.test.js)
 // it is evaluated in a vm sandbox with the Apps Script services mocked, and
 // the pure computation is driven against in-memory fixtures.
 //
 // The hard rules pinned here:
-//   - READ ONLY: computing the report performs ZERO sheet writes. The
-//     sandbox's Range mock throws on setValue/setValues, so any write at
-//     all fails the test. (This is why the report uses
-//     readAbsencesReadOnly_ instead of readAbsencesSafe, whose lazy status
-//     correction writes back to the sheet.)
-//   - Every check the brief asks for is present and fires on a seeded row.
+//   - The COMPUTATION is read-only: computeDataIntegrityReport_ performs
+//     ZERO sheet writes. The sandbox's Range mock throws on
+//     setValue/setValues for every tab, so any write at all fails the test.
+//     (This is why the report uses readAbsencesReadOnly_ instead of
+//     readAbsencesSafe, whose lazy status correction writes back.)
+//   - The RUN writes the two report tabs — «דוח תקינות» and «ניקוי נתונים» —
+//     and NOTHING else. The mock throws on a write to any other tab, so a
+//     stray write to a data tab fails the test rather than being noticed
+//     afterwards in production.
+//   - Duplicates are reported once per GROUP, with the member details and a
+//     recommended keeper; never once per member.
+//   - Every finding row carries workerName / houseId / employmentType — a
+//     report of bare ids cannot be acted on.
 //   - Finding codes stay ASCII (stored values are ASCII; Hebrew is display
 //     only).
 
@@ -26,30 +33,49 @@ const vm = require('node:vm');
 const ROOT = path.join(__dirname, '..');
 const gs = fs.readFileSync(path.join(ROOT, 'apps-script', 'Code.gs'), 'utf8');
 
-// A sheet mock over a 2-D array of values. Every write path throws, so the
-// read-only contract is enforced by construction rather than by inspection.
-function sheetMock(values, writeGuard) {
-  function range() {
+// The two tabs the report is allowed to write, by name. Everything else is
+// a data tab as far as this test is concerned.
+const REPORT_TABS = ['דוח תקינות', 'ניקוי נתונים'];
+
+// A sheet mock over a 2-D array of values. Writes are routed through
+// writeGuard(op, tabName), which throws for any tab that is not a report
+// tab — the contract is enforced by construction rather than by inspection.
+function sheetMock(name, values, writeGuard) {
+  const validations = [];
+  function range(r, c, nr, nc) {
     return {
       getValues() { return values; },
       getValue() { return values[0] && values[0][0]; },
-      setValue() { writeGuard('setValue'); },
-      setValues() { writeGuard('setValues'); },
-      setNumberFormat() { writeGuard('setNumberFormat'); return this; },
+      setValue(v) { writeGuard('setValue', name); return this; },
+      setValues(vals) {
+        writeGuard('setValues', name);
+        vals.forEach((row, i) => {
+          const at = (r || 1) - 1 + i;
+          while (values.length <= at) values.push([]);
+          row.forEach((v, j) => { values[at][(c || 1) - 1 + j] = v; });
+        });
+        return this;
+      },
+      setNumberFormat() { writeGuard('setNumberFormat', name); return this; },
+      setDataValidation(rule) { writeGuard('setDataValidation', name); validations.push({ r, c, nr, nc, rule }); return this; },
     };
   }
   return {
-    getDataRange: range,
+    name, values, validations,
+    getDataRange() { return range(1, 1, values.length, 1); },
     getRange: range,
     getLastRow() { return values.length; },
-    setFrozenRows() { writeGuard('setFrozenRows'); },
+    clear() { writeGuard('clear', name); values.length = 0; },
+    setFrozenRows() { writeGuard('setFrozenRows', name); },
   };
 }
 
 function loadCtx(tabs, onWrite) {
-  const writeGuard = onWrite || function (op) {
-    throw new Error('the integrity report must not write to the sheet (called ' + op + ')');
+  const writeGuard = onWrite || function (op, name) {
+    throw new Error('the integrity report must not write to the sheet (called ' + op + ' on ' + name + ')');
   };
+  const sheets = {};
+  Object.keys(tabs).forEach((name) => { sheets[name] = sheetMock(name, tabs[name], writeGuard); });
   const ctx = vm.createContext({
     Logger: { log() {} },
     PropertiesService: {
@@ -74,19 +100,32 @@ function loadCtx(tabs, onWrite) {
     },
     Session: { getScriptTimeZone() { return 'UTC'; } },
     SpreadsheetApp: {
+      newDataValidation() {
+        const rule = { values: null, allowInvalid: null, strict: null };
+        const builder = {
+          requireValueInList(list, strict) { rule.values = list.slice(); rule.strict = strict; return builder; },
+          setAllowInvalid(v) { rule.allowInvalid = v; return builder; },
+          build() { return rule; },
+        };
+        return builder;
+      },
       openById() {
         return {
           getSheetByName(name) {
-            return Object.prototype.hasOwnProperty.call(tabs, name)
-              ? sheetMock(tabs[name], writeGuard)
-              : null;
+            if (!Object.prototype.hasOwnProperty.call(sheets, name)) return null;
+            return sheets[name];
           },
-          insertSheet() { writeGuard('insertSheet'); },
+          insertSheet(name) {
+            writeGuard('insertSheet', name);
+            sheets[name] = sheetMock(name, [], writeGuard);
+            return sheets[name];
+          },
         };
       },
     },
   });
   vm.runInContext(gs, ctx);
+  ctx.sheets = sheets;
   return ctx;
 }
 
@@ -231,12 +270,105 @@ test('a clean roster produces no error-severity findings', () => {
   assert.deepStrictEqual(report.counts.workers, 1);
 });
 
-test('duplicate workers are caught by normalized name and by phone', () => {
+test('duplicates are ONE finding per group, not one per member', () => {
   const report = runReport(dirtyTabs());
-  const byName = findingsFor(report, 'DUP_WORKER_NAME').map(f => f.entityId).sort();
-  assert.deepStrictEqual(byName, ['w1', 'w2'], 'padding and double spaces must not hide a duplicate');
-  const byPhone = findingsFor(report, 'DUP_WORKER_PHONE').map(f => f.entityId).sort();
-  assert.deepStrictEqual(byPhone, ['w3', 'w4'], 'dashes must not hide a duplicate phone');
+  const byName = findingsFor(report, 'DUP_WORKER_NAME');
+  assert.strictEqual(byName.length, 1, 'a 2-member name group is ONE row, not two');
+  assert.deepStrictEqual(byName[0].members, ['w1', 'w2'],
+    'padding and double spaces must not hide a duplicate');
+  assert.strictEqual(byName[0].entity, 'worker_group');
+
+  const byPhone = findingsFor(report, 'DUP_WORKER_PHONE');
+  assert.strictEqual(byPhone.length, 1, 'a 2-member phone group is ONE row, not two');
+  assert.deepStrictEqual(byPhone[0].members, ['w3', 'w4'],
+    'dashes must not hide a duplicate phone');
+});
+
+test('a duplicate group carries every member detail Moran needs to decide', () => {
+  const report = runReport(dirtyTabs());
+  const g = findingsFor(report, 'DUP_WORKER_NAME')[0];
+  const byId = {};
+  g.memberDetails.forEach(m => { byId[m.id] = m; });
+  assert.deepStrictEqual(Object.keys(byId).sort(), ['w1', 'w2']);
+  assert.strictEqual(byId.w1.name, 'דנה כהן');
+  assert.strictEqual(byId.w1.phone, '0501111111');
+  assert.strictEqual(byId.w1.houses, 'ramot', 'the houses the member is placed at');
+  assert.strictEqual(byId.w1.assignmentCount, 2, 'how many assignment rows would move');
+  assert.strictEqual(byId.w1.createdAt, '2025-01-01', 'when the row was created');
+  assert.strictEqual(byId.w2.assignmentCount, 1);
+  // The detail line repeats it in words, because the log has no columns.
+  assert.match(g.detail, /דנה כהן/);
+  assert.match(g.detail, /0501111111/);
+  assert.match(g.detail, /created/);
+});
+
+test('the recommended keeper is the oldest id that carries assignments', () => {
+  const tabs = dirtyTabs();
+  // w1 (created 2025-01-01, 2 assignments) vs w2 (created 2025-06-01, 1).
+  tabs.workers[2][3] = '2025-06-01';
+  const report = runReport(tabs);
+  const g = findingsFor(report, 'DUP_WORKER_NAME')[0];
+  assert.strictEqual(g.recommendedKeeper, 'w1');
+  assert.match(g.detail, /keep w1 — oldest id that carries assignments/);
+});
+
+test('with no member holding a placement the oldest row is recommended, and it says so', () => {
+  const tabs = {
+    workers: workersTab([
+      ['n1', 'נועה אבן', '', '2025-05-01', '', '', '', ''],
+      ['n2', 'נועה אבן', '', '2024-01-01', '', '', '', ''],
+    ]),
+    assignments: assignmentsTab([]),
+    absences: absencesTab([]),
+    coverages: coveragesTab([]),
+    archive_v3: archiveTab([]),
+    monthly_actuals: actualsTab([]),
+    budgets: [['id', 'house', 'month', 'amount', 'created_at', 'updated_at', 'instructors_amount']],
+  };
+  const g = findingsFor(runReport(tabs), 'DUP_WORKER_NAME')[0];
+  assert.strictEqual(g.recommendedKeeper, 'n2', 'oldest by created_at');
+  assert.match(g.detail, /no member carries an assignment/);
+});
+
+test('ten duplicate rows across four groups become four findings', () => {
+  // The shape of the live roster the report flagged: groups of 2, 2, 4 and 2.
+  const rows = [];
+  const groups = [['a', 2], ['b', 2], ['c', 4], ['d', 2]];
+  groups.forEach(([tag, n]) => {
+    for (let i = 0; i < n; i++) {
+      rows.push([tag + i, 'שם משותף ' + tag, '', '2025-0' + (i + 1) + '-01', '', '', '', '']);
+    }
+  });
+  const tabs = {
+    workers: workersTab(rows),
+    assignments: assignmentsTab([]),
+    absences: absencesTab([]),
+    coverages: coveragesTab([]),
+    archive_v3: archiveTab([]),
+    monthly_actuals: actualsTab([]),
+    budgets: [['id', 'house', 'month', 'amount', 'created_at', 'updated_at', 'instructors_amount']],
+  };
+  const report = runReport(tabs);
+  assert.strictEqual(report.byCode.DUP_WORKER_NAME, 4,
+    'ten member rows, four real questions');
+  const sizes = findingsFor(report, 'DUP_WORKER_NAME').map(f => f.members.length).sort();
+  assert.deepStrictEqual(sizes, [2, 2, 2, 4]);
+});
+
+test('every finding carries the worker name, house and employment type', () => {
+  const report = runReport(dirtyTabs());
+  report.findings.forEach(f => {
+    assert.ok('workerName' in f && 'houseId' in f && 'employmentType' in f,
+      f.code + ' must carry the readable columns');
+  });
+  const missingStart = findingsFor(report, 'MISSING_START_DATE')[0];
+  assert.strictEqual(missingStart.workerName, 'רונית מזרחי');
+  assert.strictEqual(missingStart.houseId, 'atlantis + ofroni');
+
+  const rate = findingsFor(report, 'MISSING_RATE').find(f => f.entityId === 'a7');
+  assert.strictEqual(rate.workerName, 'מנהל״ן פלוני');
+  assert.strictEqual(rate.houseId, 'pardes');
+  assert.strictEqual(rate.employmentType, 'per_session');
 });
 
 test('duplicate and orphan assignments are caught', () => {
@@ -245,9 +377,38 @@ test('duplicate and orphan assignments are caught', () => {
   assert.deepStrictEqual(findingsFor(report, 'ORPHAN_ASSIGNMENT').map(f => f.entityId), ['a4']);
 });
 
-test('workers with no assignment are reported', () => {
+test('workers with no assignment are classified against the archive', () => {
+  const tabs = dirtyTabs();
+  // w5 has no trace anywhere. Add w8, whose only placement is archived.
+  tabs.workers.push(['w8', 'אורית דגן', '', '2024-01-01', '', '2024-01-01', '', '0509999999']);
+  tabs.archive_v3.push(['arc2', 'a80', 'w8', 'אורית דגן', 'rehab', 'מדריך/ה', '', 'full_time',
+    9000, 100, 0, 0, 0, 0, 0, '', '2026-06-30', 'התפטרות', '', '2026-06-30', 0, 0, 0, 0, 0, 0]);
+  const report = runReport(tabs);
+  const found = findingsFor(report, 'WORKER_NO_ASSIGNMENT');
+  const byId = {};
+  found.forEach(f => { byId[f.entityId] = f; });
+  assert.deepStrictEqual(Object.keys(byId).sort(), ['w5', 'w8']);
+
+  assert.strictEqual(byId.w5.classification, 'never_assigned');
+  assert.strictEqual(byId.w5.severity, 'warn');
+  assert.match(byId.w5.detail, /never assigned/);
+
+  assert.strictEqual(byId.w8.classification, 'probably_departed');
+  assert.strictEqual(byId.w8.severity, 'info');
+  assert.match(byId.w8.detail, /probably departed/);
+  assert.match(byId.w8.detail, /rehab/, 'the house it ended at');
+  assert.match(byId.w8.detail, /2026-06-30/, 'when it ended');
+  assert.strictEqual(byId.w8.houseId, 'rehab');
+
+  assert.strictEqual(report.byClassification.never_assigned, 1);
+  assert.strictEqual(report.byClassification.probably_departed, 1);
+});
+
+test('nothing is archived automatically on the strength of a classification', () => {
+  // The report is a reading, not a verdict: it has no write path at all for
+  // a WORKER_NO_ASSIGNMENT row, which is why computing it cannot write.
   const report = runReport(dirtyTabs());
-  assert.deepStrictEqual(findingsFor(report, 'WORKER_NO_ASSIGNMENT').map(f => f.entityId), ['w5']);
+  assert.ok(findingsFor(report, 'WORKER_NO_ASSIGNMENT').length > 0);
 });
 
 test('missing and future start dates are reported', () => {
@@ -323,13 +484,121 @@ test('a missing tab is tolerated rather than throwing', () => {
   assert.deepStrictEqual(report.findings, []);
 });
 
-test('runDataIntegrityReportNow logs and writes nothing', () => {
+// ---------------------------------------------------------------------------
+// the run: two report tabs, and not one cell anywhere else
+// ---------------------------------------------------------------------------
+
+// A sandbox whose write guard allows the two report tabs and throws for
+// every other tab, so a stray write to a data tab fails the test.
+function runCtx(tabs) {
+  const writes = [];
+  const ctx = loadCtx(tabs, (op, name) => {
+    writes.push({ op, name });
+    if (REPORT_TABS.indexOf(name) < 0) {
+      throw new Error('the report must not write to the data tab "' + name + '" (called ' + op + ')');
+    }
+  });
+  ctx.writes = writes;
+  return ctx;
+}
+
+test('runDataIntegrityReportNow writes the two report tabs and no data tab', () => {
   const lines = [];
-  const tabs = dirtyTabs();
-  const ctx = loadCtx(tabs);
+  const ctx = runCtx(dirtyTabs());
   ctx.Logger.log = (s) => lines.push(String(s));
   const report = plain(ctx.runDataIntegrityReportNow());
   assert.ok(report.findings.length > 0);
-  assert.ok(lines.some(l => /READ-ONLY: nothing was written/.test(l)),
-    'the log must state that nothing was written');
+
+  const written = Array.from(new Set(ctx.writes.map(w => w.name))).sort();
+  assert.deepStrictEqual(written, REPORT_TABS.slice().sort(),
+    'exactly the two report tabs were written');
+  assert.ok(lines.some(l => /no data tab was touched/.test(l)),
+    'the log must state that no data tab was touched');
+});
+
+test('the report tab is one row per finding, with a readable Hebrew header', () => {
+  const ctx = runCtx(dirtyTabs());
+  const report = plain(ctx.runDataIntegrityReportNow());
+  const sheet = ctx.sheets['דוח תקינות'];
+  const header = sheet.values[0];
+  ['חומרה', 'קוד', 'שם העובד/ת', 'בית', 'סוג העסקה', 'סיווג', 'מה לעשות', 'מומלץ לשמור']
+    .forEach(h => assert.ok(header.includes(h), 'header must carry ' + h));
+  assert.strictEqual(sheet.values.length, report.findings.length + 1,
+    'one row per finding, plus the header');
+
+  const nameCol = header.indexOf('שם העובד/ת');
+  const codeCol = header.indexOf('קוד');
+  const adviceCol = header.indexOf('מה לעשות');
+  const row = sheet.values.find(r => r[codeCol] === 'MISSING_START_DATE');
+  assert.strictEqual(row[nameCol], 'רונית מזרחי', 'a name, not only an id');
+  assert.ok(row[adviceCol].length > 0, 'and a Hebrew sentence saying what to do');
+  assert.strictEqual(sheet.values[1][0], 'שגיאה', 'severity is shown in Hebrew, worst first');
+});
+
+test('a re-run overwrites the report tab rather than appending to it', () => {
+  const ctx = runCtx(dirtyTabs());
+  ctx.runDataIntegrityReportNow();
+  const first = ctx.sheets['דוח תקינות'].values.length;
+  ctx.runDataIntegrityReportNow();
+  assert.strictEqual(ctx.sheets['דוח תקינות'].values.length, first,
+    'the tab is cleared and rewritten, never appended to');
+});
+
+test('writing anywhere but the two report tabs is refused by name', () => {
+  const ctx = runCtx(dirtyTabs());
+  assert.throws(() => ctx.integrityWriteReportTab_('workers', [['x']]),
+    /refusing to write to "workers"/);
+  assert.throws(() => ctx.integrityWriteReportTab_('assignments', [['x']]),
+    /refusing to write/);
+});
+
+// ---------------------------------------------------------------------------
+// the cleanup worksheet
+// ---------------------------------------------------------------------------
+
+test('the cleanup tab offers one decision row per group or record, with an empty החלטה', () => {
+  const ctx = runCtx(dirtyTabs());
+  const report = plain(ctx.runDataIntegrityReportNow());
+  const sheet = ctx.sheets['ניקוי נתונים'];
+  const header = sheet.values[0];
+  assert.ok(header.includes('החלטה'), 'the decision column exists');
+  assert.ok(header.includes('מפתח'), 'and the key that carries it across runs');
+
+  const decisionCol = header.indexOf('החלטה');
+  const rows = sheet.values.slice(1);
+  rows.forEach(r => assert.strictEqual(r[decisionCol], '', 'every decision starts empty'));
+
+  const cleanupCodes = ['DUP_WORKER_NAME', 'DUP_WORKER_PHONE', 'SMOKE_RECORD',
+    'WORKER_NO_ASSIGNMENT', 'BLANK_NAME'];
+  const expected = report.findings.filter(f => cleanupCodes.includes(f.code)).length;
+  assert.strictEqual(rows.length, expected);
+  // One row per duplicate GROUP — the four members of a group share one row.
+  assert.strictEqual(rows.filter(r => r[0] === 'DUP_WORKER_NAME').length, 1);
+});
+
+test('the החלטה column is a dropdown of exactly the four decisions', () => {
+  const ctx = runCtx(dirtyTabs());
+  ctx.runDataIntegrityReportNow();
+  const sheet = ctx.sheets['ניקוי נתונים'];
+  assert.strictEqual(sheet.validations.length, 1, 'one validation, on one column');
+  const v = sheet.validations[0];
+  assert.strictEqual(v.c, sheet.values[0].indexOf('החלטה') + 1);
+  assert.deepStrictEqual(plain(v.rule.values), ['השאר', 'מזג', 'העבר לארכיב', 'תקן']);
+  assert.strictEqual(v.rule.allowInvalid, false, 'a typed decision must be impossible');
+});
+
+test('a decision already entered survives the next run', () => {
+  const ctx = runCtx(dirtyTabs());
+  ctx.runDataIntegrityReportNow();
+  const sheet = ctx.sheets['ניקוי נתונים'];
+  const decisionCol = sheet.values[0].indexOf('החלטה');
+  const noteCol = sheet.values[0].indexOf('הערה');
+  const target = sheet.values.findIndex(r => r[0] === 'DUP_WORKER_NAME');
+  sheet.values[target][decisionCol] = 'מזג';
+  sheet.values[target][noteCol] = 'אותה עובדת';
+
+  ctx.runDataIntegrityReportNow();
+  const after = ctx.sheets['ניקוי נתונים'].values.find(r => r[0] === 'DUP_WORKER_NAME');
+  assert.strictEqual(after[decisionCol], 'מזג', 'a rebuild must not erase a decision');
+  assert.strictEqual(after[noteCol], 'אותה עובדת');
 });

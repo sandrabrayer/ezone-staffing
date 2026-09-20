@@ -403,6 +403,113 @@ test('a missing start date is flagged but still priced — never guessed at', ()
   assert.strictEqual(sep.totals.missingData, 1);
 });
 
+// ============================================================
+// the missing-data bucket · a blank start date is counted, never trusted
+// ============================================================
+
+test('a missing start date sends the cost to the missing-data bucket, not to confirmed', () => {
+  const fx = {
+    workers: [worker('w1', ''), worker('w2', '2020-01-01')],
+    assignments: [fullTime('a1', 'w1', 'ramot', 3000), fullTime('a2', 'w2', 'ramot', 5000)],
+    actuals: [{ id: 'm1', assignmentId: 'a2', month: '2026-09', actualHours: 1 }],
+  };
+  const sep = run(fx, '2026-09');
+  const l = lineOf(sep, 'a1');
+
+  assert.strictEqual(l.missingStartDate, true, 'the line is tagged');
+  assert.strictEqual(l.bucket, 'missing');
+  assert.strictEqual(l.cost, 3000, 'the worker is still counted — the total does not move');
+
+  assert.strictEqual(sep.totals.projectedTotal, 8000);
+  assert.strictEqual(sep.totals.missingDataCost, 3000, 'its money sits in the missing bucket');
+  assert.strictEqual(sep.totals.actualConfirmed, 5000, 'and NOT in confirmed');
+  assert.strictEqual(sep.totals.estimated, 0, 'and NOT in estimated');
+  assert.strictEqual(sep.byHouse.ramot.missingDataCost, 3000, 'per house too');
+});
+
+test('a worker WITH a start date is never tagged', () => {
+  const fx = {
+    workers: [worker('w1', '2020-01-01')],
+    assignments: [fullTime('a1', 'w1', 'ramot', 3000)],
+    actuals: [{ id: 'm1', assignmentId: 'a1', month: '2026-09', actualHours: 1 }],
+  };
+  const l = lineOf(run(fx, '2026-09'), 'a1');
+  assert.strictEqual(l.missingStartDate, false);
+  assert.strictEqual(l.bucket, 'confirmed');
+});
+
+test('filling the start date in moves the money out of the missing bucket', () => {
+  const assignments = [fullTime('a1', 'w1', 'ramot', 3000)];
+  const actuals = [{ id: 'm1', assignmentId: 'a1', month: '2026-09', actualHours: 1 }];
+  const before = run({ workers: [worker('w1', '')], assignments, actuals }, '2026-09');
+  const after = run({ workers: [worker('w1', '2020-01-01')], assignments, actuals }, '2026-09');
+
+  assert.strictEqual(before.totals.missingDataCost, 3000);
+  assert.strictEqual(after.totals.missingDataCost, 0);
+  assert.strictEqual(after.totals.actualConfirmed, 3000);
+  assert.strictEqual(before.totals.projectedTotal, after.totals.projectedTotal,
+    'the bill is the same either way — only its honesty changed');
+});
+
+test('thirty undated workers are thirty tagged lines, not thirty silent ones', () => {
+  const workers = [];
+  const assignments = [];
+  for (let i = 0; i < 30; i++) {
+    workers.push(worker('w' + i, ''));
+    assignments.push(fullTime('a' + i, 'w' + i, 'ramot', 1000));
+  }
+  const sep = run({ workers, assignments }, '2026-09');
+  assert.strictEqual(sep.lines.filter(l => l.missingStartDate).length, 30);
+  assert.strictEqual(sep.totals.missingDataCost, 30000);
+  assert.strictEqual(sep.totals.actualConfirmed, 0);
+  assert.strictEqual(sep.totals.missingData, 30, 'the count still counts');
+});
+
+// ============================================================
+// a month with no recorded actuals at all
+// ============================================================
+
+test('a zero-actuals month reports NO confirmed money — the whole figure is an estimate', () => {
+  const fx = {
+    workers: [worker('w1', '2020-01-01'), worker('w2', '2020-01-01')],
+    assignments: [fullTime('a1', 'w1', 'ramot', 3000), hourly('a2', 'w2', 'asher', 60, 100)],
+    coverages: [{ id: 'c1', coveringWorkerId: 'w1', coveringHouse: 'ramot',
+      receivingHouse: 'asher', startDate: '2026-09-01', endDate: '2026-09-30', extraPayment: 500 }],
+    actuals: [],
+  };
+  const sep = run(fx, '2026-09');
+  assert.strictEqual(sep.hasActuals, false, 'the month says so about itself');
+  assert.strictEqual(sep.actualsForMonth, 0);
+  assert.strictEqual(sep.totals.actualConfirmed, 0, 'confirmed is ₪0, not "the salary"');
+  assert.strictEqual(sep.totals.estimated, sep.totals.projectedTotal,
+    'the whole figure sits in estimated');
+  assert.strictEqual(lineOf(sep, 'a1').bucket, 'estimated',
+    'even a contractual salary is a projection while nothing real is recorded');
+});
+
+test('one recorded actual is enough to bucket the month line by line again', () => {
+  const fx = {
+    workers: [worker('w1', '2020-01-01'), worker('w2', '2020-01-01')],
+    assignments: [fullTime('a1', 'w1', 'ramot', 3000), hourly('a2', 'w2', 'asher', 60, 100)],
+    actuals: [{ id: 'm1', assignmentId: 'a2', month: '2026-09', actualHours: 50 }],
+  };
+  const sep = run(fx, '2026-09');
+  assert.strictEqual(sep.hasActuals, true);
+  assert.strictEqual(sep.totals.actualConfirmed, 3000 + 3000);
+  assert.strictEqual(sep.totals.estimated, 0);
+});
+
+test('hasActuals is per MONTH, not per sheet', () => {
+  const fx = {
+    workers: [worker('w1', '2020-01-01')],
+    assignments: [fullTime('a1', 'w1', 'ramot', 3000)],
+    actuals: [{ id: 'm1', assignmentId: 'a1', month: '2026-08', actualHours: 10 }],
+  };
+  assert.strictEqual(run(fx, '2026-08').hasActuals, true);
+  assert.strictEqual(run(fx, '2026-09').hasActuals, false,
+    'August having data says nothing about September');
+});
+
 test('an assignment that is also archived is counted ONCE', () => {
   const fx = {
     workers: [worker('w1', '2020-01-01')],
@@ -415,7 +522,7 @@ test('an assignment that is also archived is counted ONCE', () => {
     'the archive row wins — it is the one carrying the termination date');
 });
 
-test('actualConfirmed + estimated always equals projectedTotal', () => {
+test('actualConfirmed + estimated + missingDataCost always equals projectedTotal', () => {
   const fx = {
     workers: [worker('w1', '2020-01-01'), worker('w2', '2020-01-01'), worker('w3', '2020-01-01')],
     assignments: [
@@ -428,7 +535,9 @@ test('actualConfirmed + estimated always equals projectedTotal', () => {
       receivingHouse: 'asher', startDate: '2026-09-01', endDate: '2026-09-30', extraPayment: 500 }],
   };
   const sep = run(fx, '2026-09');
-  assert.strictEqual(sep.totals.actualConfirmed + sep.totals.estimated, sep.totals.projectedTotal);
+  assert.strictEqual(
+    sep.totals.actualConfirmed + sep.totals.estimated + sep.totals.missingDataCost,
+    sep.totals.projectedTotal, 'the three buckets are exhaustive');
   const houseSum = Object.keys(sep.byHouse)
     .reduce((s, h) => s + sep.byHouse[h].projectedTotal, 0);
   assert.strictEqual(houseSum, sep.totals.projectedTotal, 'the houses must sum to the network');
