@@ -442,3 +442,35 @@ test('no export leaks a value it should not — ids are internal but present on 
       .forEach(bad => assert.ok(!csv.includes(bad), kind + ' must never carry ' + bad));
   });
 });
+
+// ---------------------------------------------------------------------------
+// a date is never exported as more certain than it is on screen
+// ---------------------------------------------------------------------------
+
+test('the roster names how each start date was arrived at', () => {
+  const c = ctx({
+    workers: [
+      wk('w1', 'הוזן ידנית', { startDate: '2026-01-19' }),
+      wk('w2', 'משוחזר', { startDate: '2026-01-01', startDateSource: 'payroll_floor' }),
+      wk('w3', 'ללא תאריך', { startDate: '' }),
+    ],
+    assignments: [asg('a1', 'w1', 'ramot'), asg('a2', 'w2', 'ramot'), asg('a3', 'w3', 'ramot')],
+  });
+  const { rows } = runExport('roster', c);
+  const src = rows[0].indexOf('מקור התאריך');
+  assert.ok(src > 0, 'the roster carries a source column next to the date');
+  const byName = {};
+  rows.slice(1).forEach(r => { byName[r[1]] = r; });
+  assert.strictEqual(byName['הוזן ידנית'][src], 'הוזן ידנית');
+  assert.match(byName['משוחזר'][src], /משוער/, 'a floor is labelled as an estimate');
+  assert.match(byName['משוחזר'][src], /דוח שכר/, 'and says what it was reconstructed from');
+  assert.strictEqual(byName['ללא תאריך'][src], '', 'no date, nothing to say about its source');
+});
+
+test('the unassigned sheet carries the same label', () => {
+  const c = ctx({
+    workers: [wk('w1', 'ללא שיבוץ', { startDate: '2026-05-01', startDateSource: 'payroll_floor' })],
+  });
+  const { rows } = runExport('unassigned', c);
+  assert.match(rows[1][rows[0].indexOf('מקור התאריך')], /משוער/);
+});

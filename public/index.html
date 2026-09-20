@@ -630,6 +630,18 @@ tbody tr:hover{
   color:#5a3c00;border:1px solid var(--warning);
   vertical-align:middle;margin-inline-start:6px;
 }
+/* Payroll-floor start date: a date WAS recovered, but from the first month
+   the worker appears in the payroll book — so the truth is that month or
+   earlier. Quieter than the missing-date chip (something is known) and
+   still never silent (what is known is a floor, not a date). */
+.eststart-badge{
+  display:inline-block;
+  font-size:10.5px;font-weight:700;
+  padding:1px 7px;border-radius:999px;
+  background:color-mix(in srgb, var(--muted,#6b7280) 16%, #fff);
+  color:#3f4756;border:1px dashed var(--muted,#6b7280);
+  vertical-align:middle;margin-inline-start:6px;
+}
 /* Missing-data badge: a required rate or date is absent, so the number
    shown is short. Deliberately louder than the estimate badge. */
 .miss-badge{
@@ -1991,6 +2003,25 @@ const NOSTART_CHIP_TITLE = 'לא הוזן תאריך תחילת עבודה, כך
 function noStartBadge(){
   return ` <span class="nostart-badge" title="${escapeHtml(NOSTART_CHIP_TITLE)}">${NOSTART_CHIP_TEXT}</span>`;
 }
+// The chip for a start date that was reconstructed from the payroll book.
+// It marks the DATE, not the money: the month is priced exactly as it would
+// be with a known date, but nothing on screen may present that date as
+// confirmed, because the true start is the floor month or earlier.
+const ESTSTART_CHIP_TEXT = 'תאריך משוער';
+const ESTSTART_CHIP_TITLE = 'תאריך התחילה שוחזר מהחודש הראשון שבו העובד/ת מופיע/ה בדוח השכר — התחלה אמיתית באותו חודש או לפניו. לא תאריך מאושר';
+const START_DATE_SOURCE_PAYROLL_FLOOR = 'payroll_floor';
+function estStartBadge(){
+  return ` <span class="eststart-badge" title="${escapeHtml(ESTSTART_CHIP_TITLE)}">${ESTSTART_CHIP_TEXT}</span>`;
+}
+// The chip a worker row deserves: no date at all, an approximate date, or
+// nothing. One function, so the roster and the «וותק» screen can never
+// disagree about what is known about a date.
+function startDateChipFor(w){
+  if (!w || !w.startDate) return noStartBadge();
+  if (String(w.startDateSource || '') === START_DATE_SOURCE_PAYROLL_FLOOR) return estStartBadge();
+  return '';
+}
+
 // Shown wherever a total is presented in a month that recorded no real
 // hours or sessions at all: the confirmed figure is ₪0 and every shekel on
 // screen is a projection.
@@ -2029,6 +2060,8 @@ function monthCostCellInner(a){
   }
   if (line.missingStartDate) {
     tail += noStartBadge();
+  } else if (line.startDateEstimated) {
+    tail += estStartBadge();
   }
   if (line.missingData && line.missingData.length) {
     tail += missingBadge(line.missingData.join(', '));
@@ -4336,7 +4369,7 @@ function startDatesView(){
     const nameKey = escapeHtml(String(w.name||'').toLowerCase());
     return `
     <tr id="sdrow_${id}" data-name="${nameKey}" data-has-date="${w.startDate ? '1' : '0'}">
-      <td>${escapeHtml(w.name)}<span id="sdchip_${id}">${w.startDate ? '' : noStartBadge()}</span></td>
+      <td>${escapeHtml(w.name)}<span id="sdchip_${id}">${startDateChipFor(w)}</span></td>
       <td class="note-cell">${escapeHtml(sdWorkerHouses(w.id))}</td>
       <td><input type="date" id="sd_${id}" value="${sd}" style="max-width:170px"/></td>
       <td>
@@ -4431,8 +4464,7 @@ function syncStartDateRow(workerId){
 function syncStartDateChip(workerId){
   const el = document.getElementById('sdchip_' + workerId);
   if (!el) return;
-  const w = workerById(workerId);
-  el.innerHTML = (w && w.startDate) ? '' : noStartBadge();
+  el.innerHTML = startDateChipFor(workerById(workerId));
 }
 
 // Batch-save every row whose date input differs from the stored value.
@@ -4472,7 +4504,12 @@ function applyStartDateSaves(res, sent){
   const saved = (res && Array.isArray(res.saved) && res.saved.length) ? res.saved : sent;
   saved.forEach(s => {
     const w = workerById(s.id);
-    if (w) w.startDate = s.startDate || '';
+    if (!w) return;
+    w.startDate = s.startDate || '';
+    // The backend clears start_date_source on a hand-entered date, because
+    // a person typing a date outranks a payroll-book reconstruction. Mirror
+    // that locally or the «תאריך משוער» chip would outlive the estimate.
+    w.startDateSource = '';
   });
 }
 

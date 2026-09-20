@@ -288,7 +288,7 @@ test('the merged worker is ARCHIVED with its reason — never deleted', () => {
   assert.ok(arch, 'workers_archive is created on first use');
   assert.deepStrictEqual(arch.rows[0], ['id', 'name', 'notes', 'created_at',
     'shift_commitment', 'start_date', 'gmach_month', 'phone', 'decision', 'reason',
-    'keeper_id', 'archived_at']);
+    'keeper_id', 'archived_at', 'start_date_source']);
   const row = arch.rows[1];
   assert.strictEqual(String(row[0]), 'w2', 'the id survives');
   assert.strictEqual(String(row[1]), 'דנה  כהן', 'and the name, exactly as entered');

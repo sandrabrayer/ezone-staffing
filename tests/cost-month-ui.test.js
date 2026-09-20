@@ -396,6 +396,71 @@ test('the start-dates screen shows the same chip, where it can be fixed', async 
   dom.window.close();
 });
 
+// A start date recovered from the payroll book is a floor, not a date. The
+// money is priced exactly as it would be with a known date — what changes
+// is that no screen may present the date as confirmed.
+test('a payroll-floor start date wears the תאריך משוער chip, not the missing one', async () => {
+  const { dom, errors } = loadPage();
+  await authAndBoot(dom, {
+    workers: [
+      { id: 'w1', name: 'תאריך משוחזר', notes: '', createdAt: '', startDate: '2026-01-01',
+        startDateSource: 'payroll_floor' },
+      { id: 'w2', name: 'עם תאריך', notes: '', createdAt: '', startDate: '2020-01-01' },
+      { id: 'w3', name: 'ללא תאריך', notes: '', createdAt: '', startDate: '' },
+    ],
+    assignments: [fullTime('a1', 'w1', 'ramot', 3000), fullTime('a2', 'w2', 'ramot', 5000),
+      fullTime('a3', 'w3', 'ramot', 1000)],
+  });
+  dom.window.onMonthChange('2026-09');
+  dom.window.go('ramot');
+  const doc = dom.window.document;
+
+  const est = [...doc.querySelectorAll('.eststart-badge')];
+  assert.equal(est.length, 1, 'exactly the reconstructed date is chipped');
+  assert.match(est[0].textContent, /תאריך משוער/);
+  assert.match(est[0].getAttribute('title'), /דוח השכר/, 'the chip says where the date came from');
+  const missing = [...doc.querySelectorAll('.nostart-badge')];
+  assert.equal(missing.length, 1, 'and the blank-date chip stays on the blank one only');
+
+  dom.window.close();
+  assert.equal(errors.length, 0, 'no script errors');
+});
+
+test('the money of a floor-dated line is NOT moved to the missing-data bucket', async () => {
+  const { dom } = loadPage();
+  await authAndBoot(dom, {
+    workers: [{ id: 'w1', name: 'תאריך משוחזר', notes: '', createdAt: '',
+      startDate: '2026-01-01', startDateSource: 'payroll_floor' }],
+    assignments: [fullTime('a1', 'w1', 'ramot', 4000)],
+    monthlyActuals: [{ id: 'm1', assignmentId: 'a1', month: '2026-09', actualHours: 1 }],
+  });
+  dom.window.onMonthChange('2026-09');
+  const sub = [...dom.window.document.querySelectorAll('.stat .sub')].map(e => e.textContent).join(' ');
+  assert.ok(!/חסר תאריך תחילה/.test(sub), 'a floor is not a missing date');
+  assert.match(networkTotalText(dom), /4,?000/);
+  dom.window.close();
+});
+
+test('the start-dates screen marks a reconstructed date, and clears it on a save', async () => {
+  const { dom } = loadPage();
+  await authAndBoot(dom, {
+    workers: [{ id: 'w1', name: 'תאריך משוחזר', notes: '', createdAt: '',
+      startDate: '2026-01-01', startDateSource: 'payroll_floor' }],
+    assignments: [fullTime('a1', 'w1', 'ramot', 3000)],
+  });
+  dom.window.go('startdates');
+  const doc = dom.window.document;
+  assert.equal([...doc.querySelectorAll('.eststart-badge')].length, 1, 'chipped where it is fixed');
+
+  // A date typed by a person outranks the reconstruction, so the chip goes.
+  dom.window.applyStartDateSaves({ saved: [{ id: 'w1', startDate: '2026-01-19' }] },
+    [{ id: 'w1', startDate: '2026-01-19' }]);
+  dom.window.syncStartDateChip('w1');
+  assert.equal([...doc.querySelectorAll('.eststart-badge')].length, 0);
+  assert.equal([...doc.querySelectorAll('.nostart-badge')].length, 0, 'and no missing-date chip either');
+  dom.window.close();
+});
+
 test('a month with no recorded actuals says so, instead of calling the projection confirmed', async () => {
   const { dom } = loadPage();
   await authAndBoot(dom, {

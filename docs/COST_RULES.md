@@ -196,3 +196,33 @@ the app is actually in. The alternative, `'trust_terms'`, would count
 contractual amounts — a salary, a retainer, a coverage payment — as confirmed
 even with nothing recorded. That is defensible, and it is Moran's call, not
 this file's.
+
+### 9 · `PAYROLL_FLOOR_HANDLING` — currently `'price_as_given'`
+
+**A start date recovered from the payroll book is a floor — the true start is
+that month or earlier. Does the money it prices stay trustworthy?** Today:
+**the money is priced exactly as it would be with a known date, and the DATE
+is marked as an estimate everywhere it appears.**
+
+Those dates arrive through `applyVerifiedFixesNow` (see
+[PAYROLL_VERIFIED_FIXES.md](PAYROLL_VERIFIED_FIXES.md)) and are stored with
+`start_date_source = 'payroll_floor'` on the worker row. The engine copies it
+onto every line as `startDateSource` and sets `startDateEstimated`, the UI
+shows a grey dashed «תאריך משוער» chip, the roster and «עובדים ללא שיבוץ»
+exports carry a «מקור התאריך» column, and the integrity report keeps the
+worker visible with an `ESTIMATED_START_DATE` (info) row.
+
+**Why the money is not demoted.** For any month *after* the floor month the
+start date does not affect the figure at all — the worker is employed for the
+whole month either way — so moving a confirmed August actual into another
+bucket because January is approximate would make the report less honest, not
+more. What a floor *can* hide is cost in the months *before* it, where the
+line reads `NOT_STARTED` and ₪0; those lines are counted in the report as
+`startDateFloorNotStarted` rather than guessed at.
+
+The alternative, `'missing_data'`, treats a floor exactly like a blank date
+and sends its money to `missingDataCost`. One line to change.
+
+**The fix is not a rule change — it is entering the exact date.** Typing one
+on the «וותק ותאריכי קליטה» screen clears the tag automatically, because a
+person's answer outranks a reconstruction.

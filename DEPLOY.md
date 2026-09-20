@@ -27,8 +27,16 @@ workflow itself), CI:
 
 1. Installs `@google/clasp` (pinned to `3.3.0`).
 2. Writes `~/.clasprc.json` from the **`CLASPRC_JSON`** secret (OAuth tokens).
-3. `clasp push -f` — uploads `apps-script/Code.gs` + `apps-script/appsscript.json`
-   to the Apps Script project (Script ID lives in [`.clasp.json`](.clasp.json)).
+3. `clasp push -f` — uploads everything under `apps-script/` (`Code.gs`,
+   `CostEngine.gs` and `appsscript.json`) to the Apps Script project (Script ID
+   lives in [`.clasp.json`](.clasp.json)).
+
+   > **`apps-script/CostEngine.gs` is generated, not written.** It is a
+   > byte-for-byte copy of `lib/cost-engine.js` so that the editor-run
+   > `logMonthTotalsNow()` and the browser price a month with one engine.
+   > Edit `lib/cost-engine.js`, then run `node scripts/sync_cost_engine_gs.js`
+   > and commit both. `tests/cost-engine-gs-sync.test.js` fails the build if
+   > the copy is stale, so this cannot be forgotten silently.
 4. `clasp deploy -i <DEPLOYMENT_ID>` — publishes a **new version of the existing
    deployment**. Because the deployment ID is reused, **the `/exec` URL never
    changes**, so Railway's `APPS_SCRIPT_URL` (and any sibling consumers) keep

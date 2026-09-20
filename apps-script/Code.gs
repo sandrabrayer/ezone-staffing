@@ -137,7 +137,19 @@ const LEGACY_PREFIX = '_legacy_';
 //      format so Sheets never strips the zero; readWorkersSafe restores it
 //      defensively on read. Same key-presence rule as start_date. Read by the
 //      coordinators app through getGuidesForCoordinators (NOT financial).
-const HEADERS_WORKERS = ['id', 'name', 'notes', 'created_at', 'shift_commitment', 'start_date', 'gmach_month', 'phone'];
+//   8 start_date_source — how start_date was arrived at. Blank on every
+//      date a person entered (the normal case, and what "confirmed" means
+//      here). 'payroll_floor' means the date was reconstructed from the
+//      first month the worker appears in the payroll book, so the true
+//      start is THAT MONTH OR EARLIER — a floor, never a confirmed date.
+//      Written only by applyVerifiedFixesNow, and CLEARED by any later
+//      hand-entered date, because a person typing a date outranks a
+//      reconstruction. The cost engine carries it onto every line as
+//      startDateEstimated and the UI shows «תאריך משוער».
+const HEADERS_WORKERS = ['id', 'name', 'notes', 'created_at', 'shift_commitment', 'start_date', 'gmach_month', 'phone', 'start_date_source'];
+// The only non-blank value start_date_source ever takes. Mirrors
+// START_DATE_SOURCE_PAYROLL_FLOOR in lib/cost-engine.js.
+const START_DATE_SOURCE_PAYROLL_FLOOR = 'payroll_floor';
 // APPEND-ONLY, same rule as every other tab. ts is an ISO timestamp; action
 // is the doPost action name; entity / entity_id identify the row; field,
 // before and after describe ONE field's change; reason is free text.
@@ -912,6 +924,9 @@ function readWorkersSafe() {
       // Mobile phone as 10-digit TEXT ('' when not entered). Appended column —
       // blank on every legacy row.
       phone: formatPhoneCell(r[7]),
+      // '' (a date a person entered, or no date at all) or 'payroll_floor'.
+      // Appended column — blank on every row written before it existed.
+      startDateSource: String(r[8] || '').trim(),
     };
   });
 }
@@ -1258,6 +1273,23 @@ function auditLog_(entries) {
   }
 }
 
+// Column 9 = start_date_source. Clearing it is how a hand-entered date
+// retires a payroll-book reconstruction: the tag only ever means "this date
+// was inferred", so it must not outlive the inference. A no-op when the
+// cell is already blank, and audited when it is not, because dropping the
+// tag changes how every view reads the date.
+function clearStartDateSource_(sh, row, workerId) {
+  const col = HEADERS_WORKERS.indexOf('start_date_source') + 1;
+  if (col <= 0) return;
+  const before = String(sh.getRange(row, col).getValue() || '').trim();
+  if (!before) return;
+  ensureHeaders(sh, HEADERS_WORKERS);
+  sh.getRange(row, col).setValue('');
+  auditLog_([{ action: 'setWorkerStartDate', entity: 'worker', entityId: workerId,
+    field: 'start_date_source', before: before, after: '',
+    reason: 'תאריך שהוזן ידנית גובר על שחזור מדוח שכר' }]);
+}
+
 // One entry per field that actually changed between two plain objects.
 function auditDiff_(action, entity, entityId, before, after, fields, reason) {
   const out = [];
@@ -1434,6 +1466,10 @@ function updateWorker(body) {
     let startDate = w.startDate;
     if (w.hasStartDate) {
       sh.getRange(row, 6).setValue(w.startDate);
+      // Column 9 = start_date_source. A person typing a date outranks a
+      // reconstruction from the payroll book, so the floor tag goes with the
+      // date — otherwise a confirmed date would keep showing «תאריך משוער».
+      clearStartDateSource_(sh, row, id);
     } else {
       startDate = formatDateCell(sh.getRange(row, 6).getValue());
     }
@@ -1511,6 +1547,9 @@ function setWorkerStartDates(body) {
       const row = rowById[u.id];
       if (!row) { missing.push(u.id); return; }
       sh.getRange(row, 6).setValue(u.startDate); // col 6 = start_date
+      // A date entered here is a person's answer, so it outranks — and
+      // clears — a start_date_source reconstructed from the payroll book.
+      clearStartDateSource_(sh, row, u.id);
       saved.push({ id: u.id, startDate: u.startDate });
     });
     return { ok: true, saved: saved, count: saved.length, missing: missing };
@@ -3933,19 +3972,28 @@ const INTEGRITY_SEVERITY_ORDER = { error: 0, warn: 1, info: 2 };
 // Display-only Hebrew for the severity column of the report tab.
 const INTEGRITY_SEVERITY_LABELS = { error: 'שגיאה', warn: 'אזהרה', info: 'מידע' };
 
-// The two tabs the report owns. NOTHING else may be written by it —
-// integrityWriteReportTab_ enforces this by name.
+// The three tabs the report layer owns. NOTHING else may be written by it —
+// integrityWriteReportTab_ enforces this BY NAME, so a bug in any row
+// builder still cannot reach a data tab. Each one is a sheet a person
+// reads or fills in; none of them is read back as data by the app.
 const INTEGRITY_REPORT_TAB = 'דוח תקינות';
 const CLEANUP_TAB = 'ניקוי נתונים';
-const INTEGRITY_WRITABLE_TABS = [INTEGRITY_REPORT_TAB, CLEANUP_TAB];
+// Declared here (rather than beside the rest of the proposal-sheet code,
+// far below) so the writable list is complete at the one place that
+// decides what may be written at all.
+const MISSING_ASSIGNMENTS_TAB = 'שיבוצים חסרים';
+const INTEGRITY_WRITABLE_TABS = [INTEGRITY_REPORT_TAB, CLEANUP_TAB, MISSING_ASSIGNMENTS_TAB];
 
 // Where a worker row goes when a cleanup decision archives it. APPEND-ONLY,
 // like every other tab: a worker is moved here, never deleted, so the row
 // (and the reason it was retired) survives forever.
 const WORKERS_ARCHIVE_TAB = 'workers_archive';
+// APPEND-ONLY, like every other tab: start_date_source went on the END so
+// the twelve original columns keep their positions.
 const HEADERS_WORKERS_ARCHIVE = [
   'id', 'name', 'notes', 'created_at', 'shift_commitment', 'start_date',
   'gmach_month', 'phone', 'decision', 'reason', 'keeper_id', 'archived_at',
+  'start_date_source',
 ];
 
 // Columns of the Moran-facing «דוח תקינות» tab. Hebrew headers because this
@@ -4021,6 +4069,7 @@ const INTEGRITY_ADVICE_HE = {
   NEGATIVE_RATE: 'סכום שלילי. לתקן את הסכום בשיבוץ',
   BLANK_NAME: 'רשומת עובד/ת ללא שם — נעלמת מכל המסכים. להשלים שם או להעביר לארכיב',
   MISSING_START_DATE: 'להשלים תאריך תחילת עבודה במסך וותק ותאריכי קליטה. עד אז העלות מסומנת כחסרת נתונים',
+  ESTIMATED_START_DATE: 'התאריך שוחזר מדוח השכר — התחלה אמיתית באותו חודש או לפניו. אין חובת פעולה; הזנת התאריך המדויק תסיר את הסימון',
   MISSING_RATE: 'להשלים את הסכום או הכמות בשיבוץ — אחרת הוא עולה 0 בכל חודש',
   SMOKE_RECORD: 'נראית כרשומת בדיקה. אם אינה אמיתית — להעביר לארכיב',
   NAME_SYNC_RISK: 'השם לא יתאים לאפליקציות הרכזים והמטפלים. לתקן רווחים וגרשיים',
@@ -4317,6 +4366,17 @@ function computeDataIntegrityReport_(data, todayYmd) {
           'reported in the missing-data bucket, NOT in confirmed or estimated',
         { workerId: w.id }));
       return;
+    }
+    // A date that WAS recovered, but from the payroll book: the true start
+    // is that month or earlier. It leaves MISSING_START_DATE behind, so
+    // without this row it would vanish from the report entirely and an
+    // approximation would quietly become the record.
+    if (w.startDateSource === START_DATE_SOURCE_PAYROLL_FLOOR) {
+      findings.push(integrityFinding_(
+        'info', 'ESTIMATED_START_DATE', 'worker', w.id,
+        'start date ' + sd + ' is a payroll floor, not a confirmed date — the true start is ' +
+          sd.slice(0, 7) + ' or earlier; months before it may be understated',
+        { workerId: w.id, classification: 'payroll_floor' }));
     }
     if (today && sd > today) {
       findings.push(integrityFinding_(
@@ -4886,7 +4946,7 @@ function cleanupArchiveWorker_(workerId, decision, reason, keeperId) {
   workersArchiveSheet_().appendRow([
     String(r[0] || ''), String(r[1] || ''), String(r[2] || ''), String(r[3] || ''),
     String(r[4] || ''), formatDateCell(r[5]), String(r[6] || ''), formatPhoneCell(r[7]),
-    decision, reason, keeperId || '', archivedAt,
+    decision, reason, keeperId || '', archivedAt, String(r[8] || ''),
   ]);
   sh.deleteRow(row);
   return { id: String(r[0] || ''), name: String(r[1] || ''), archivedAt: archivedAt };
@@ -5130,4 +5190,852 @@ function applyCleanupDecisionsNow(dryRun) {
     Logger.log('Run applyCleanupDecisionsNow(false) to apply. Nothing above has happened yet.');
   }
   return result;
+}
+
+/* ============================================================
+   PAYROLL-VERIFIED FIXES  —  editor-run, DRY RUN BY DEFAULT
+   ============================================================
+   Everything in this section acts on facts checked against
+   E-ZONE's accounting payroll export (Jan–Aug 2026), not on
+   anything the app inferred by itself. The verified facts are
+   DATA at the top of the section, so what was checked, and
+   against what, is readable without reading any logic.
+
+     logMonthTotalsNow(months)          → READ-ONLY. What a month
+                                          costs, per bucket and per
+                                          house. Run it BEFORE and
+                                          AFTER every fix so each
+                                          change is attributable.
+     applyVerifiedFixesNow(dryRun)      → the start-date typo, the
+                                          leavers, the payroll-floor
+                                          dates and the rename.
+                                          DRY RUN unless dryRun === false.
+     writeMissingAssignmentsTabNow()    → builds «שיבוצים חסרים»,
+                                          the proposal sheet for the
+                                          paid-but-unplaced workers.
+     applyMissingAssignmentsNow(dryRun) → creates assignments ONLY
+                                          from rows that are fully
+                                          filled in AND approved.
+                                          DRY RUN unless dryRun === false.
+
+   Two rules hold across all of it:
+
+   FAIL LOUDLY. A verified fact names a person. If that name
+   resolves to no worker, or to more than one, the WHOLE run
+   aborts before anything is written — a fix applied to the wrong
+   row is worse than a fix not applied. The same goes for a fact
+   that contradicts the sheet (a "no assignments" worker who turns
+   out to hold one).
+
+   NOTHING IS GUESSED. A rate, a house or an employment type that
+   is not in the app is not invented here: it is asked for on a
+   proposal sheet and left empty until a person fills it in.
+   ============================================================ */
+
+// The reason every write in this section carries into the audit log, so a
+// year from now the trail says WHY a date moved, not just that it did.
+const VERIFIED_FIX_REASON = 'תיקון מאומת מול דוח שכר';
+
+// (A) A start date that was a typo, not a future hire. Both the id and the
+// name are recorded: the run refuses to act if they disagree, so a copied
+// id can never land a date on somebody else's row.
+const VERIFIED_START_DATE_FIXES = [
+  {
+    workerId: 'wmppe95x5vd8o',
+    name: 'שובל לובטון',
+    startDate: '2026-01-01',
+    why: 'payroll employee #56, paid every month since January 2026 — the stored 2026-12-01 is a typo',
+  },
+];
+
+// (C) Last seen in the January payroll and absent since: genuine leavers.
+// Archived, never deleted — the row moves to workers_archive with its reason.
+const VERIFIED_LEAVERS = [
+  { name: 'שלומציון כהן' },
+  { name: 'דן רובינסון' },
+  { name: 'ניר לוי' },
+  { name: 'שלי הלפט' },
+];
+const VERIFIED_LEAVER_REASON = 'לא מופיע/ה בדוח השכר מאז ינואר 2026';
+
+// (D) The first month each worker appears in the payroll book. The true
+// start is THAT MONTH OR EARLIER, so what is written is the 1st of the
+// month and it is tagged start_date_source = 'payroll_floor'. A floor is
+// not a date: every view that shows it says «תאריך משוער».
+const VERIFIED_START_DATE_FLOORS = [
+  { name: 'sergei makarov', month: '2026-01' },
+  { name: 'שחר מזור', month: '2026-01' },
+  { name: 'מעיין דלומי', month: '2026-01' },
+  { name: 'חנן וייל', month: '2026-01' },
+  { name: 'אלה שפירא', month: '2026-02' },
+  { name: 'עדי איזנברג', month: '2026-03' },
+  { name: 'בן ציון אדרי', month: '2026-05' },
+  { name: 'אורן סילמניק', month: '2026-06' },
+];
+
+// (E) Parentheses in a Hebrew name break copy-paste rendering (the bracket
+// jumps to the wrong end of the string in a bidi context), and every
+// consumer matches this person by exact name.
+const VERIFIED_RENAMES = [
+  { from: 'אתי (אסתר) דבוש', to: 'אתי אסתר דבוש' },
+];
+
+// (B) Paid in the August payroll and holding no assignment at all, so they
+// currently contribute 0 to every month. An assignment cannot be created
+// from this alone — it needs a house, an employment type and a rate, none
+// of which the app has for these people — so they get a proposal row and
+// nothing else. NOTHING here is written automatically.
+const VERIFIED_PAID_WITHOUT_ASSIGNMENT = [
+  'רון מנחם', 'דניאל קוטסי', 'בר ליידרמן', 'עידו בוזגלו', 'שירן כהן',
+  'אופק רחמים', 'אופיר רוטנברג', 'ניב מנחם סין', 'דפנה כץ', 'דניאל סייג',
+];
+
+// (4) Payroll department → app house. REFERENCE ONLY: it fills a
+// suggestion column on the proposal sheet and is never written to a data
+// tab by any code path. Two departments deliberately resolve to nothing:
+//   002 קיסריה covers BOTH ofroni and rehab — the payroll book cannot tell
+//       them apart, so a person must choose;
+//   006 הולינה has no house in the app at all.
+const PAYROLL_DEPARTMENTS = [
+  { code: '001', label: 'רעננה פרדס', house: 'pardes' },
+  { code: '002', label: 'קיסריה', house: '',
+    note: 'קיסריה מכסה גם עפרוני וגם ריהאב — יש לבחור ידנית' },
+  { code: '003', label: 'רמות השבים', house: 'ramot' },
+  { code: '004', label: 'מטה', house: 'hq' },
+  { code: '005', label: 'רעננה אשר', house: 'asher' },
+  { code: '006', label: 'הולינה', house: '',
+    note: 'להולינה אין בית מקביל באפליקציה — לא למפות' },
+];
+
+function payrollDepartment_(value) {
+  const code = String(value || '').trim().slice(0, 3);
+  if (!code) return null;
+  for (let i = 0; i < PAYROLL_DEPARTMENTS.length; i++) {
+    if (PAYROLL_DEPARTMENTS[i].code === code) return PAYROLL_DEPARTMENTS[i];
+  }
+  return null;
+}
+
+/* ---------- read-only month totals ---------- */
+
+// The months the baseline is taken for when the function is called with no
+// argument, which is how it is meant to be run.
+const MONTH_TOTALS_DEFAULT_MONTHS = ['2026-08', '2026-09', '2026-10'];
+
+// The cost engine, as deployed alongside this file. apps-script/CostEngine.gs
+// is a generated byte-for-byte copy of lib/cost-engine.js (see
+// scripts/sync_cost_engine_gs.js): the editor and the screen must price a
+// month with ONE engine, or a baseline taken here proves nothing about what
+// Moran sees.
+function costEngine_() {
+  const engine = (typeof CostEngine !== 'undefined' && CostEngine)
+    || (typeof globalThis !== 'undefined' && globalThis.CostEngine);
+  if (!engine || typeof engine.costForMonth !== 'function') {
+    throw new Error('CostEngine is not in this Apps Script project. ' +
+      'apps-script/CostEngine.gs is generated by scripts/sync_cost_engine_gs.js ' +
+      'and deployed with Code.gs — redeploy, then run this again.');
+  }
+  return engine;
+}
+
+// READ-ONLY. Logs what each month costs, split into the three buckets and
+// broken down per house. Writes nothing at all — not a tab, not the audit
+// log — so it is always safe to run, before and after every fix.
+function logMonthTotalsNow(months) {
+  const engine = costEngine_();
+  const list = (months && months.length ? months : MONTH_TOTALS_DEFAULT_MONTHS)
+    .map(function (m) { return String(m || '').trim(); });
+  list.forEach(function (m) {
+    if (!/^\d{4}-\d{2}$/.test(m)) {
+      throw new Error('logMonthTotalsNow: "' + m + '" is not a YYYY-MM month');
+    }
+  });
+
+  const data = readAllForIntegrity_();
+  const out = [];
+  Logger.log('E-ZONE staffing — month totals (READ-ONLY, nothing was written)');
+  Logger.log('rows: ' + JSON.stringify({
+    workers: data.workers.length, assignments: data.assignments.length,
+    absences: data.absences.length, coverages: data.coverages.length,
+    archiveV3: data.archiveV3.length, monthlyActuals: data.monthlyActuals.length,
+    budgets: data.budgets.length,
+  }));
+
+  list.forEach(function (m) {
+    const rep = engine.costForMonth(
+      data.workers, data.assignments, data.absences, data.coverages, data.budgets, m,
+      { archive: data.archiveV3, monthlyActuals: data.monthlyActuals, today: todayLocal() });
+    const t = rep.totals;
+    const summary = {
+      month: m,
+      projectedTotal: t.projectedTotal,
+      actualConfirmed: t.actualConfirmed,
+      estimated: t.estimated,
+      missingDataCost: t.missingDataCost,
+      hasActuals: rep.hasActuals,
+      actualsForMonth: rep.actualsForMonth,
+      missingDataLines: t.missingData,
+      startDateEstimatedLines: rep.startDateEstimatedLines,
+      startDateFloorNotStarted: rep.startDateFloorNotStarted,
+      byHouse: {},
+    };
+    Logger.log('');
+    Logger.log('=== ' + m + ' ===');
+    Logger.log('total ' + t.projectedTotal +
+      ' = confirmed ' + t.actualConfirmed +
+      ' + estimated ' + t.estimated +
+      ' + missing-data ' + t.missingDataCost);
+    if (t.actualConfirmed + t.estimated + t.missingDataCost !== t.projectedTotal) {
+      Logger.log('!! the three buckets do not sum to the total — report this, do not act on it');
+    }
+    if (!rep.hasActuals) {
+      Logger.log('no real hours or sessions recorded for ' + m +
+        ' — confirmed is ₪0 and the whole figure is an estimate');
+    }
+    Object.keys(rep.byHouse).sort().forEach(function (h) {
+      const hb = rep.byHouse[h];
+      summary.byHouse[h] = {
+        projectedTotal: hb.projectedTotal,
+        actualConfirmed: hb.actualConfirmed,
+        estimated: hb.estimated,
+        missingDataCost: hb.missingDataCost,
+        instructorsCost: hb.instructorsCost,
+        budget: hb.budget,
+        variance: hb.variance,
+      };
+      Logger.log('  ' + h + ': total ' + hb.projectedTotal +
+        ' | confirmed ' + hb.actualConfirmed +
+        ' | estimated ' + hb.estimated +
+        ' | missing-data ' + hb.missingDataCost +
+        ' | instructors ' + hb.instructorsCost +
+        (hb.budget === null ? '' : ' | budget ' + hb.budget + ' | variance ' + hb.variance));
+    });
+    out.push(summary);
+  });
+  return out;
+}
+
+/* ---------- resolving a verified fact to exactly one row ---------- */
+
+// Every verified fact names a person. This is the ONLY way this section
+// turns a name into a row, and it never guesses:
+//   { status: 'ok',    worker }  — exactly one match;
+//   { status: 'done',  why }     — the fix is already in place (so a second
+//                                  run is a no-op rather than an error);
+//   { status: 'error', why }     — no match, or more than one. ANY error
+//                                  aborts the whole run before a single
+//                                  write, in a dry run exactly as in an
+//                                  apply run.
+function verifiedMatchesByName_(workers, name) {
+  const n = normalizeWorkerName_(name);
+  if (!n) return [];
+  return workers.filter(function (w) { return normalizeWorkerName_(w.name) === n; });
+}
+
+function verifiedResolveByName_(workers, name, what) {
+  const hits = verifiedMatchesByName_(workers, name);
+  if (hits.length === 1) return { status: 'ok', worker: hits[0] };
+  if (!hits.length) {
+    return { status: 'error', why: what + ': no worker is named "' + name + '"' };
+  }
+  return {
+    status: 'error',
+    why: what + ': "' + name + '" matches ' + hits.length + ' workers (' +
+      hits.map(function (w) { return w.id; }).join(', ') +
+      ') — merge or rename them first; nothing was written',
+  };
+}
+
+/* ---------- the plan ---------- */
+
+// Pure: takes what was read, returns what WOULD happen. The dry run and the
+// apply run build the identical plan from the identical inputs, so the log
+// of a dry run is a promise about the apply run rather than a description
+// of a different code path.
+function planVerifiedFixes_(workers, assignments, archivedIds) {
+  const plan = { errors: [], actions: [], done: [] };
+  const byWorker = {};
+  (assignments || []).forEach(function (a) {
+    (byWorker[a.workerId] = byWorker[a.workerId] || []).push(a);
+  });
+  const archived = {};
+  (archivedIds || []).forEach(function (id) { archived[String(id)] = true; });
+
+  // (A) the start-date typo, matched on id AND name.
+  VERIFIED_START_DATE_FIXES.forEach(function (fix) {
+    const byId = workers.filter(function (w) { return w.id === fix.workerId; });
+    if (!byId.length) {
+      if (archived[fix.workerId]) {
+        plan.done.push({ kind: 'start_date', id: fix.workerId,
+          why: 'worker is already archived' });
+        return;
+      }
+      plan.errors.push('start date fix: no worker with id ' + fix.workerId);
+      return;
+    }
+    const w = byId[0];
+    if (normalizeWorkerName_(w.name) !== normalizeWorkerName_(fix.name)) {
+      plan.errors.push('start date fix: id ' + fix.workerId + ' is "' + w.name +
+        '", not "' + fix.name + '" — the verified fact and the sheet disagree');
+      return;
+    }
+    if (w.startDate === fix.startDate && !w.startDateSource) {
+      plan.done.push({ kind: 'start_date', id: w.id, name: w.name,
+        why: 'start date is already ' + fix.startDate });
+      return;
+    }
+    plan.actions.push({
+      kind: 'start_date', id: w.id, name: w.name,
+      before: w.startDate, after: fix.startDate,
+      beforeSource: w.startDateSource, afterSource: '', why: fix.why,
+    });
+  });
+
+  // (D) payroll floors. Written as the 1st of the floor month and TAGGED,
+  // because "that month or earlier" is not a date.
+  VERIFIED_START_DATE_FLOORS.forEach(function (fix) {
+    const date = fix.month + '-01';
+    const hits = verifiedMatchesByName_(workers, fix.name);
+    if (hits.length === 1 && hits[0].startDate === date &&
+        hits[0].startDateSource === START_DATE_SOURCE_PAYROLL_FLOOR) {
+      plan.done.push({ kind: 'start_floor', id: hits[0].id, name: hits[0].name,
+        why: 'floor ' + date + ' is already recorded' });
+      return;
+    }
+    const r = verifiedResolveByName_(workers, fix.name, 'payroll floor');
+    if (r.status !== 'ok') { plan.errors.push(r.why); return; }
+    const w = r.worker;
+    // A date a person entered is better information than a floor. Keeping
+    // it is the safe direction: this run never overwrites a confirmed date
+    // with an approximation.
+    if (w.startDate && !w.startDateSource) {
+      plan.done.push({ kind: 'start_floor', id: w.id, name: w.name,
+        why: 'keeping the entered date ' + w.startDate + ' — a floor never overwrites it' });
+      return;
+    }
+    plan.actions.push({
+      kind: 'start_floor', id: w.id, name: w.name,
+      before: w.startDate, after: date,
+      beforeSource: w.startDateSource, afterSource: START_DATE_SOURCE_PAYROLL_FLOOR,
+      why: 'first payroll appearance ' + fix.month,
+    });
+  });
+
+  // (E) the rename. Already-renamed is a no-op, not an error.
+  VERIFIED_RENAMES.forEach(function (fix) {
+    const hits = verifiedMatchesByName_(workers, fix.from);
+    if (!hits.length && verifiedMatchesByName_(workers, fix.to).length === 1) {
+      plan.done.push({ kind: 'rename', name: fix.to, why: 'already renamed' });
+      return;
+    }
+    const r = verifiedResolveByName_(workers, fix.from, 'rename');
+    if (r.status !== 'ok') { plan.errors.push(r.why); return; }
+    plan.actions.push({
+      kind: 'rename', id: r.worker.id, name: r.worker.name,
+      before: r.worker.name, after: fix.to,
+      why: 'parentheses in a Hebrew name break copy-paste and exact-name matching',
+    });
+  });
+
+  // (C) the leavers. Archived, never deleted — and never while they still
+  // hold a placement, because that would orphan its cost.
+  VERIFIED_LEAVERS.forEach(function (fix) {
+    const hits = verifiedMatchesByName_(workers, fix.name);
+    if (!hits.length) {
+      plan.done.push({ kind: 'archive', name: fix.name,
+        why: 'not in the roster — already archived' });
+      return;
+    }
+    const r = verifiedResolveByName_(workers, fix.name, 'leaver');
+    if (r.status !== 'ok') { plan.errors.push(r.why); return; }
+    const w = r.worker;
+    const live = byWorker[w.id] || [];
+    if (live.length) {
+      plan.errors.push('leaver: "' + w.name + '" (' + w.id + ') still holds ' +
+        live.length + ' assignment(s) — the payroll says gone since January, the ' +
+        'sheet says placed. Resolve that first; nothing was written');
+      return;
+    }
+    plan.actions.push({
+      kind: 'archive', id: w.id, name: w.name,
+      before: WORKERS_TAB, after: WORKERS_ARCHIVE_TAB,
+      why: VERIFIED_LEAVER_REASON,
+    });
+  });
+
+  return plan;
+}
+
+// The ids already sitting in workers_archive, so a second run recognises
+// what it did on the first one instead of failing to find the name.
+function readWorkersArchiveIds_() {
+  const sh = sheetByNameOrNull(WORKERS_ARCHIVE_TAB);
+  if (!sh) return [];
+  const values = sh.getDataRange().getValues();
+  const out = [];
+  for (let i = 1; i < values.length; i++) {
+    const id = String(values[i][0] || '').trim();
+    if (id) out.push(id);
+  }
+  return out;
+}
+
+/* ---------- applying it ---------- */
+
+// dryRun defaults to TRUE. Only the explicit `false` writes anything.
+function applyVerifiedFixesNow(dryRun) {
+  const apply = (dryRun === false);
+  const result = { dryRun: !apply, planned: [], applied: [], alreadyDone: [] };
+
+  const lock = LockService.getScriptLock();
+  if (apply) lock.waitLock(30000);
+  try {
+    const workers = readWorkersSafe();
+    const assignments = readAssignmentsSafe();
+    const plan = planVerifiedFixes_(workers, assignments, readWorkersArchiveIds_());
+
+    // FAIL LOUDLY, and before anything is written. A dry run aborts on the
+    // same errors an apply run would, so an ambiguity is found while it is
+    // still cheap.
+    if (plan.errors.length) {
+      plan.errors.forEach(function (e) { Logger.log('ABORT | ' + e); });
+      throw new Error('applyVerifiedFixesNow aborted — ' + plan.errors.length +
+        ' unresolved name(s). NOTHING was written. ' + plan.errors.join(' | '));
+    }
+
+    result.planned = plan.actions;
+    result.alreadyDone = plan.done;
+
+    // Nothing is written by a dry run, and nothing at all — not even a
+    // header repair — by an apply run with nothing left to do. Re-running
+    // this function must be free, or nobody will dare re-run it to check.
+    // Note this is a guard, NOT an early return: the plan still has to be
+    // logged below, which is the whole point of a dry run.
+    const write = apply && plan.actions.length > 0;
+    const sh = write ? sheetByName(WORKERS_TAB) : null;
+    if (write) ensureHeaders(sh, HEADERS_WORKERS);
+    const startCol = HEADERS_WORKERS.indexOf('start_date') + 1;
+    const sourceCol = HEADERS_WORKERS.indexOf('start_date_source') + 1;
+    const nameCol = HEADERS_WORKERS.indexOf('name') + 1;
+
+    if (write) plan.actions.forEach(function (act) {
+      if (act.kind === 'archive') {
+        const archivedRow = cleanupArchiveWorker_(act.id, CLEANUP_ARCHIVE, VERIFIED_LEAVER_REASON, '');
+        if (!archivedRow) return;
+        auditLog_([{ action: 'applyVerifiedFixes', entity: 'worker', entityId: act.id,
+          field: 'tab', before: WORKERS_TAB, after: WORKERS_ARCHIVE_TAB,
+          reason: VERIFIED_FIX_REASON + ' — ' + act.why }]);
+        result.applied.push(act);
+        return;
+      }
+      const row = findRow(sh, 0, act.id);
+      if (row < 0) return;
+      if (act.kind === 'rename') {
+        sh.getRange(row, nameCol).setValue(act.after);
+        auditLog_([{ action: 'applyVerifiedFixes', entity: 'worker', entityId: act.id,
+          field: 'name', before: act.before, after: act.after,
+          reason: VERIFIED_FIX_REASON + ' — ' + act.why }]);
+        result.applied.push(act);
+        return;
+      }
+      // start_date / start_floor: the date and its source are one change,
+      // so they are written together and audited as two fields of it.
+      sh.getRange(row, startCol).setValue(act.after);
+      sh.getRange(row, sourceCol).setValue(act.afterSource);
+      auditLog_([
+        { action: 'applyVerifiedFixes', entity: 'worker', entityId: act.id,
+          field: 'start_date', before: act.before, after: act.after,
+          reason: VERIFIED_FIX_REASON + ' — ' + act.why },
+        { action: 'applyVerifiedFixes', entity: 'worker', entityId: act.id,
+          field: 'start_date_source', before: act.beforeSource, after: act.afterSource,
+          reason: VERIFIED_FIX_REASON + ' — ' + act.why },
+      ]);
+      result.applied.push(act);
+    });
+  } finally {
+    if (apply) lock.releaseLock();
+  }
+
+  Logger.log((result.dryRun ? 'DRY RUN — nothing was written. ' : 'APPLIED. ') +
+    result.planned.length + ' change(s) planned, ' +
+    result.applied.length + ' applied, ' +
+    result.alreadyDone.length + ' already in place.');
+  result.planned.forEach(function (a) {
+    Logger.log('plan | ' + a.kind + ' | ' + (a.name || a.id) +
+      ' | ' + (a.before === '' ? '(blank)' : a.before) + ' → ' + a.after +
+      (a.afterSource ? ' [' + a.afterSource + ']' : '') + ' | ' + a.why);
+  });
+  result.alreadyDone.forEach(function (d) {
+    Logger.log('skip | ' + d.kind + ' | ' + (d.name || d.id) + ' | ' + d.why);
+  });
+  if (result.dryRun) {
+    Logger.log('Run applyVerifiedFixesNow(false) to apply. Nothing above has happened yet.');
+    Logger.log('Run logMonthTotalsNow() before and after, so every shekel that moves is attributable.');
+  }
+  return result;
+}
+
+/* ============================================================
+   «שיבוצים חסרים» — the proposal sheet for paid-but-unplaced
+   ============================================================
+   Ten workers draw a salary in the August payroll and hold no
+   assignment at all, so every month's cost is short by whatever
+   they are paid. That gap CANNOT be closed automatically: an
+   assignment needs a house, an employment type and a rate, and
+   the app holds none of the three for these people. Inventing
+   any of them would replace a visible hole with an invisible
+   wrong number.
+
+   So this sheet asks. One row per worker, pre-filled with what
+   is actually known, every decision column empty, and an «אשר»
+   column that means nothing until a person sets it. The payroll
+   department → house mapping fills a SUGGESTION column and is
+   never written to a data tab by any code path.
+
+   applyMissingAssignmentsNow creates an assignment only from a
+   row that is approved AND completely filled in. A partial row
+   is skipped and named. Nothing is defaulted, ever.
+   ============================================================ */
+
+// MISSING_ASSIGNMENTS_TAB is declared with the other report-tab names, up
+// beside INTEGRITY_WRITABLE_TABS.
+const MISSING_ASSIGNMENT_HEADERS = [
+  'מזהה עובד', 'שם העובד/ת', 'מחלקה בשכר', 'בית מוצע (הצעה בלבד)',
+  'בית', 'תפקיד', 'סוג העסקה', 'סכום', 'כמות', 'תאריך תחילת השיבוץ',
+  'אשר', 'הערה', 'מה חסר',
+];
+const MA_ID_COL = MISSING_ASSIGNMENT_HEADERS.indexOf('מזהה עובד') + 1;
+const MA_DEPT_COL = MISSING_ASSIGNMENT_HEADERS.indexOf('מחלקה בשכר') + 1;
+const MA_HOUSE_COL = MISSING_ASSIGNMENT_HEADERS.indexOf('בית') + 1;
+const MA_ROLE_COL = MISSING_ASSIGNMENT_HEADERS.indexOf('תפקיד') + 1;
+const MA_TYPE_COL = MISSING_ASSIGNMENT_HEADERS.indexOf('סוג העסקה') + 1;
+const MA_AMOUNT_COL = MISSING_ASSIGNMENT_HEADERS.indexOf('סכום') + 1;
+const MA_COUNT_COL = MISSING_ASSIGNMENT_HEADERS.indexOf('כמות') + 1;
+const MA_START_COL = MISSING_ASSIGNMENT_HEADERS.indexOf('תאריך תחילת השיבוץ') + 1;
+const MA_APPROVE_COL = MISSING_ASSIGNMENT_HEADERS.indexOf('אשר') + 1;
+const MA_NOTE_COL = MISSING_ASSIGNMENT_HEADERS.indexOf('הערה') + 1;
+
+const MA_APPROVE_YES = 'כן';
+const MA_APPROVE_NO = 'לא';
+const MA_APPROVALS = [MA_APPROVE_YES, MA_APPROVE_NO];
+
+// Dropdown values carry the ASCII id AND the Hebrew, separated by ' · '.
+// The cell stays readable for Moran and unambiguous for the parser — no
+// Hebrew label is ever matched back to a stored value by guesswork.
+const MA_VALUE_SEP = ' · ';
+const HOUSE_LABELS_HE = {
+  ramot: 'רמות השבים', asher: 'רעננה אשר', ofroni: 'קיסריה עפרוני',
+  rehab: 'קיסריה ריהאב', pardes: 'רעננה הפרדס', sde_eliezer: 'שדה אליעזר',
+  hq: 'מטה',
+};
+const EMPLOYMENT_TYPE_LABELS_HE = {
+  full_time: 'משכורת חודשית מלאה',
+  part_time: 'משכורת חודשית חלקית',
+  hourly: 'שכר שעתי',
+  per_session: 'תשלום לפי מפגש',
+  fixed_retainer: 'ריטיינר חודשי קבוע',
+};
+
+// What «סכום» and «כמות» mean for each employment type, and whether each
+// is required. One generic pair of columns beats five type-specific ones
+// that are blank most of the time — but only if the sheet SAYS what they
+// mean, which is what the «מה חסר» column does.
+const MA_TYPE_FIELDS = {
+  full_time:      { amount: 'salary',         amountWhat: 'שכר חודשי (סכום)',
+                    count: '',                countWhat: '' },
+  part_time:      { amount: 'salary',         amountWhat: 'שכר חודשי (סכום)',
+                    count: 'pct',             countWhat: 'אחוז משרה (כמות)' },
+  hourly:         { amount: 'hourlyRate',     amountWhat: 'תעריף לשעה (סכום)',
+                    count: 'estHours',        countWhat: 'שעות בחודש (כמות)' },
+  per_session:    { amount: 'sessionRate',    amountWhat: 'תעריף למפגש (סכום)',
+                    count: 'estSessions',     countWhat: 'מפגשים בחודש (כמות)' },
+  fixed_retainer: { amount: 'retainerAmount', amountWhat: 'סכום ריטיינר חודשי (סכום)',
+                    count: '',                countWhat: '' },
+};
+
+function maPrefixValue_(value) {
+  const s = String(value === null || value === undefined ? '' : value).trim();
+  if (!s) return '';
+  const i = s.indexOf(MA_VALUE_SEP.trim());
+  return (i > 0 ? s.slice(0, i) : s).trim();
+}
+
+function maHouseOptions_() {
+  return HOUSE_IDS.map(function (h) {
+    return h + MA_VALUE_SEP + (HOUSE_LABELS_HE[h] || h);
+  });
+}
+
+function maTypeOptions_() {
+  return EMPLOYMENT_TYPES.map(function (t) {
+    return t + MA_VALUE_SEP + (EMPLOYMENT_TYPE_LABELS_HE[t] || t);
+  });
+}
+
+function maDepartmentOptions_() {
+  return PAYROLL_DEPARTMENTS.map(function (d) {
+    return d.code + MA_VALUE_SEP + d.label;
+  });
+}
+
+// What a row still needs before it can create anything. Returned as Hebrew
+// text for the «מה חסר» column and reused verbatim as the skip reason, so
+// the sheet and the log never disagree about why a row did nothing.
+function maMissingFields_(row) {
+  const missing = [];
+  if (!row.house) missing.push('בית');
+  else if (HOUSE_IDS.indexOf(row.house) < 0) missing.push('בית לא מוכר: ' + row.house);
+  if (!row.role) missing.push('תפקיד');
+  else if (ROLE_OPTIONS.indexOf(row.role) < 0) missing.push('תפקיד לא מוכר: ' + row.role);
+  else if (row.role === 'אחר' && !row.note) missing.push('פירוט תפקיד ב«הערה» (תפקיד = אחר)');
+  if (!row.employmentType) missing.push('סוג העסקה');
+  else if (EMPLOYMENT_TYPES.indexOf(row.employmentType) < 0) {
+    missing.push('סוג העסקה לא מוכר: ' + row.employmentType);
+  } else {
+    const spec = MA_TYPE_FIELDS[row.employmentType];
+    if (!(Number(row.amount) > 0)) missing.push(spec.amountWhat);
+    if (spec.count && !(Number(row.count) > 0)) missing.push(spec.countWhat);
+  }
+  if (!row.startDate) missing.push('תאריך תחילת השיבוץ');
+  else if (!/^\d{4}-\d{2}-\d{2}$/.test(row.startDate)) {
+    missing.push('תאריך תחילת השיבוץ בפורמט YYYY-MM-DD');
+  }
+  return missing;
+}
+
+// Everything already entered, keyed by worker id, so a rebuild never erases
+// work done over several days — the same rule «ניקוי נתונים» follows.
+function readMissingAssignmentRows_() {
+  const out = [];
+  const sh = sheetByNameOrNull(MISSING_ASSIGNMENTS_TAB);
+  if (!sh) return out;
+  const values = sh.getDataRange().getValues();
+  if (values.length < 2) return out;
+  for (let i = 1; i < values.length; i++) {
+    const r = values[i];
+    const id = String(r[MA_ID_COL - 1] || '').trim();
+    if (!id) continue;
+    out.push({
+      workerId: id,
+      name: String(r[1] || '').trim(),
+      department: maPrefixValue_(r[MA_DEPT_COL - 1]),
+      house: maPrefixValue_(r[MA_HOUSE_COL - 1]),
+      role: String(r[MA_ROLE_COL - 1] || '').trim(),
+      employmentType: maPrefixValue_(r[MA_TYPE_COL - 1]),
+      amount: String(r[MA_AMOUNT_COL - 1] || '').trim(),
+      count: String(r[MA_COUNT_COL - 1] || '').trim(),
+      startDate: formatDateCell(r[MA_START_COL - 1]),
+      approve: String(r[MA_APPROVE_COL - 1] || '').trim(),
+      note: String(r[MA_NOTE_COL - 1] || '').trim(),
+    });
+  }
+  return out;
+}
+
+function missingAssignmentSheetRow_(worker, prev) {
+  const p = prev || {};
+  const dept = payrollDepartment_(p.department);
+  const suggestion = !dept ? ''
+    : (dept.house ? dept.house + MA_VALUE_SEP + (HOUSE_LABELS_HE[dept.house] || dept.house)
+                  : dept.note);
+  const entered = {
+    house: p.house || '', role: p.role || '', employmentType: p.employmentType || '',
+    amount: p.amount || '', count: p.count || '', startDate: p.startDate || '',
+    note: p.note || '',
+  };
+  const missing = maMissingFields_(entered);
+  return [
+    worker.id,
+    worker.name,
+    p.department ? p.department + MA_VALUE_SEP + ((payrollDepartment_(p.department) || {}).label || '') : '',
+    suggestion,
+    p.house ? p.house + MA_VALUE_SEP + (HOUSE_LABELS_HE[p.house] || p.house) : '',
+    p.role || '',
+    p.employmentType ? p.employmentType + MA_VALUE_SEP + (EMPLOYMENT_TYPE_LABELS_HE[p.employmentType] || '') : '',
+    p.amount || '',
+    p.count || '',
+    p.startDate || '',
+    p.approve || '',
+    p.note || '',
+    missing.length ? missing.join(' · ') : 'מוכן ליצירה',
+  ];
+}
+
+// Build (or rebuild) the proposal sheet. Only workers who are BOTH on the
+// verified paid-without-assignment list AND still hold no assignment get a
+// row: once an assignment exists the row disappears by itself, so the sheet
+// is always the open work and never a stale checklist.
+function writeMissingAssignmentsTabNow() {
+  const workers = readWorkersSafe();
+  const assignments = readAssignmentsSafe();
+  const placed = {};
+  assignments.forEach(function (a) { placed[a.workerId] = true; });
+  const previous = {};
+  readMissingAssignmentRows_().forEach(function (r) { previous[r.workerId] = r; });
+
+  const errors = [];
+  const items = [];
+  VERIFIED_PAID_WITHOUT_ASSIGNMENT.forEach(function (name) {
+    const hits = verifiedMatchesByName_(workers, name);
+    if (hits.length !== 1) {
+      errors.push('paid-without-assignment: "' + name + '" matches ' + hits.length +
+        ' workers' + (hits.length ? ' (' + hits.map(function (w) { return w.id; }).join(', ') + ')' : ''));
+      return;
+    }
+    if (placed[hits[0].id]) return;   // already placed — nothing to propose
+    items.push(hits[0]);
+  });
+  // Same rule as everywhere else in this section: an unresolvable name
+  // aborts the whole run rather than producing a sheet with a hole in it.
+  if (errors.length) {
+    errors.forEach(function (e) { Logger.log('ABORT | ' + e); });
+    throw new Error('writeMissingAssignmentsTabNow aborted — ' + errors.length +
+      ' unresolved name(s). NOTHING was written. ' + errors.join(' | '));
+  }
+
+  const rows = [MISSING_ASSIGNMENT_HEADERS].concat(items.map(function (w) {
+    return missingAssignmentSheetRow_(w, previous[w.id]);
+  }));
+  const sh = integrityWriteReportTab_(MISSING_ASSIGNMENTS_TAB, rows);
+  if (items.length && typeof SpreadsheetApp.newDataValidation === 'function') {
+    maApplyDropdown_(sh, MA_DEPT_COL, items.length, maDepartmentOptions_());
+    maApplyDropdown_(sh, MA_HOUSE_COL, items.length, maHouseOptions_());
+    maApplyDropdown_(sh, MA_ROLE_COL, items.length, ROLE_OPTIONS);
+    maApplyDropdown_(sh, MA_TYPE_COL, items.length, maTypeOptions_());
+    maApplyDropdown_(sh, MA_APPROVE_COL, items.length, MA_APPROVALS);
+  }
+  Logger.log('«' + MISSING_ASSIGNMENTS_TAB + '»: ' + items.length + ' worker(s) awaiting a placement.');
+  Logger.log('Fill in בית / תפקיד / סוג העסקה / סכום / כמות / תאריך, set «אשר» to «' +
+    MA_APPROVE_YES + '», then run applyMissingAssignmentsNow() — a DRY RUN — to see the plan.');
+  Logger.log('The «בית מוצע» column is a suggestion from the payroll department. It is never written anywhere.');
+  return { count: items.length, sheet: sh };
+}
+
+function maApplyDropdown_(sh, col, rowCount, values) {
+  const rule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(values, true)
+    .setAllowInvalid(false)
+    .build();
+  sh.getRange(2, col, rowCount, 1).setDataValidation(rule);
+}
+
+// dryRun defaults to TRUE. Only the explicit `false` creates anything.
+function applyMissingAssignmentsNow(dryRun) {
+  const apply = (dryRun === false);
+  const result = { dryRun: !apply, rows: 0, planned: [], created: [], skipped: [] };
+
+  const rows = readMissingAssignmentRows_();
+  result.rows = rows.length;
+  if (!rows.length) {
+    Logger.log('«' + MISSING_ASSIGNMENTS_TAB + '» has no rows. Run writeMissingAssignmentsTabNow() first.');
+    return result;
+  }
+
+  const workerById = {};
+  readWorkersSafe().forEach(function (w) { workerById[w.id] = w; });
+  const placed = {};
+  readAssignmentsSafe().forEach(function (a) {
+    placed[a.workerId + '|' + a.house] = a.id;
+  });
+
+  rows.forEach(function (r) {
+    if (!workerById[r.workerId]) {
+      result.skipped.push({ id: r.workerId, why: 'no worker with this id' });
+      return;
+    }
+    if (r.approve !== MA_APPROVE_YES) {
+      result.skipped.push({ id: r.workerId, name: r.name,
+        why: r.approve ? 'אשר = ' + r.approve : 'not approved («אשר» is empty)' });
+      return;
+    }
+    const missing = maMissingFields_(r);
+    if (missing.length) {
+      // A partially filled row NEVER creates a partial assignment. It is
+      // reported with exactly what it still needs.
+      result.skipped.push({ id: r.workerId, name: r.name,
+        why: 'incomplete — חסר: ' + missing.join(' · ') });
+      return;
+    }
+    if (placed[r.workerId + '|' + r.house]) {
+      result.skipped.push({ id: r.workerId, name: r.name,
+        why: 'already has an assignment at ' + r.house });
+      return;
+    }
+
+    const spec = MA_TYPE_FIELDS[r.employmentType];
+    const assignment = {
+      workerId: r.workerId,
+      house: r.house,
+      role: r.role,
+      roleDetail: r.role === 'אחר' ? r.note : '',
+      employmentType: r.employmentType,
+      notes: r.note,
+    };
+    assignment[spec.amount] = Number(r.amount);
+    if (spec.count) assignment[spec.count] = Number(r.count);
+
+    const plan = { id: r.workerId, name: r.name, house: r.house, role: r.role,
+      employmentType: r.employmentType, amount: Number(r.amount),
+      count: spec.count ? Number(r.count) : null, startDate: r.startDate };
+    result.planned.push(plan);
+    if (!apply) return;
+
+    // addAssignment is the SAME path the app uses: it validates, refuses a
+    // duplicate (worker, house) and keeps gmach_month in sync. Nothing here
+    // writes an assignment row by itself.
+    //
+    // One row that the shared validation rejects must not halt the batch
+    // half-applied: it is reported like any other skip, with what the
+    // validator actually said, and the remaining rows are still processed.
+    let created;
+    try {
+      created = addAssignment({ assignment: assignment });
+    } catch (err) {
+      result.planned.pop();
+      result.skipped.push({ id: r.workerId, name: r.name,
+        why: 'rejected: ' + ((err && err.message) || String(err)) });
+      return;
+    }
+    const assignmentId = created && created.assignment && created.assignment.id;
+    // The placement's own start date, so the cost engine charges it from
+    // the date on the sheet rather than from the row's creation timestamp.
+    if (assignmentId && r.startDate) maSetEffectiveFrom_(assignmentId, r.startDate);
+    auditLog_([{ action: 'applyMissingAssignments', entity: 'assignment',
+      entityId: assignmentId || '', field: 'created', before: '',
+      after: r.workerId + ' @ ' + r.house + ' (' + r.employmentType + ')',
+      reason: VERIFIED_FIX_REASON }]);
+    // Keep the in-run roster current, so a later row cannot be planned
+    // against a placement this run has just created.
+    placed[r.workerId + '|' + r.house] = assignmentId;
+    result.created.push(Object.assign({}, plan, { assignmentId: assignmentId }));
+  });
+
+  Logger.log((result.dryRun ? 'DRY RUN — nothing was created. ' : 'APPLIED. ') +
+    result.rows + ' proposal row(s): ' + result.planned.length + ' planned, ' +
+    result.created.length + ' created, ' + result.skipped.length + ' skipped.');
+  result.planned.forEach(function (p) {
+    Logger.log('plan | ' + p.name + ' (' + p.id + ') | ' + p.house + ' | ' + p.role +
+      ' | ' + p.employmentType + ' | ' + p.amount +
+      (p.count === null ? '' : ' × ' + p.count) + ' | from ' + p.startDate);
+  });
+  result.skipped.forEach(function (s) {
+    Logger.log('skip | ' + (s.name || s.id) + ' | ' + s.why);
+  });
+  if (result.dryRun) {
+    Logger.log('Run applyMissingAssignmentsNow(false) to create them. Nothing above has happened yet.');
+  }
+  return result;
+}
+
+// effective_from is column 25 of the assignments tab (HEADERS_ASSIGNMENTS
+// index 24) — appended after addAssignment was written, so it is set here
+// rather than smuggled through the shared write path.
+function maSetEffectiveFrom_(assignmentId, ymd) {
+  const sh = sheetByName(ASSIGNMENTS_TAB);
+  const row = findRow(sh, 0, assignmentId);
+  if (row < 0) return;
+  const col = HEADERS_ASSIGNMENTS.indexOf('effective_from') + 1;
+  if (col <= 0) return;
+  ensureHeaders(sh, HEADERS_ASSIGNMENTS);
+  sh.getRange(row, col).setValue(ymd);
 }
