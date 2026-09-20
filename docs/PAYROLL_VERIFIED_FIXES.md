@@ -135,19 +135,56 @@ automatically: an assignment needs a house, an employment type and a rate,
 and the app holds none of the three for these people. Inventing any of them
 would replace a visible hole with an invisible wrong number.
 
-`writeMissingAssignmentsTabNow()` builds one row per worker, pre-filled with
-the id and the name and **nothing else**:
+They cost **₪93,813** in the August payroll between them — the order of
+magnitude currently missing from every month's figure.
 
-| Column | Filled by |
-|---|---|
-| `מזהה עובד`, `שם העובד/ת` | the app |
-| `מחלקה בשכר` | Moran, from a dropdown of the six payroll departments |
-| `בית מוצע (הצעה בלבד)` | computed from the department — **a suggestion, never written anywhere** |
-| `בית`, `תפקיד`, `סוג העסקה` | Moran, from dropdowns |
-| `סכום`, `כמות` | Moran — what they mean per type is in the «מה חסר» column |
-| `תאריך תחילת השיבוץ` | Moran — becomes the placement's `effective_from` |
-| `אשר` | Moran — `כן` / `לא` |
-| `מה חסר` | computed on every rebuild: exactly what the row still needs |
+`writeMissingAssignmentsTabNow()` builds one row per worker. Everything the
+payroll export and the archive already know is **filled in**; every column
+that is a decision is **empty**:
+
+| Column | Filled by | |
+|---|---|---|
+| `מזהה עובד`, `שם העובד/ת` | the app | reference |
+| `מס' עובד בשכר` | the payroll export (`אין — פרילנסר/ית — חשבונית` for the one paid against an invoice) | reference |
+| `מחלקה בשכר` | the payroll export, as a dropdown — **a value entered by hand wins** on the next rebuild | reference |
+| `בית מוצע (הצעה בלבד)` | computed from the department — **a suggestion, never written anywhere** | reference |
+| `עלות אוגוסט בפועל (שכר — לעיון בלבד)` | the payroll export — **see below** | reference |
+| `היסטוריה בארכיון` | cross-checked against `archive_v3` — **a reading, not a verdict** | reference |
+| `בית`, `תפקיד`, `סוג העסקה` | **Moran**, from dropdowns | decision |
+| `סכום`, `כמות` | **Moran** — what they mean per type is in the «מה חסר» column | decision |
+| `תאריך תחילת השיבוץ` | **Moran** — becomes the placement's `effective_from` | decision |
+| `אשר` | **Moran** — `כן` / `לא` | decision |
+| `מה חסר` | computed on every rebuild: exactly what the row still needs | reference |
+
+### «עלות אוגוסט בפועל» is read by nothing
+
+It is what the payroll **paid** in August, so Moran can sanity-check the rate
+she types against what the person actually costs. It is **not** a rate, it is
+**not** an input, and no code path reads it back:
+
+* no assignment field is derived from it;
+* it never reaches the cost engine — a test creates a placement for a worker
+  paid ₪30,229, with a ₪9,000 rate entered, and asserts the month costs
+  ₪9,000;
+* corrupting the cell changes nothing about what gets created.
+
+It sits deliberately **away from** «סכום» on the sheet: a payment and a rate
+must never be read as the same kind of number.
+
+### «היסטוריה בארכיון» — the cross-check against `archive_v3`
+
+Each row says how many archived placements that worker has, where the last
+one was and when it ended — or «אין היסטוריה בארכיון». A worker the payroll
+paid in August who *also* has an archived placement is a different situation
+from one with no trace anywhere, and the difference is Moran's to act on.
+**Nothing is archived, created, hidden or dropped on the strength of it.**
+
+### The two lists must agree
+
+`VERIFIED_PAID_WITHOUT_ASSIGNMENT` (the names) and `PAYROLL_AUGUST_FACTS`
+(the numbers) describe the same ten people. A name in one and not the other
+is a typo, and it **aborts the build** rather than producing a row with blank
+reference cells that nobody would notice.
 
 Dropdown values carry the ASCII id **and** the Hebrew (`ramot · רמות השבים`),
 so nothing is ever matched back by guessing at a label.
@@ -183,6 +220,27 @@ the same words the sheet uses. Nothing is defaulted, ever.
 
 ---
 
+## The August payroll, per person
+
+Facts from the accounting export, held in `PAYROLL_AUGUST_FACTS`. The house
+column is what the department **suggests**, not what anyone decided.
+
+| Name | מס' עובד | מחלקה | עלות אוגוסט | בית מוצע |
+|---|---|---|---|---|
+| רון מנחם | 2 | 004 מטה | ₪30,229 | `hq` |
+| שירן כהן | 157 | 004 מטה | ₪14,839 | `hq` |
+| עידו בוזגלו | 70 | 005 רעננה אשר | ₪23,950 | `asher` |
+| ניב מנחם סין | 149 | 005 רעננה אשר | ₪585 | `asher` |
+| דניאל קוטסי | 21 | 003 רמות השבים | ₪1,025 | `ramot` |
+| אופק רחמים | 146 | 003 רמות השבים | ₪7,653 | `ramot` |
+| אופיר רוטנברג | 165 | 003 רמות השבים | ₪3,359 | `ramot` |
+| בר ליידרמן | 63 | 002 קיסריה | ₪8,004 | — covers `ofroni` **and** `rehab` |
+| דפנה כץ | 129 | 006 הולינה | ₪3,369 | — no house in the app |
+| דניאל סייג | — invoice | — | ₪800 | — |
+| **Total** | | | **₪93,813** | |
+
+---
+
 ## What none of this does
 
 - It does not touch anyone's assignments except to **create** the ones
@@ -191,4 +249,6 @@ the same words the sheet uses. Nothing is defaulted, ever.
   `workers_archive`, which is append-only.
 - It does not invent a start date for anyone outside list D.
 - It does not write a house from a payroll department.
+- It does not calculate with the August payroll figure, anywhere.
+- It does not act on an archived history — it only reports one.
 - It does not run over HTTP. There is no action for any of it.

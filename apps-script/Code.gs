@@ -5290,6 +5290,43 @@ const VERIFIED_PAID_WITHOUT_ASSIGNMENT = [
   'אופק רחמים', 'אופיר רוטנברג', 'ניב מנחם סין', 'דפנה כץ', 'דניאל סייג',
 ];
 
+// (B, per person) What the August payroll export says about each of the ten.
+// FACTS, from accounting — never a decision, and never an input to any
+// calculation:
+//   empNo    — payroll employee number, '' for the one freelancer who is
+//              paid against an invoice and has none;
+//   dept     — payroll department code, '' where there is none;
+//   augCost  — what August actually cost, in ₪.
+// augCost exists so Moran can sanity-check the rate she types against what
+// the person was really paid. It is written to the proposal sheet as a
+// REFERENCE COLUMN and is read by nothing: no assignment field is derived
+// from it, it never reaches the cost engine, and a test pins that.
+const PAYROLL_AUGUST_FACTS = [
+  { name: 'רון מנחם',        empNo: '2',   dept: '004', augCost: 30229 },
+  { name: 'שירן כהן',        empNo: '157', dept: '004', augCost: 14839 },
+  { name: 'עידו בוזגלו',     empNo: '70',  dept: '005', augCost: 23950 },
+  { name: 'ניב מנחם סין',    empNo: '149', dept: '005', augCost: 585 },
+  { name: 'דניאל קוטסי',     empNo: '21',  dept: '003', augCost: 1025 },
+  { name: 'אופק רחמים',      empNo: '146', dept: '003', augCost: 7653 },
+  { name: 'אופיר רוטנברג',   empNo: '165', dept: '003', augCost: 3359 },
+  { name: 'בר ליידרמן',      empNo: '63',  dept: '002', augCost: 8004 },
+  { name: 'דפנה כץ',         empNo: '129', dept: '006', augCost: 3369 },
+  // No payroll number and no department: paid against an invoice.
+  { name: 'דניאל סייג',      empNo: '',    dept: '',    augCost: 800,
+    note: 'פרילנסר/ית — חשבונית' },
+];
+// What the ten cost in August, together. The order of magnitude currently
+// missing from every month's figure, because none of them holds a placement.
+const PAYROLL_AUGUST_TOTAL = 93813;
+
+function payrollFactsFor_(name) {
+  const n = normalizeWorkerName_(name);
+  for (let i = 0; i < PAYROLL_AUGUST_FACTS.length; i++) {
+    if (normalizeWorkerName_(PAYROLL_AUGUST_FACTS[i].name) === n) return PAYROLL_AUGUST_FACTS[i];
+  }
+  return null;
+}
+
 // (4) Payroll department → app house. REFERENCE ONLY: it fills a
 // suggestion column on the proposal sheet and is never written to a data
 // tab by any code path. Two departments deliberately resolve to nothing:
@@ -5699,12 +5736,23 @@ function applyVerifiedFixesNow(dryRun) {
 
 // MISSING_ASSIGNMENTS_TAB is declared with the other report-tab names, up
 // beside INTEGRITY_WRITABLE_TABS.
+// Reference columns come from the payroll export and from the archive; the
+// decision columns are Moran's and start empty. «עלות אוגוסט בפועל» is
+// deliberately NOT next to «סכום»: it is what the person was paid, not a
+// rate, and the two must never be read as the same kind of number.
 const MISSING_ASSIGNMENT_HEADERS = [
-  'מזהה עובד', 'שם העובד/ת', 'מחלקה בשכר', 'בית מוצע (הצעה בלבד)',
+  'מזהה עובד', 'שם העובד/ת', 'מס\' עובד בשכר', 'מחלקה בשכר',
+  'בית מוצע (הצעה בלבד)', 'עלות אוגוסט בפועל (שכר — לעיון בלבד)',
+  'היסטוריה בארכיון',
   'בית', 'תפקיד', 'סוג העסקה', 'סכום', 'כמות', 'תאריך תחילת השיבוץ',
   'אשר', 'הערה', 'מה חסר',
 ];
 const MA_ID_COL = MISSING_ASSIGNMENT_HEADERS.indexOf('מזהה עובד') + 1;
+const MA_NAME_COL = MISSING_ASSIGNMENT_HEADERS.indexOf('שם העובד/ת') + 1;
+const MA_EMPNO_COL = MISSING_ASSIGNMENT_HEADERS.indexOf('מס\' עובד בשכר') + 1;
+const MA_SUGGESTION_COL = MISSING_ASSIGNMENT_HEADERS.indexOf('בית מוצע (הצעה בלבד)') + 1;
+const MA_AUG_COST_COL = MISSING_ASSIGNMENT_HEADERS.indexOf('עלות אוגוסט בפועל (שכר — לעיון בלבד)') + 1;
+const MA_ARCHIVE_COL = MISSING_ASSIGNMENT_HEADERS.indexOf('היסטוריה בארכיון') + 1;
 const MA_DEPT_COL = MISSING_ASSIGNMENT_HEADERS.indexOf('מחלקה בשכר') + 1;
 const MA_HOUSE_COL = MISSING_ASSIGNMENT_HEADERS.indexOf('בית') + 1;
 const MA_ROLE_COL = MISSING_ASSIGNMENT_HEADERS.indexOf('תפקיד') + 1;
@@ -5817,7 +5865,7 @@ function readMissingAssignmentRows_() {
     if (!id) continue;
     out.push({
       workerId: id,
-      name: String(r[1] || '').trim(),
+      name: String(r[MA_NAME_COL - 1] || '').trim(),
       department: maPrefixValue_(r[MA_DEPT_COL - 1]),
       house: maPrefixValue_(r[MA_HOUSE_COL - 1]),
       role: String(r[MA_ROLE_COL - 1] || '').trim(),
@@ -5832,9 +5880,39 @@ function readMissingAssignmentRows_() {
   return out;
 }
 
-function missingAssignmentSheetRow_(worker, prev) {
+// What archive_v3 remembers about a worker who holds no live placement.
+// A cross-check, NOT a verdict: a worker the payroll paid in August who
+// also has an archived placement is a different situation from one with no
+// trace anywhere, and the difference is Moran's to act on. Nothing is
+// archived, created or hidden on the strength of this column.
+function maArchiveHistory_(workerId, archive) {
+  const mine = (archive || []).filter(function (a) { return a && a.workerId === workerId; });
+  if (!mine.length) return 'אין היסטוריה בארכיון';
+  const last = mine.slice().sort(function (a, b) {
+    return String(b.terminationDate || '').localeCompare(String(a.terminationDate || ''));
+  })[0];
+  return mine.length + ' שיבוץ/ים בארכיון · אחרון: ' +
+    (HOUSE_LABELS_HE[last.house] || last.house || 'ללא בית') +
+    (last.terminationDate ? ' · סיום ' + last.terminationDate : '');
+}
+
+// The payroll employee number, as the sheet shows it. The one freelancer
+// has none, and says so rather than showing a blank cell that reads like
+// missing data.
+function maEmpNoCell_(facts) {
+  if (!facts) return '';
+  if (facts.empNo) return facts.empNo;
+  return 'אין' + (facts.note ? ' — ' + facts.note : '');
+}
+
+function missingAssignmentSheetRow_(worker, prev, archive) {
   const p = prev || {};
-  const dept = payrollDepartment_(p.department);
+  const facts = payrollFactsFor_(worker.name);
+  // The department is PRE-FILLED from the payroll export, and a value
+  // already in the cell wins: the export is a fact, but a person who has
+  // corrected it knows something the export does not.
+  const deptCode = p.department || (facts ? facts.dept : '');
+  const dept = payrollDepartment_(deptCode);
   const suggestion = !dept ? ''
     : (dept.house ? dept.house + MA_VALUE_SEP + (HOUSE_LABELS_HE[dept.house] || dept.house)
                   : dept.note);
@@ -5847,8 +5925,11 @@ function missingAssignmentSheetRow_(worker, prev) {
   return [
     worker.id,
     worker.name,
-    p.department ? p.department + MA_VALUE_SEP + ((payrollDepartment_(p.department) || {}).label || '') : '',
+    maEmpNoCell_(facts),
+    dept ? dept.code + MA_VALUE_SEP + dept.label : '',
     suggestion,
+    facts ? facts.augCost : '',
+    maArchiveHistory_(worker.id, archive),
     p.house ? p.house + MA_VALUE_SEP + (HOUSE_LABELS_HE[p.house] || p.house) : '',
     p.role || '',
     p.employmentType ? p.employmentType + MA_VALUE_SEP + (EMPLOYMENT_TYPE_LABELS_HE[p.employmentType] || '') : '',
@@ -5868,6 +5949,7 @@ function missingAssignmentSheetRow_(worker, prev) {
 function writeMissingAssignmentsTabNow() {
   const workers = readWorkersSafe();
   const assignments = readAssignmentsSafe();
+  const archive = readArchiveV3Safe();
   const placed = {};
   assignments.forEach(function (a) { placed[a.workerId] = true; });
   const previous = {};
@@ -5883,6 +5965,15 @@ function writeMissingAssignmentsTabNow() {
       return;
     }
     if (placed[hits[0].id]) return;   // already placed — nothing to propose
+    // The two verified lists must describe the same ten people. A name in
+    // one and not the other means a typo somewhere, and a row with blank
+    // reference cells would hide it — so it aborts like any other
+    // unresolved fact.
+    if (!payrollFactsFor_(name)) {
+      errors.push('paid-without-assignment: "' + name + '" has no row in PAYROLL_AUGUST_FACTS — ' +
+        'the two verified lists disagree');
+      return;
+    }
     items.push(hits[0]);
   });
   // Same rule as everywhere else in this section: an unresolvable name
@@ -5894,7 +5985,7 @@ function writeMissingAssignmentsTabNow() {
   }
 
   const rows = [MISSING_ASSIGNMENT_HEADERS].concat(items.map(function (w) {
-    return missingAssignmentSheetRow_(w, previous[w.id]);
+    return missingAssignmentSheetRow_(w, previous[w.id], archive);
   }));
   const sh = integrityWriteReportTab_(MISSING_ASSIGNMENTS_TAB, rows);
   if (items.length && typeof SpreadsheetApp.newDataValidation === 'function') {
@@ -5908,6 +5999,18 @@ function writeMissingAssignmentsTabNow() {
   Logger.log('Fill in בית / תפקיד / סוג העסקה / סכום / כמות / תאריך, set «אשר» to «' +
     MA_APPROVE_YES + '», then run applyMissingAssignmentsNow() — a DRY RUN — to see the plan.');
   Logger.log('The «בית מוצע» column is a suggestion from the payroll department. It is never written anywhere.');
+  // The reference columns, named out loud, because a number on a sheet that
+  // nothing calculates with is exactly the kind of thing that gets used for
+  // a calculation by someone who was not told.
+  const shown = items.reduce(function (sum, w) {
+    const f = payrollFactsFor_(w.name);
+    return sum + (f ? f.augCost : 0);
+  }, 0);
+  Logger.log('«עלות אוגוסט בפועל» is what the payroll PAID in August, for sanity-checking a rate. ' +
+    'It is read by nothing: no assignment field comes from it and it never reaches the cost engine.');
+  Logger.log('August payroll for the rows on this sheet: ₪' + shown +
+    ' (all ten: ₪' + PAYROLL_AUGUST_TOTAL + '). That is the order of magnitude missing from every month.');
+  Logger.log('«היסטוריה בארכיון» is a cross-check against archive_v3, not a verdict — nothing is archived by it.');
   return { count: items.length, sheet: sh };
 }
 

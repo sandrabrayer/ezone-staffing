@@ -23,6 +23,10 @@ const vm = require('node:vm');
 
 const ROOT = path.join(__dirname, '..');
 const gs = fs.readFileSync(path.join(ROOT, 'apps-script', 'Code.gs'), 'utf8');
+// Deployed beside Code.gs, so the sandbox loads it the same way — the
+// payroll reference column is checked against the engine that actually
+// prices a month, not against a stand-in.
+const engineGs = fs.readFileSync(path.join(ROOT, 'apps-script', 'CostEngine.gs'), 'utf8');
 
 const TAB = 'שיבוצים חסרים';
 const TODAY = '2026-09-17';
@@ -95,9 +99,17 @@ const H = {
     'start_date', 'end_date', 'extra_payment', 'notes', 'created_at',
     'replaced_assignment_id', 'role', 'shift_count', 'approval_status', 'approved_by', 'cancelled'],
   audit_log: ['ts', 'action', 'entity', 'entity_id', 'field', 'before', 'after', 'reason'],
+  archive_v3: ['id', 'assignment_id', 'worker_id', 'name', 'house', 'role', 'role_detail',
+    'employment_type', 'salary', 'pct', 'hourly_rate', 'est_hours', 'session_rate',
+    'est_sessions', 'retainer_amount', 'notes', 'termination_date', 'reason_type',
+    'reason_detail', 'archived_at', 'rate_individual', 'sessions_individual',
+    'rate_group', 'sessions_group', 'rate_external', 'external_patients'],
+  monthly_actuals: ['id', 'assignment_id', 'month', 'actual_hours', 'actual_sessions',
+    'note', 'created_at', 'updated_at'],
+  budgets: ['id', 'house', 'month', 'amount', 'created_at', 'updated_at', 'instructors_amount'],
 };
 
-function loadCtx(seed) {
+function loadCtx(seed, srcOverride) {
   const writes = [];
   const logs = [];
   const tabs = {};
@@ -147,7 +159,8 @@ function loadCtx(seed) {
       },
     },
   });
-  vm.runInContext(gs, ctx);
+  vm.runInContext(engineGs, ctx);
+  vm.runInContext(srcOverride || gs, ctx);
   ctx.todayLocal = () => TODAY;
   ctx.tabs = tabs;
   ctx.writes = writes;
@@ -170,7 +183,17 @@ function seed(extra) {
         '', '2026-01-02T00:00:00.000Z', 0, 'active', '', 0, 0, 0, 0, 0, 0, '']],
     absences: [H.absences],
     coverages: [H.coverages],
+    archive_v3: [H.archive_v3],
+    monthly_actuals: [H.monthly_actuals],
+    budgets: [H.budgets],
   }, extra || {});
+}
+
+// One archived placement, so the cross-check column has something to find.
+function archivedRow(workerId, name, house, terminationDate) {
+  return ['arc-' + workerId, 'a-old-' + workerId, workerId, name, house, 'מדריך/ה', '',
+    'full_time', 9000, 100, 0, 0, 0, 0, 0, '', terminationDate, 'התפטרות', '',
+    '2026-02-01T00:00:00.000Z', 0, 0, 0, 0, 0, 0];
 }
 
 function header(ctx) { return ctx.tabs[TAB].rows[0]; }
@@ -491,4 +514,169 @@ test('a rejection from the shared write path is reported, never left half-applie
   assert.match(bad.why, /rejected: worker already has an assignment/);
   assert.ok(!res.planned.some(p => p.name === 'רון מנחם'),
     'a row that created nothing is not left in the plan as if it had');
+});
+
+// ---------------------------------------------------------------------------
+// the payroll reference columns
+// ---------------------------------------------------------------------------
+
+// The August payroll export, per person. Facts — never decisions, and never
+// inputs to a calculation.
+const AUG = {
+  'רון מנחם':      { empNo: '2',   dept: '004', cost: 30229, house: 'hq' },
+  'שירן כהן':      { empNo: '157', dept: '004', cost: 14839, house: 'hq' },
+  'עידו בוזגלו':   { empNo: '70',  dept: '005', cost: 23950, house: 'asher' },
+  'ניב מנחם סין':  { empNo: '149', dept: '005', cost: 585,   house: 'asher' },
+  'דניאל קוטסי':   { empNo: '21',  dept: '003', cost: 1025,  house: 'ramot' },
+  'אופק רחמים':    { empNo: '146', dept: '003', cost: 7653,  house: 'ramot' },
+  'אופיר רוטנברג': { empNo: '165', dept: '003', cost: 3359,  house: 'ramot' },
+  'בר ליידרמן':    { empNo: '63',  dept: '002', cost: 8004,  house: '' },
+  'דפנה כץ':       { empNo: '129', dept: '006', cost: 3369,  house: '' },
+  'דניאל סייג':    { empNo: '',    dept: '',    cost: 800,   house: '' },
+};
+
+test('every row is pre-filled with that person\'s payroll number, department and August cost', () => {
+  const ctx = loadCtx(seed());
+  ctx.writeMissingAssignmentsTabNow();
+  Object.keys(AUG).forEach(name => {
+    const r = rowFor(ctx, name);
+    assert.ok(r, name + ' must have a row');
+    const emp = String(r[col(ctx, "מס' עובד בשכר")]);
+    if (AUG[name].empNo) assert.strictEqual(emp, AUG[name].empNo, name + ' payroll number');
+    else assert.match(emp, /אין.*פרילנסר/, name + ' has no payroll number, and the cell says so');
+    const dept = String(r[col(ctx, 'מחלקה בשכר')]);
+    if (AUG[name].dept) assert.ok(dept.startsWith(AUG[name].dept + ' · '), name + ' department: ' + dept);
+    else assert.strictEqual(dept, '', name + ' has no department');
+    assert.strictEqual(Number(r[col(ctx, 'עלות אוגוסט בפועל (שכר — לעיון בלבד)')]), AUG[name].cost,
+      name + ' August cost');
+  });
+});
+
+test('the pre-filled department drives the suggestion — and 002 / 006 still resolve to none', () => {
+  const ctx = loadCtx(seed());
+  ctx.writeMissingAssignmentsTabNow();
+  const c = col(ctx, 'בית מוצע (הצעה בלבד)');
+  Object.keys(AUG).forEach(name => {
+    const cell = String(rowFor(ctx, name)[c]);
+    if (AUG[name].house) {
+      assert.ok(cell.startsWith(AUG[name].house + ' · '), name + ' → ' + AUG[name].house + ', got ' + cell);
+    } else {
+      assert.ok(!/^[a-z_]+ · /.test(cell), name + ' must not resolve to a house: ' + cell);
+    }
+  });
+  // And the two that cannot resolve say WHY, rather than sitting blank.
+  assert.match(String(rowFor(ctx, 'בר ליידרמן')[c]), /עפרוני.*ריהאב|ריהאב.*עפרוני/);
+  assert.match(String(rowFor(ctx, 'דפנה כץ')[c]), /אין בית מקביל/);
+  assert.strictEqual(String(rowFor(ctx, 'דניאל סייג')[c]), '', 'no department, nothing to suggest');
+});
+
+test('pre-filling reference columns does not fill a single DECISION column', () => {
+  const ctx = loadCtx(seed());
+  ctx.writeMissingAssignmentsTabNow();
+  Object.keys(AUG).forEach(name => {
+    const r = rowFor(ctx, name);
+    ['בית', 'תפקיד', 'סוג העסקה', 'סכום', 'כמות', 'תאריך תחילת השיבוץ', 'אשר']
+      .forEach(label => assert.strictEqual(String(r[col(ctx, label)] || ''), '',
+        name + ' · ' + label + ' must stay empty for Moran'));
+  });
+});
+
+test('a department corrected by hand wins over the pre-filled one', () => {
+  const ctx = loadCtx(seed());
+  ctx.writeMissingAssignmentsTabNow();
+  fill(ctx, 'רון מנחם', { 'מחלקה בשכר': '003 · רמות השבים' });   // 004 in the export
+  ctx.writeMissingAssignmentsTabNow();
+  const r = rowFor(ctx, 'רון מנחם');
+  assert.ok(String(r[col(ctx, 'מחלקה בשכר')]).startsWith('003 · '), 'the correction stands');
+  assert.ok(String(r[col(ctx, 'בית מוצע (הצעה בלבד)')]).startsWith('ramot · '),
+    'and the suggestion follows it');
+});
+
+test('the August figure is REFERENCE ONLY — it never reaches the cost engine', () => {
+  const ctx = loadCtx(seed());
+  ctx.writeMissingAssignmentsTabNow();
+  // רון מנחם was paid ₪30,229 in August. Moran enters a ₪9,000 rate.
+  fill(ctx, 'רון מנחם', Object.assign({}, FULL, { 'סכום': 9000 }));
+  ctx.applyMissingAssignmentsNow(false);
+
+  // Nothing in the created assignment carries the payroll figure.
+  const row = ctx.tabs.assignments.rows.slice(1).find(r => String(r[1]) === 'wpaid1');
+  assert.ok(row, 'the assignment exists');
+  assert.strictEqual(Number(row[6]), 9000, 'the salary is the rate that was entered');
+  assert.ok(!row.some(cell => Number(cell) === 30229), 'no cell carries the payroll figure');
+
+  // And the engine that prices the month agrees.
+  const month = plain(ctx.logMonthTotalsNow(['2026-09']))[0];
+  assert.strictEqual(month.projectedTotal, 9000 + 10000,
+    'the month costs the entered rate plus the pre-existing placement — not the payroll figure');
+  assert.notStrictEqual(month.projectedTotal, 30229 + 10000);
+  assert.strictEqual(month.byHouse.ramot.projectedTotal, 9000 + 10000);
+});
+
+test('the reference column is not read back as data by the apply run either', () => {
+  const ctx = loadCtx(seed());
+  ctx.writeMissingAssignmentsTabNow();
+  const r = fill(ctx, 'דפנה כץ', FULL);
+  // Corrupt the reference cell: it must change nothing at all.
+  r[col(ctx, 'עלות אוגוסט בפועל (שכר — לעיון בלבד)')] = 999999;
+  const res = plain(ctx.applyMissingAssignmentsNow(false));
+  assert.strictEqual(res.created.length, 1);
+  assert.strictEqual(res.created[0].amount, 9000, 'the plan still uses the entered rate');
+  const row = ctx.tabs.assignments.rows.slice(1).find(x => String(x[1]) === 'wpaid9');
+  assert.ok(!row.some(cell => Number(cell) === 999999));
+});
+
+test('the log names the payroll total, so the size of the gap is stated once', () => {
+  const ctx = loadCtx(seed());
+  ctx.writeMissingAssignmentsTabNow();
+  const log = ctx.logs.join('\n');
+  assert.match(log, /₪93813/, 'all ten, from the payroll export');
+  assert.match(log, /never reaches the cost engine/);
+});
+
+// ---------------------------------------------------------------------------
+// the archive cross-check
+// ---------------------------------------------------------------------------
+
+test('each row says what archive_v3 remembers — a cross-check, not a verdict', () => {
+  const s = seed();
+  s.archive_v3.push(archivedRow('wpaid1', 'רון מנחם', 'ramot', '2026-03-31'));
+  const ctx = loadCtx(s);
+  ctx.writeMissingAssignmentsTabNow();
+  const c = col(ctx, 'היסטוריה בארכיון');
+  const withHistory = String(rowFor(ctx, 'רון מנחם')[c]);
+  assert.match(withHistory, /1 שיבוץ/);
+  assert.match(withHistory, /רמות השבים/, 'the house it was at');
+  assert.match(withHistory, /2026-03-31/, 'and when it ended');
+  assert.match(String(rowFor(ctx, 'דפנה כץ')[c]), /אין היסטוריה/, 'no trace anywhere says so plainly');
+});
+
+test('an archived history changes nothing on its own — the row still awaits a decision', () => {
+  const s = seed();
+  s.archive_v3.push(archivedRow('wpaid1', 'רון מנחם', 'ramot', '2026-03-31'));
+  const ctx = loadCtx(s);
+  const res = ctx.writeMissingAssignmentsTabNow();
+  assert.strictEqual(res.count, 10, 'nobody is dropped for having a past');
+  assert.strictEqual(String(rowFor(ctx, 'רון מנחם')[col(ctx, 'אשר')] || ''), '');
+  assert.strictEqual(ctx.tabs.workers.rows.slice(1).length, 11, 'and nothing is archived by it');
+  assert.deepStrictEqual(plain(ctx.applyMissingAssignmentsNow(false)).created, []);
+});
+
+test('the two verified lists describe the same ten people, and disagreeing aborts', () => {
+  // Static: every name on one list is on the other, in Code.gs itself.
+  const names = /const VERIFIED_PAID_WITHOUT_ASSIGNMENT = \[([\s\S]*?)\]/.exec(gs)[1]
+    .split(',').map(x => x.trim().replace(/^'|'$/g, '')).filter(Boolean);
+  assert.strictEqual(names.length, 10);
+  names.forEach(n => assert.ok(gs.includes("name: '" + n + "'"),
+    n + ' must also appear in PAYROLL_AUGUST_FACTS'));
+  assert.deepStrictEqual(names.slice().sort(), Object.keys(AUG).sort());
+
+  // And at run time, a name with no payroll facts stops the build rather
+  // than producing a row with blank reference cells.
+  const patched = gs.replace(/^.*name: 'דפנה כץ'.*$/m, '');
+  assert.notStrictEqual(patched, gs, 'the fixture must actually remove the entry');
+  const ctx = loadCtx(seed(), patched);
+  assert.throws(() => ctx.writeMissingAssignmentsTabNow(),
+    /"דפנה כץ" has no row in PAYROLL_AUGUST_FACTS/);
+  assert.ok(!ctx.tabs['שיבוצים חסרים'], 'and no half-built sheet is left behind');
 });
