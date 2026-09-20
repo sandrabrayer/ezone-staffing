@@ -3984,9 +3984,21 @@ const CLEANUP_KEEPER_COL = CLEANUP_SHEET_HEADERS.indexOf('מומלץ לשמור'
 // the cell is Moran's, not a feed's.
 const CLEANUP_KEEP = 'השאר';
 const CLEANUP_MERGE = 'מזג';
-const CLEANUP_ARCHIVE = 'העבר לארכיב';
+const CLEANUP_ARCHIVE = 'העבר לארכיון';
 const CLEANUP_FIX = 'תקן';
 const CLEANUP_DECISIONS = [CLEANUP_KEEP, CLEANUP_MERGE, CLEANUP_ARCHIVE, CLEANUP_FIX];
+
+// The spelling the first version of the dropdown offered. It is NOT offered
+// any more, but a decision typed or picked while it was is still honoured:
+// a sheet Moran filled in over days must not quietly lose a row because the
+// wording changed under her. Normalized on read and on rebuild, so an old
+// value never sits in the tab as an invalid entry.
+const CLEANUP_ARCHIVE_LEGACY = 'העבר לארכיב';
+
+function cleanupNormalizeDecision_(value) {
+  const s = String(value == null ? '' : value).trim();
+  return s === CLEANUP_ARCHIVE_LEGACY ? CLEANUP_ARCHIVE : s;
+}
 
 // Which codes are worth a cleanup decision. Everything else is reported but
 // not offered as an action — there is nothing a decision could do about it.
@@ -4728,7 +4740,7 @@ function readCleanupDecisions_() {
     const key = String(r[CLEANUP_KEY_COL - 1] || '').trim();
     if (!key) continue;
     out[key] = {
-      decision: String(r[CLEANUP_DECISION_COL - 1] || '').trim(),
+      decision: cleanupNormalizeDecision_(r[CLEANUP_DECISION_COL - 1]),
       note: String(r[CLEANUP_NOTE_COL - 1] || '').trim(),
     };
   }
@@ -4943,7 +4955,7 @@ function readCleanupPlan_() {
       members: String(r[CLEANUP_MEMBERS_COL - 1] || '')
         .split(',').map(function (s) { return s.trim(); }).filter(Boolean),
       keeper: String(r[CLEANUP_KEEPER_COL - 1] || '').trim(),
-      decision: String(r[CLEANUP_DECISION_COL - 1] || '').trim(),
+      decision: cleanupNormalizeDecision_(r[CLEANUP_DECISION_COL - 1]),
       note: String(r[CLEANUP_NOTE_COL - 1] || '').trim(),
     });
   }

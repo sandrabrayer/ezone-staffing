@@ -396,15 +396,39 @@ test('the dry run predicts that same conflict rather than discovering it on appl
 // archive / keep / fix
 // ---------------------------------------------------------------------------
 
-test('העבר לארכיב moves a worker with no placements into workers_archive', () => {
-  const ctx = withDecision('SMOKE_RECORD', 'העבר לארכיב', 'רשומת בדיקה');
+test('העבר לארכיון moves a worker with no placements into workers_archive', () => {
+  const ctx = withDecision('SMOKE_RECORD', 'העבר לארכיון', 'רשומת בדיקה');
   const res = plain(ctx.applyCleanupDecisionsNow(false));
   assert.strictEqual(res.applied.length, 1);
   assert.deepStrictEqual(workerIds(ctx), ['w1', 'w2']);
   const row = ctx.tabs.workers_archive.rows[1];
   assert.strictEqual(String(row[0]), 'w3');
-  assert.strictEqual(String(row[8]), 'העבר לארכיב');
+  assert.strictEqual(String(row[8]), 'העבר לארכיון');
   assert.strictEqual(String(row[9]), 'רשומת בדיקה', 'the note becomes the reason');
+});
+
+// The dropdown said «העבר לארכיב» before it said «העבר לארכיון». A sheet is
+// filled in over days, so a decision picked under the old wording must still
+// be honoured — and must not be left sitting in the tab as a value the
+// dropdown now rejects.
+test('the previous spelling «העבר לארכיב» is still honoured on apply', () => {
+  const ctx = withDecision('SMOKE_RECORD', 'העבר לארכיב', 'רשומת בדיקה');
+  const res = plain(ctx.applyCleanupDecisionsNow(false));
+  assert.strictEqual(res.applied.length, 1, 'an old decision must not be silently skipped');
+  assert.deepStrictEqual(workerIds(ctx), ['w1', 'w2']);
+  const row = ctx.tabs.workers_archive.rows[1];
+  assert.strictEqual(String(row[0]), 'w3');
+  assert.strictEqual(String(row[8]), 'העבר לארכיון', 'stored under the current wording');
+});
+
+test('a rebuild rewrites the previous spelling to the current one', () => {
+  const ctx = withDecision('SMOKE_RECORD', 'העבר לארכיב');
+  ctx.runDataIntegrityReportNow();
+  const sheet = ctx.tabs['ניקוי נתונים'];
+  const dCol = sheet.rows[0].indexOf('החלטה');
+  const row = sheet.rows.find(r => r[0] === 'SMOKE_RECORD');
+  assert.strictEqual(String(row[dCol]), 'העבר לארכיון',
+    'carried over as a value the dropdown accepts, not as an invalid entry');
 });
 
 test('archiving a worker who still holds a live assignment is refused', () => {
@@ -415,7 +439,7 @@ test('archiving a worker who still holds a live assignment is refused', () => {
   ctx.runDataIntegrityReportNow();
   const sheet = ctx.tabs['ניקוי נתונים'];
   const dCol = sheet.rows[0].indexOf('החלטה');
-  sheet.rows.find(r => r[0] === 'SMOKE_RECORD')[dCol] = 'העבר לארכיב';
+  sheet.rows.find(r => r[0] === 'SMOKE_RECORD')[dCol] = 'העבר לארכיון';
   ctx.writes.length = 0;
 
   const res = plain(ctx.applyCleanupDecisionsNow(false));
@@ -468,7 +492,7 @@ test('cleanup is EDITOR-RUN ONLY — no HTTP action can reach it', () => {
 });
 
 test('a merge and an archive in the same run see each other', () => {
-  // Decide «מזג» on the duplicate group AND «העבר לארכיב» on the keeper's
+  // Decide «מזג» on the duplicate group AND «העבר לארכיון» on the keeper's
   // own row: the archive must see the placements the merge just handed it,
   // rather than the roster as it looked before the run started.
   const ctx = loadCtx(seed());
@@ -481,7 +505,7 @@ test('a merge and an archive in the same run see each other', () => {
   // A hand-written archive row for the keeper, appended the way a rebuild
   // would have written one.
   sheet.rows.push(['SMOKE_RECORD', 'worker', 'דנה כהן', 'ramot', '', '', 'w1', '',
-    'העבר לארכיב', '', 'SMOKE_RECORD:w1']);
+    'העבר לארכיון', '', 'SMOKE_RECORD:w1']);
   assert.ok(sheet.rows[sheet.rows.length - 1][mCol] === 'w1');
   ctx.writes.length = 0;
 

@@ -104,8 +104,14 @@ The worksheet has one row per group or record and one column to fill in:
 |---|---|
 | **השאר** | Nothing. The finding is accepted as it is. |
 | **מזג** | Keeps the id in `מומלץ לשמור` (or whatever you put there), moves the other members' **assignments, absences and coverages** onto it, then **archives** the emptied worker rows with the reason `merge into <id>`. |
-| **העבר לארכיב** | Archives that one worker row, with the «הערה» text as the reason. |
+| **העבר לארכיון** | Archives that one worker row, with the «הערה» text as the reason. |
 | **תקן** | Nothing automatic — it is a manual edit. The row is reported as needing one. |
+
+The dropdown offered **«העבר לארכיב»** in its first version. That spelling is
+no longer offered, but a decision picked while it was is still applied, and a
+rebuild rewrites it to «העבר לארכיון» so it never sits in the tab as a value
+the dropdown rejects. A worksheet filled in over several days must not lose a
+row because the wording changed under it.
 
 Rules that hold whatever the decision says:
 

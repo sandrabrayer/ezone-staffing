@@ -583,7 +583,7 @@ test('the החלטה column is a dropdown of exactly the four decisions', () => 
   assert.strictEqual(sheet.validations.length, 1, 'one validation, on one column');
   const v = sheet.validations[0];
   assert.strictEqual(v.c, sheet.values[0].indexOf('החלטה') + 1);
-  assert.deepStrictEqual(plain(v.rule.values), ['השאר', 'מזג', 'העבר לארכיב', 'תקן']);
+  assert.deepStrictEqual(plain(v.rule.values), ['השאר', 'מזג', 'העבר לארכיון', 'תקן']);
   assert.strictEqual(v.rule.allowInvalid, false, 'a typed decision must be impossible');
 });
 
