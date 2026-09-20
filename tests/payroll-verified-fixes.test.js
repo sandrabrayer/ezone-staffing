@@ -178,6 +178,12 @@ function ft(id, workerId, house, salary) {
     0, 0, 0, 0, 0, 0, ''];
 }
 
+// The eight payroll-floor worker ids and the rename target, exactly as the
+// production «דוח תקינות» tab prints them.
+const FL = ['wmppe7df8du66', 'wmppe7ki6k9oi', 'wmppe7np0sv8u', 'wmppeb6asz4v7',
+  'wmppe9mr3fv2z', 'wmppe805nlehh', 'wmppeeqxzqs7m', 'wmrc0am7cy2gv'];
+const REN = 'wmrrld1h8vpg7';
+
 // The live shape: the typo worker, the four leavers, the eight floors, the
 // rename, plus one placed worker with a hand-entered date as a control.
 function seed(extra) {
@@ -188,21 +194,24 @@ function seed(extra) {
     w('wlead2', 'דן רובינסון'),
     w('wlead3', 'ניר לוי'),
     w('wlead4', 'שלי הלפט'),
-    w('wfl1', 'sergei makarov'),
-    w('wfl2', 'שחר מזור'),
-    w('wfl3', 'מעיין דלומי'),
-    w('wfl4', 'חנן וייל'),
-    w('wfl5', 'אלה שפירא'),
-    w('wfl6', 'עדי איזנברג'),
-    w('wfl7', 'בן ציון אדרי'),
-    w('wfl8', 'אורן סילמניק'),
-    w('wren', 'אתי (אסתר) דבוש'),
+    // The ids are the live ones from «דוח תקינות»: every fact in this
+    // section is keyed on an id, so a fixture keyed on anything else would
+    // be testing a different program.
+    w(FL[0], 'sergei makarov'),
+    w(FL[1], 'שחר מזור'),
+    w(FL[2], 'מעיין דלומי'),
+    w(FL[3], 'חנן וייל'),
+    w(FL[4], 'אלה שפירא'),
+    w(FL[5], 'עדי איזנברג'),
+    w(FL[6], 'בן ציון אדרי'),
+    w(FL[7], 'אורן סילמניק'),
+    w(REN, 'אתי (אסתר) דבוש'),
     w('wok', 'עובדת תקינה', '2026-03-01'),
   ];
   const assignments = [
     H.assignments,
     ft('a-typo', 'wmppe95x5vd8o', 'ramot'),
-    ft('a-fl1', 'wfl1', 'asher'),
+    ft('a-fl1', FL[0], 'asher'),
     ft('a-ok', 'wok', 'pardes'),
   ];
   return Object.assign({
@@ -292,7 +301,7 @@ test('a name that matches TWO workers aborts the whole run — nothing is writte
   assert.deepStrictEqual(ctx.writes, [], 'not one cell, not even for the unambiguous fixes');
   // The unambiguous fixes really did not happen.
   assert.strictEqual(String(workerRow(ctx, 'wmppe95x5vd8o')[5]), '2026-12-01');
-  assert.strictEqual(String(workerRow(ctx, 'wfl1')[5]), '');
+  assert.strictEqual(String(workerRow(ctx, FL[0])[5]), '');
   assert.ok(workerIds(ctx).includes('wlead1'), 'and no leaver was archived');
 });
 
@@ -303,21 +312,63 @@ test('the dry run aborts on the same ambiguity, so it is found while it is cheap
   assert.throws(() => ctx.applyVerifiedFixesNow(), /matches 2 workers/);
 });
 
-test('a verified name that matches NO worker aborts the run', () => {
+test('a verified leaver NAME that matches no worker is a no-op, not an abort', () => {
+  // The leavers are the one group with no id: the name is their only
+  // identifier, so a name that has already gone means the row was archived.
   const s = seed();
-  s.workers = s.workers.filter(r => r[1] !== 'שחר מזור');
+  s.workers = s.workers.filter(r => r[1] !== 'שלומציון כהן');
+  const ctx = loadCtx(s);
+  const res = plain(ctx.applyVerifiedFixesNow());
+  assert.ok(res.alreadyDone.some(d => /already archived/.test(d.why)));
+});
+
+test('a verified leaver NAME that matches two workers still aborts', () => {
+  const s = seed();
+  s.workers.push(w('wdup', 'ניר לוי'));
   const ctx = loadCtx(s);
   ctx.writes.length = 0;
-  assert.throws(() => ctx.applyVerifiedFixesNow(false), /no worker is named "שחר מזור"/);
+  assert.throws(() => ctx.applyVerifiedFixesNow(false), /matches 2 workers/);
   assert.deepStrictEqual(ctx.writes, []);
 });
 
-test('the start-date fix refuses to act when the id and the name disagree', () => {
+// ---------------------------------------------------------------------------
+// the id is authoritative
+// ---------------------------------------------------------------------------
+
+test('an id that is not in the roster ABORTS the whole run', () => {
+  const s = seed();
+  s.workers = s.workers.filter(r => r[0] !== FL[1]);   // שחר מזור's row, by id
+  const ctx = loadCtx(s);
+  ctx.writes.length = 0;
+  assert.throws(() => ctx.applyVerifiedFixesNow(false),
+    new RegExp('no worker with id ' + FL[1]));
+  assert.deepStrictEqual(ctx.writes, [], 'and nothing else in the batch is applied either');
+});
+
+test('a name that disagrees with the id is a WARNING — the id wins and the run proceeds', () => {
+  const s = seed();
+  // Same person, renamed in the sheet since the fact was written down.
+  s.workers = s.workers.map(r => (r[0] === FL[1] ? w(FL[1], 'שחר מזור-לוי') : r));
+  const ctx = loadCtx(s);
+  const res = plain(ctx.applyVerifiedFixesNow(false));
+
+  const row = workerRow(ctx, FL[1]);
+  assert.strictEqual(String(row[5]), '2026-01-01', 'the floor is still written');
+  assert.strictEqual(String(row[8]), 'payroll_floor');
+  assert.strictEqual(String(row[1]), 'שחר מזור-לוי', 'and the sheet name is left alone');
+  assert.strictEqual(res.warnings.length, 1);
+  assert.match(res.warnings[0], /is "שחר מזור-לוי", the fact says "שחר מזור"/);
+  assert.match(res.warnings[0], /proceeding on the id/);
+  assert.match(ctx.logs.join('\n'), /WARN \| payroll floor: /, 'and it is never swallowed');
+});
+
+test('the same rule covers the start-date typo: a differing name never aborts it', () => {
   const s = seed();
   s.workers = s.workers.map(r => (r[0] === 'wmppe95x5vd8o' ? w(r[0], 'מישהו אחר', '2026-12-01') : r));
   const ctx = loadCtx(s);
-  assert.throws(() => ctx.applyVerifiedFixesNow(false),
-    /is "מישהו אחר", not "שובל לובטון"/, 'a copied id must never land a date on the wrong row');
+  const res = plain(ctx.applyVerifiedFixesNow(false));
+  assert.strictEqual(String(workerRow(ctx, 'wmppe95x5vd8o')[5]), '2026-01-01');
+  assert.ok(res.warnings.some(x => /start date fix.*"מישהו אחר"/.test(x)));
 });
 
 test('a leaver who still holds a placement aborts the run rather than orphaning cost', () => {
@@ -407,8 +458,8 @@ test('(A) the assignments of the typo worker are not touched', () => {
 test('(D) a floor is written as the 1st of the month AND tagged payroll_floor', () => {
   const ctx = loadCtx(seed());
   ctx.applyVerifiedFixesNow(false);
-  [['wfl1', '2026-01-01'], ['wfl5', '2026-02-01'], ['wfl6', '2026-03-01'],
-    ['wfl7', '2026-05-01'], ['wfl8', '2026-06-01']].forEach(([id, date]) => {
+  [[FL[0], '2026-01-01'], [FL[4], '2026-02-01'], [FL[5], '2026-03-01'],
+    [FL[6], '2026-05-01'], [FL[7], '2026-06-01']].forEach(([id, date]) => {
     const row = workerRow(ctx, id);
     assert.strictEqual(String(row[5]), date, id + ' start date');
     assert.strictEqual(String(row[8]), 'payroll_floor', id + ' must be tagged as a floor');
@@ -417,17 +468,17 @@ test('(D) a floor is written as the 1st of the month AND tagged payroll_floor', 
 
 test('(D) a floor NEVER overwrites a date a person entered', () => {
   const s = seed();
-  s.workers = s.workers.map(r => (r[0] === 'wfl2' ? w('wfl2', 'שחר מזור', '2026-01-17') : r));
+  s.workers = s.workers.map(r => (r[0] === FL[1] ? w(FL[1], 'שחר מזור', '2026-01-17') : r));
   const ctx = loadCtx(s);
   const res = plain(ctx.applyVerifiedFixesNow(false));
-  assert.strictEqual(String(workerRow(ctx, 'wfl2')[5]), '2026-01-17', 'the exact date stands');
+  assert.strictEqual(String(workerRow(ctx, FL[1])[5]), '2026-01-17', 'the exact date stands');
   assert.ok(res.alreadyDone.some(d => /keeping the entered date 2026-01-17/.test(d.why)));
 });
 
 test('(E) the parenthesised name is rewritten', () => {
   const ctx = loadCtx(seed());
   ctx.applyVerifiedFixesNow(false);
-  assert.strictEqual(String(workerRow(ctx, 'wren')[1]), 'אתי אסתר דבוש');
+  assert.strictEqual(String(workerRow(ctx, REN)[1]), 'אתי אסתר דבוש');
 });
 
 test('(C) a leaver is MOVED to workers_archive with its reason — never deleted', () => {
@@ -456,10 +507,10 @@ test('every applied change lands in the audit log with the verified reason', () 
     assert.ok(String(r[7]).startsWith('תיקון מאומת מול דוח שכר'),
       'the reason names what it was checked against: ' + r[7]);
   });
-  const floor = rows.find(r => String(r[3]) === 'wfl1' && String(r[4]) === 'start_date');
+  const floor = rows.find(r => String(r[3]) === FL[0] && String(r[4]) === 'start_date');
   assert.strictEqual(String(floor[5]), '', 'from blank');
   assert.strictEqual(String(floor[6]), '2026-01-01', 'to the floor');
-  const src = rows.find(r => String(r[3]) === 'wfl1' && String(r[4]) === 'start_date_source');
+  const src = rows.find(r => String(r[3]) === FL[0] && String(r[4]) === 'start_date_source');
   assert.strictEqual(String(src[6]), 'payroll_floor', 'and the source is audited as its own field');
   const arch = rows.find(r => String(r[3]) === 'wlead1' && String(r[4]) === 'tab');
   assert.strictEqual(String(arch[6]), 'workers_archive');
@@ -485,7 +536,7 @@ test('a payroll_floor date is reported as an ESTIMATE, never as confirmed', () =
   const ctx = loadCtx(seed());
   ctx.applyVerifiedFixesNow(false);
   const report = plain(ctx.computeDataIntegrityReport_(ctx.readAllForIntegrity_(), TODAY));
-  const f = report.findings.find(x => x.code === 'ESTIMATED_START_DATE' && x.workerId === 'wfl1');
+  const f = report.findings.find(x => x.code === 'ESTIMATED_START_DATE' && x.workerId === FL[0]);
   assert.ok(f, 'the worker stays visible in the report after the fix');
   assert.strictEqual(f.severity, 'info');
   assert.match(f.detail, /payroll floor, not a confirmed date/);
@@ -497,9 +548,9 @@ test('a payroll_floor date is reported as an ESTIMATE, never as confirmed', () =
 test('a date entered by hand afterwards CLEARS the floor tag', () => {
   const ctx = loadCtx(seed());
   ctx.applyVerifiedFixesNow(false);
-  assert.strictEqual(String(workerRow(ctx, 'wfl1')[8]), 'payroll_floor');
-  ctx.setWorkerStartDates({ updates: [{ id: 'wfl1', startDate: '2026-01-19' }] });
-  const row = workerRow(ctx, 'wfl1');
+  assert.strictEqual(String(workerRow(ctx, FL[0])[8]), 'payroll_floor');
+  ctx.setWorkerStartDates({ updates: [{ id: FL[0], startDate: '2026-01-19' }] });
+  const row = workerRow(ctx, FL[0]);
   assert.strictEqual(String(row[5]), '2026-01-19');
   assert.strictEqual(String(row[8] || ''), '', 'a person typing a date outranks a reconstruction');
   const audit = auditRows(ctx).find(r => String(r[4]) === 'start_date_source' &&
@@ -512,8 +563,8 @@ test('a date entered by hand afterwards CLEARS the floor tag', () => {
 test('updateWorker clears the tag the same way', () => {
   const ctx = loadCtx(seed());
   ctx.applyVerifiedFixesNow(false);
-  ctx.updateWorker({ id: 'wfl1', worker: { name: 'sergei makarov', startDate: '2026-01-19' } });
-  assert.strictEqual(String(workerRow(ctx, 'wfl1')[8] || ''), '');
+  ctx.updateWorker({ id: FL[0], worker: { name: 'sergei makarov', startDate: '2026-01-19' } });
+  assert.strictEqual(String(workerRow(ctx, FL[0])[8] || ''), '');
 });
 
 // ---------------------------------------------------------------------------
@@ -539,4 +590,98 @@ test('the verified facts are DATA, so what was checked is readable without readi
   assert.ok(/const VERIFIED_RENAMES = \[/.test(gs));
   assert.ok(/const VERIFIED_PAID_WITHOUT_ASSIGNMENT = \[/.test(gs));
   assert.ok(/const VERIFIED_FIX_REASON = 'תיקון מאומת מול דוח שכר'/.test(gs));
+});
+
+// ---------------------------------------------------------------------------
+// the rename is computed from the sheet, not from a literal
+// ---------------------------------------------------------------------------
+
+test('the new name is derived from the STORED value, whatever it happens to be', () => {
+  const s = seed();
+  // A different spelling from the one written down in the fact: the
+  // transform still does the right thing, because it reads the cell.
+  s.workers = s.workers.map(r => (r[0] === REN ? w(REN, 'אתי (אסתי) דבוש כהן') : r));
+  const ctx = loadCtx(s);
+  const res = plain(ctx.applyVerifiedFixesNow(false));
+  assert.strictEqual(String(workerRow(ctx, REN)[1]), 'אתי אסתי דבוש כהן',
+    'every word survives; only the brackets go');
+  assert.ok(res.warnings.some(x => /rename: /.test(x)), 'and the differing name is flagged');
+});
+
+test('fullwidth brackets and the spacing they leave behind are handled too', () => {
+  const s = seed();
+  s.workers = s.workers.map(r => (r[0] === REN ? w(REN, 'אתי （אסתר） דבוש') : r));
+  const ctx = loadCtx(s);
+  ctx.applyVerifiedFixesNow(false);
+  assert.strictEqual(String(workerRow(ctx, REN)[1]), 'אתי אסתר דבוש');
+});
+
+test('a stored name with no brackets is left alone, and said to be done', () => {
+  const s = seed();
+  s.workers = s.workers.map(r => (r[0] === REN ? w(REN, 'אתי אסתר דבוש') : r));
+  const ctx = loadCtx(s);
+  const res = plain(ctx.applyVerifiedFixesNow(false));
+  assert.ok(!res.planned.some(a => a.kind === 'rename'));
+  assert.ok(res.alreadyDone.some(d => /nothing to strip/.test(d.why)));
+  assert.strictEqual(String(workerRow(ctx, REN)[1]), 'אתי אסתר דבוש');
+});
+
+// ---------------------------------------------------------------------------
+// the month log says what it means
+// ---------------------------------------------------------------------------
+
+test('a per-house variance is logged as a signed number, never as an object', () => {
+  const s = seed();
+  // pardes costs ₪10,000 in August (the control worker's placement).
+  s.budgets.push(['b1', 'pardes', '2026-08', 50000, '', '', '']);
+  s.budgets.push(['b2', 'asher', '2026-08', 1000, '', '', '']);
+  const ctx = loadCtx(s);
+  ctx.logMonthTotalsNow(['2026-08']);
+  const log = ctx.logs.join('\n');
+  assert.ok(!/\[object Object\]/.test(log), 'the bug this test exists for');
+  assert.match(log, /pardes: .*budget 50000 \| variance \+40000 \(under · 20% of budget · ok\)/);
+  assert.match(log, /asher: .*budget 1000 \| variance -9000 \(OVER/, 'over budget reads as over');
+});
+
+test('a house with no budget says so instead of printing a null', () => {
+  const ctx = loadCtx(seed());
+  ctx.logMonthTotalsNow(['2026-08']);
+  assert.ok(!/variance null/.test(ctx.logs.join('\n')));
+});
+
+test('a house whose cost is mostly missing-data money is called out', () => {
+  const s = seed();
+  // One undated worker at a house of their own: 100% missing-data money.
+  s.workers.push(w('wsde', 'ללא תאריך'));
+  s.assignments.push(ft('a-sde', 'wsde', 'sde_eliezer', 13000));
+  const ctx = loadCtx(s);
+  const out = plain(ctx.logMonthTotalsNow(['2026-08']))[0];
+
+  assert.strictEqual(out.byHouse.sde_eliezer.missingDataPct, 100);
+  const alert = out.missingDataAlerts.find(a => a.house === 'sde_eliezer');
+  assert.ok(alert, 'the house is named in the returned alerts, not only in the log');
+  assert.strictEqual(alert.missingDataCost, 13000);
+  assert.strictEqual(alert.projectedTotal, 13000);
+  out.missingDataAlerts.forEach(a => assert.ok(a.pct > 50,
+    a.house + ' was alerted at ' + a.pct + '% — below the threshold'));
+  const log = ctx.logs.join('\n');
+  assert.match(log, /!! sde_eliezer: 100% of its total is missing-data money \(13000 of 13000\)/);
+  assert.match(log, /cannot be .*defended until the missing dates and rates are filled in/s);
+});
+
+test('a house below the threshold is NOT called out', () => {
+  const s = seed();
+  s.workers.push(w('wsde', 'ללא תאריך'));
+  s.workers.push(w('wsde2', 'עם תאריך', '2020-01-01'));
+  s.assignments.push(ft('a-sde', 'wsde', 'sde_eliezer', 4000));
+  s.assignments.push(ft('a-sde2', 'wsde2', 'sde_eliezer', 10000));
+  const ctx = loadCtx(s);
+  const out = plain(ctx.logMonthTotalsNow(['2026-08']))[0];
+  assert.ok(out.byHouse.sde_eliezer.missingDataPct < 50, 'the premise: under the threshold');
+  assert.ok(!out.missingDataAlerts.some(a => a.house === 'sde_eliezer'));
+  assert.ok(!/!! sde_eliezer/.test(ctx.logs.join('\n')));
+});
+
+test('the alert threshold is a named constant, not a number buried in a branch', () => {
+  assert.ok(/const MISSING_DATA_HOUSE_ALERT_PCT = 50/.test(gs));
 });

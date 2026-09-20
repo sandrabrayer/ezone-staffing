@@ -5262,23 +5262,41 @@ const VERIFIED_LEAVER_REASON = 'לא מופיע/ה בדוח השכר מאז ינ
 // start is THAT MONTH OR EARLIER, so what is written is the 1st of the
 // month and it is tagged start_date_source = 'payroll_floor'. A floor is
 // not a date: every view that shows it says «תאריך משוער».
+// Keyed by WORKER ID, which is what «דוח תקינות» prints and what every row
+// is keyed on. The name is carried along as a cross-check only: a name is
+// something a person retypes, and a retyped name is exactly how the first
+// run of this list aborted.
 const VERIFIED_START_DATE_FLOORS = [
-  { name: 'sergei makarov', month: '2026-01' },
-  { name: 'שחר מזור', month: '2026-01' },
-  { name: 'מעיין דלומי', month: '2026-01' },
-  { name: 'חנן וייל', month: '2026-01' },
-  { name: 'אלה שפירא', month: '2026-02' },
-  { name: 'עדי איזנברג', month: '2026-03' },
-  { name: 'בן ציון אדרי', month: '2026-05' },
-  { name: 'אורן סילמניק', month: '2026-06' },
+  { workerId: 'wmppe7df8du66', name: 'sergei makarov', month: '2026-01' },
+  { workerId: 'wmppe7ki6k9oi', name: 'שחר מזור', month: '2026-01' },
+  { workerId: 'wmppe7np0sv8u', name: 'מעיין דלומי', month: '2026-01' },
+  { workerId: 'wmppeb6asz4v7', name: 'חנן וייל', month: '2026-01' },
+  { workerId: 'wmppe9mr3fv2z', name: 'אלה שפירא', month: '2026-02' },
+  { workerId: 'wmppe805nlehh', name: 'עדי איזנברג', month: '2026-03' },
+  { workerId: 'wmppeeqxzqs7m', name: 'בן ציון אדרי', month: '2026-05' },
+  { workerId: 'wmrc0am7cy2gv', name: 'אורן סילמניק', month: '2026-06' },
 ];
 
 // (E) Parentheses in a Hebrew name break copy-paste rendering (the bracket
 // jumps to the wrong end of the string in a bidi context), and every
 // consumer matches this person by exact name.
+// Keyed by worker id, and the new name is COMPUTED from whatever the sheet
+// currently holds rather than from a literal typed here: the stored value
+// is the truth, and a literal would only be one more thing to mistype. The
+// transform removes the bracket characters and keeps every word.
 const VERIFIED_RENAMES = [
-  { from: 'אתי (אסתר) דבוש', to: 'אתי אסתר דבוש' },
+  { workerId: 'wmrrld1h8vpg7', name: 'אתי (אסתר) דבוש', transform: 'strip_parentheses' },
 ];
+
+// Remove ( ) — ASCII and fullwidth — and collapse the whitespace that
+// removing them leaves behind. «אתי (אסתר) דבוש» → «אתי אסתר דבוש»: every
+// word survives, only the brackets go.
+function stripNameParentheses_(name) {
+  return String(name === null || name === undefined ? '' : name)
+    .replace(/[()\uFF08\uFF09]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
 // (B) Paid in the August payroll and holding no assignment at all, so they
 // currently contribute 0 to every month. An assignment cannot be created
@@ -5375,6 +5393,32 @@ function costEngine_() {
   return engine;
 }
 
+// The cost engine returns the variance as an OBJECT — { budget, cost,
+// variance, pct, status } — because the screen needs all of it. A log line
+// needs one readable number, and concatenating the object produced
+// «variance [object Object]», which says nothing at all. Positive means
+// UNDER budget, since variance is budget minus cost.
+function formatVariance_(v) {
+  if (!v || v.budget === null || v.budget === undefined) return 'no budget set';
+  const d = Number(v.variance) || 0;
+  const pct = (v.pct === null || v.pct === undefined || v.pct === Infinity) ? '' :
+    ' · ' + v.pct + '% of budget';
+  return (d >= 0 ? '+' : '-') + Math.abs(d) +
+    ' (' + (d >= 0 ? 'under' : 'OVER') + pct + ' · ' + v.status + ')';
+}
+
+// Above this share of a house's total sitting in the missing-data bucket,
+// the house's figure is not a number anybody can defend — it is mostly a
+// placeholder. sde_eliezer came back 100% missing-data on the first
+// production run, and nothing in the log said so.
+const MISSING_DATA_HOUSE_ALERT_PCT = 50;
+
+function missingDataSharePct_(totals) {
+  const total = Number(totals && totals.projectedTotal) || 0;
+  if (total <= 0) return 0;
+  return Math.round((Number(totals.missingDataCost) || 0) / total * 1000) / 10;
+}
+
 // READ-ONLY. Logs what each month costs, split into the three buckets and
 // broken down per house. Writes nothing at all — not a tab, not the audit
 // log — so it is always safe to run, before and after every fix.
@@ -5415,6 +5459,9 @@ function logMonthTotalsNow(months) {
       startDateEstimatedLines: rep.startDateEstimatedLines,
       startDateFloorNotStarted: rep.startDateFloorNotStarted,
       byHouse: {},
+      // Houses whose figure is mostly missing-data money. Returned as well
+      // as logged, so a caller can act on it without parsing the log.
+      missingDataAlerts: [],
     };
     Logger.log('');
     Logger.log('=== ' + m + ' ===');
@@ -5431,11 +5478,13 @@ function logMonthTotalsNow(months) {
     }
     Object.keys(rep.byHouse).sort().forEach(function (h) {
       const hb = rep.byHouse[h];
+      const share = missingDataSharePct_(hb);
       summary.byHouse[h] = {
         projectedTotal: hb.projectedTotal,
         actualConfirmed: hb.actualConfirmed,
         estimated: hb.estimated,
         missingDataCost: hb.missingDataCost,
+        missingDataPct: share,
         instructorsCost: hb.instructorsCost,
         budget: hb.budget,
         variance: hb.variance,
@@ -5443,9 +5492,20 @@ function logMonthTotalsNow(months) {
       Logger.log('  ' + h + ': total ' + hb.projectedTotal +
         ' | confirmed ' + hb.actualConfirmed +
         ' | estimated ' + hb.estimated +
-        ' | missing-data ' + hb.missingDataCost +
+        ' | missing-data ' + hb.missingDataCost + ' (' + share + '%)' +
         ' | instructors ' + hb.instructorsCost +
-        (hb.budget === null ? '' : ' | budget ' + hb.budget + ' | variance ' + hb.variance));
+        (hb.budget === null ? '' : ' | budget ' + hb.budget +
+          ' | variance ' + formatVariance_(hb.variance)));
+      // A house whose cost is mostly missing-data money is not a house with
+      // a number, it is a house with a gap. Say so where the number is,
+      // not three screens away in the integrity report.
+      if (share > MISSING_DATA_HOUSE_ALERT_PCT) {
+        summary.missingDataAlerts.push({ house: h, pct: share,
+          missingDataCost: hb.missingDataCost, projectedTotal: hb.projectedTotal });
+        Logger.log('  !! ' + h + ': ' + share + '% of its total is missing-data money (' +
+          hb.missingDataCost + ' of ' + hb.projectedTotal + ') — that figure cannot be ' +
+          'defended until the missing dates and rates are filled in');
+      }
     });
     out.push(summary);
   });
@@ -5469,6 +5529,34 @@ function verifiedMatchesByName_(workers, name) {
   return workers.filter(function (w) { return normalizeWorkerName_(w.name) === n; });
 }
 
+// THE MATCHING RULE, for any fact that carries a worker id.
+//
+// The id is authoritative: it is what «דוח תקינות» prints, what every row
+// is keyed on, and what does not change when somebody retypes a name.
+//   - the id is not in the roster        → ERROR, which aborts the run;
+//   - the id is there, the name differs  → WARNING, and the run PROCEEDS.
+//     The id wins. A name mismatch alone never aborts, because the name in
+//     the fact is a label for a human reader, not the target.
+// A fact with NO id — the leavers, where the name is the only identifier
+// there is — still resolves by name through verifiedResolveByName_ below,
+// and an absent or ambiguous name there still aborts.
+function verifiedResolveById_(workers, workerId, expectedName, what) {
+  const id = String(workerId || '').trim();
+  if (!id) return { status: 'error', why: what + ': no worker id in the verified fact' };
+  const hits = workers.filter(function (w) { return w.id === id; });
+  if (!hits.length) {
+    return { status: 'error', why: what + ': no worker with id ' + id +
+      ' (expected "' + expectedName + '")' };
+  }
+  const worker = hits[0];
+  const out = { status: 'ok', worker: worker };
+  if (expectedName && normalizeWorkerName_(worker.name) !== normalizeWorkerName_(expectedName)) {
+    out.warning = what + ': ' + id + ' is "' + worker.name + '", the fact says "' + expectedName +
+      '" — proceeding on the id, which is authoritative';
+  }
+  return out;
+}
+
 function verifiedResolveByName_(workers, name, what) {
   const hits = verifiedMatchesByName_(workers, name);
   if (hits.length === 1) return { status: 'ok', worker: hits[0] };
@@ -5490,7 +5578,7 @@ function verifiedResolveByName_(workers, name, what) {
 // of a dry run is a promise about the apply run rather than a description
 // of a different code path.
 function planVerifiedFixes_(workers, assignments, archivedIds) {
-  const plan = { errors: [], actions: [], done: [] };
+  const plan = { errors: [], warnings: [], actions: [], done: [] };
   const byWorker = {};
   (assignments || []).forEach(function (a) {
     (byWorker[a.workerId] = byWorker[a.workerId] || []).push(a);
@@ -5498,24 +5586,18 @@ function planVerifiedFixes_(workers, assignments, archivedIds) {
   const archived = {};
   (archivedIds || []).forEach(function (id) { archived[String(id)] = true; });
 
-  // (A) the start-date typo, matched on id AND name.
+  // (A) the start-date typo. Resolved by id; a differing name is a warning.
   VERIFIED_START_DATE_FIXES.forEach(function (fix) {
-    const byId = workers.filter(function (w) { return w.id === fix.workerId; });
-    if (!byId.length) {
-      if (archived[fix.workerId]) {
-        plan.done.push({ kind: 'start_date', id: fix.workerId,
-          why: 'worker is already archived' });
-        return;
-      }
-      plan.errors.push('start date fix: no worker with id ' + fix.workerId);
+    if (archived[fix.workerId] &&
+        !workers.some(function (w) { return w.id === fix.workerId; })) {
+      plan.done.push({ kind: 'start_date', id: fix.workerId,
+        why: 'worker is already archived' });
       return;
     }
-    const w = byId[0];
-    if (normalizeWorkerName_(w.name) !== normalizeWorkerName_(fix.name)) {
-      plan.errors.push('start date fix: id ' + fix.workerId + ' is "' + w.name +
-        '", not "' + fix.name + '" — the verified fact and the sheet disagree');
-      return;
-    }
+    const r = verifiedResolveById_(workers, fix.workerId, fix.name, 'start date fix');
+    if (r.status !== 'ok') { plan.errors.push(r.why); return; }
+    if (r.warning) plan.warnings.push(r.warning);
+    const w = r.worker;
     if (w.startDate === fix.startDate && !w.startDateSource) {
       plan.done.push({ kind: 'start_date', id: w.id, name: w.name,
         why: 'start date is already ' + fix.startDate });
@@ -5532,16 +5614,15 @@ function planVerifiedFixes_(workers, assignments, archivedIds) {
   // because "that month or earlier" is not a date.
   VERIFIED_START_DATE_FLOORS.forEach(function (fix) {
     const date = fix.month + '-01';
-    const hits = verifiedMatchesByName_(workers, fix.name);
-    if (hits.length === 1 && hits[0].startDate === date &&
-        hits[0].startDateSource === START_DATE_SOURCE_PAYROLL_FLOOR) {
-      plan.done.push({ kind: 'start_floor', id: hits[0].id, name: hits[0].name,
+    const r = verifiedResolveById_(workers, fix.workerId, fix.name, 'payroll floor');
+    if (r.status !== 'ok') { plan.errors.push(r.why); return; }
+    const w = r.worker;
+    if (w.startDate === date && w.startDateSource === START_DATE_SOURCE_PAYROLL_FLOOR) {
+      plan.done.push({ kind: 'start_floor', id: w.id, name: w.name,
         why: 'floor ' + date + ' is already recorded' });
       return;
     }
-    const r = verifiedResolveByName_(workers, fix.name, 'payroll floor');
-    if (r.status !== 'ok') { plan.errors.push(r.why); return; }
-    const w = r.worker;
+    if (r.warning) plan.warnings.push(r.warning);
     // A date a person entered is better information than a floor. Keeping
     // it is the safe direction: this run never overwrites a confirmed date
     // with an approximation.
@@ -5558,18 +5639,22 @@ function planVerifiedFixes_(workers, assignments, archivedIds) {
     });
   });
 
-  // (E) the rename. Already-renamed is a no-op, not an error.
+  // (E) the rename. The new name is computed from what the sheet HOLDS, so
+  // a name nobody typed here cannot be wrong; already-renamed is a no-op.
   VERIFIED_RENAMES.forEach(function (fix) {
-    const hits = verifiedMatchesByName_(workers, fix.from);
-    if (!hits.length && verifiedMatchesByName_(workers, fix.to).length === 1) {
-      plan.done.push({ kind: 'rename', name: fix.to, why: 'already renamed' });
+    const r = verifiedResolveById_(workers, fix.workerId, fix.name, 'rename');
+    if (r.status !== 'ok') { plan.errors.push(r.why); return; }
+    const w = r.worker;
+    const after = stripNameParentheses_(w.name);
+    if (after === w.name) {
+      plan.done.push({ kind: 'rename', id: w.id, name: w.name,
+        why: 'no parentheses in the stored name — nothing to strip' });
       return;
     }
-    const r = verifiedResolveByName_(workers, fix.from, 'rename');
-    if (r.status !== 'ok') { plan.errors.push(r.why); return; }
+    if (r.warning) plan.warnings.push(r.warning);
     plan.actions.push({
-      kind: 'rename', id: r.worker.id, name: r.worker.name,
-      before: r.worker.name, after: fix.to,
+      kind: 'rename', id: w.id, name: w.name,
+      before: w.name, after: after,
       why: 'parentheses in a Hebrew name break copy-paste and exact-name matching',
     });
   });
@@ -5622,7 +5707,7 @@ function readWorkersArchiveIds_() {
 // dryRun defaults to TRUE. Only the explicit `false` writes anything.
 function applyVerifiedFixesNow(dryRun) {
   const apply = (dryRun === false);
-  const result = { dryRun: !apply, planned: [], applied: [], alreadyDone: [] };
+  const result = { dryRun: !apply, planned: [], applied: [], alreadyDone: [], warnings: [] };
 
   const lock = LockService.getScriptLock();
   if (apply) lock.waitLock(30000);
@@ -5642,6 +5727,7 @@ function applyVerifiedFixesNow(dryRun) {
 
     result.planned = plan.actions;
     result.alreadyDone = plan.done;
+    result.warnings = plan.warnings;
 
     // Nothing is written by a dry run, and nothing at all — not even a
     // header repair — by an apply run with nothing left to do. Re-running
@@ -5705,6 +5791,10 @@ function applyVerifiedFixesNow(dryRun) {
   result.alreadyDone.forEach(function (d) {
     Logger.log('skip | ' + d.kind + ' | ' + (d.name || d.id) + ' | ' + d.why);
   });
+  // A name that disagrees with the sheet is not a reason to stop — the id
+  // decides — but it is always worth saying out loud, because one of the
+  // two is wrong and only a person can say which.
+  result.warnings.forEach(function (w) { Logger.log('WARN | ' + w); });
   if (result.dryRun) {
     Logger.log('Run applyVerifiedFixesNow(false) to apply. Nothing above has happened yet.');
     Logger.log('Run logMonthTotalsNow() before and after, so every shekel that moves is attributable.');
