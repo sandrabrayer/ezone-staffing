@@ -5022,6 +5022,26 @@ function readCleanupPlan_() {
   return out;
 }
 
+// The Apps Script editor's Run button calls the selected function with NO
+// arguments, so `applyXNow(false)` cannot be triggered from the dropdown at
+// all — every Run is a dry run. Editing Code.gs in the editor to get around
+// that would mean hand-editing deployed code, which is worse than the
+// problem.
+//
+// So each dry-run-first function gets a zero-argument twin whose NAME says
+// what it does. The bare function keeps its dryRun=true default exactly as
+// it was: picking the wrong row in the dropdown must stay harmless, and the
+// one that writes has to be chosen on purpose, by a name nobody selects by
+// accident. Its first log line says so again, before anything happens.
+
+// WRITES. The dry run is applyCleanupDecisionsNow().
+function applyCleanupDecisionsForRealNow() {
+  Logger.log('THIS RUN WRITES — applyCleanupDecisionsForRealNow applies the «החלטה» ' +
+    'decisions to the sheet. The DRY RUN is applyCleanupDecisionsNow(), which writes ' +
+    'nothing; run that first and read its plan if you have not.');
+  return applyCleanupDecisionsNow(false);
+}
+
 // dryRun defaults to TRUE. Only the explicit `false` applies anything.
 function applyCleanupDecisionsNow(dryRun) {
   const apply = (dryRun === false);
@@ -5704,6 +5724,15 @@ function readWorkersArchiveIds_() {
 
 /* ---------- applying it ---------- */
 
+// WRITES. The dry run is applyVerifiedFixesNow(). See the note on the
+// zero-argument twins above applyCleanupDecisionsForRealNow.
+function applyVerifiedFixesForRealNow() {
+  Logger.log('THIS RUN WRITES — applyVerifiedFixesForRealNow applies the payroll-verified ' +
+    'fixes to the sheet. The DRY RUN is applyVerifiedFixesNow(), which writes nothing; ' +
+    'run that first and read its plan if you have not.');
+  return applyVerifiedFixesNow(false);
+}
+
 // dryRun defaults to TRUE. Only the explicit `false` writes anything.
 function applyVerifiedFixesNow(dryRun) {
   const apply = (dryRun === false);
@@ -6110,6 +6139,15 @@ function maApplyDropdown_(sh, col, rowCount, values) {
     .setAllowInvalid(false)
     .build();
   sh.getRange(2, col, rowCount, 1).setDataValidation(rule);
+}
+
+// WRITES. The dry run is applyMissingAssignmentsNow(). See the note on the
+// zero-argument twins above applyCleanupDecisionsForRealNow.
+function applyMissingAssignmentsForRealNow() {
+  Logger.log('THIS RUN WRITES — applyMissingAssignmentsForRealNow creates the approved ' +
+    'placements from «שיבוצים חסרים». The DRY RUN is applyMissingAssignmentsNow(), which ' +
+    'creates nothing; run that first and read its plan if you have not.');
+  return applyMissingAssignmentsNow(false);
 }
 
 // dryRun defaults to TRUE. Only the explicit `false` creates anything.

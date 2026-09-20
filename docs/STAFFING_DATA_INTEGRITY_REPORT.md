@@ -105,7 +105,7 @@ not ten.
 The worksheet has one row per group or record and one column to fill in:
 **«החלטה»**, a dropdown of exactly four values.
 
-| Decision | What `applyCleanupDecisionsNow(false)` does |
+| Decision | What `applyCleanupDecisionsForRealNow` does |
 |---|---|
 | **השאר** | Nothing. The finding is accepted as it is. |
 | **מזג** | Keeps the id in `מומלץ לשמור` (or whatever you put there), moves the other members' **assignments, absences and coverages** onto it, then **archives** the emptied worker rows with the reason `merge into <id>`. |
@@ -136,13 +136,20 @@ Rules that hold whatever the decision says:
 ### Dry run, always first
 
 ```
-applyCleanupDecisionsNow()         // DRY RUN — logs the plan, writes nothing
-applyCleanupDecisionsNow(false)    // applies it
+applyCleanupDecisionsNow()          // DRY RUN — logs the plan, writes nothing
+applyCleanupDecisionsForRealNow()   // applies it
 ```
 
-`dryRun` defaults to **true**, and only the literal `false` applies anything:
-`applyCleanupDecisionsNow(true)`, `applyCleanupDecisionsNow(1)` and
-`applyCleanupDecisionsNow(null)` are all dry runs. A dry run reports what it
+Both are picked from the **function dropdown** and started with **Run** — no
+argument is ever typed, because the Run button always calls with none. That
+is why the one that writes has its own name: `applyCleanupDecisionsNow` is
+what somebody picks by accident, so it stays a dry run whatever happens, and
+`applyCleanupDecisionsForRealNow` says `THIS RUN WRITES …` in its first log
+line before doing anything.
+
+Underneath, `dryRun` still defaults to **true** and only the literal `false`
+applies anything: `applyCleanupDecisionsNow(true)`, `(1)` and `(null)` are
+all dry runs. A dry run reports what it
 *would* do — which assignments would move, onto which keeper, which rows
 would be archived, and which rows it is skipping and why — and touches
 nothing, not even the audit log.
@@ -196,7 +203,7 @@ Paste the dry-run log into the ticket or the CHANGELOG entry before applying.
 
 ### 4 · Apply, then re-run
 
-Run `applyCleanupDecisionsNow(false)` (or the fix with `dryRun = false`), then
+Run `applyCleanupDecisionsForRealNow`, then
 run `runDataIntegrityReportNow()` again. The findings you fixed must be gone
 and **no new ones may have appeared**. If any did, stop and revert using the
 dry-run log and the audit trail — `audit_log` has one row per field changed,

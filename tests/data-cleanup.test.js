@@ -480,8 +480,8 @@ test('with no cleanup tab at all it reports that, rather than throwing', () => {
 
 test('cleanup is EDITOR-RUN ONLY — no HTTP action can reach it', () => {
   const ctx = loadCtx(seed());
-  ['applyCleanupDecisions', 'applyCleanupDecisionsNow', 'runDataIntegrityReportNow',
-    'cleanupArchiveWorker', 'writeCleanupTab'].forEach(action => {
+  ['applyCleanupDecisions', 'applyCleanupDecisionsNow', 'applyCleanupDecisionsForRealNow',
+    'runDataIntegrityReportNow', 'cleanupArchiveWorker', 'writeCleanupTab'].forEach(action => {
     const resp = ctx.doPost({
       parameter: { secret: 'x' },
       postData: { contents: JSON.stringify({ action }) },

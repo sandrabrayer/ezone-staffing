@@ -35,13 +35,33 @@ the difference is the fix.
 |---|---|---|---|
 | 1 | `logMonthTotalsNow()` | the **baseline** for 08 / 09 / 10 2026 | no, ever |
 | 2 | `applyVerifiedFixesNow()` | prints the plan for A, C, D, E | no |
-| 3 | `applyVerifiedFixesNow(false)` | applies it | yes |
+| 3 | **`applyVerifiedFixesForRealNow`** | applies it | **yes** |
 | 4 | `logMonthTotalsNow()` | what moved, and by how much | no |
 | 5 | `writeMissingAssignmentsTabNow()` | builds «שיבוצים חסרים» | the proposal tab only |
 | 6 | *Moran fills the sheet in* | house, role, type, rate, date, «אשר» | — |
 | 7 | `applyMissingAssignmentsNow()` | prints the plan | no |
-| 8 | `applyMissingAssignmentsNow(false)` | creates the approved placements | yes |
+| 8 | **`applyMissingAssignmentsForRealNow`** | creates the approved placements | **yes** |
 | 9 | `logMonthTotalsNow()` | the new totals | no |
+
+Every one of these is picked from the **function dropdown** in the Apps
+Script editor and started with **Run** — no argument is ever typed.
+
+That is why the steps that write have their own names. The editor's Run
+button calls the selected function with **no arguments**, so
+`applyVerifiedFixesNow(false)` cannot be triggered from the dropdown at all:
+every Run of it is a dry run. Each dry-run-first function therefore has a
+zero-argument twin:
+
+| Dry run — safe to pick by accident | Writes — chosen on purpose |
+|---|---|
+| `applyVerifiedFixesNow()` | `applyVerifiedFixesForRealNow()` |
+| `applyCleanupDecisionsNow()` | `applyCleanupDecisionsForRealNow()` |
+| `applyMissingAssignmentsNow()` | `applyMissingAssignmentsForRealNow()` |
+
+The bare names keep their `dryRun = true` default exactly as before, so
+picking the wrong row in the dropdown stays harmless. Each `…ForRealNow`
+announces itself in its **first log line** — `THIS RUN WRITES …`, naming the
+dry run — before it does anything.
 
 Steps 1, 4 and 9 are the point of the exercise: **every shekel that moves is
 attributable to one named run.** Take a screenshot of each log, or copy it

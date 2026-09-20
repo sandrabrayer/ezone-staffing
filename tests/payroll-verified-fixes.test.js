@@ -573,8 +573,9 @@ test('updateWorker clears the tag the same way', () => {
 
 test('these are EDITOR-RUN ONLY — no HTTP action can reach them', () => {
   const ctx = loadCtx(seed());
-  ['applyVerifiedFixes', 'applyVerifiedFixesNow', 'logMonthTotals', 'logMonthTotalsNow',
-    'writeMissingAssignmentsTabNow', 'applyMissingAssignmentsNow'].forEach(action => {
+  ['applyVerifiedFixes', 'applyVerifiedFixesNow', 'applyVerifiedFixesForRealNow',
+    'logMonthTotals', 'logMonthTotalsNow', 'writeMissingAssignmentsTabNow',
+    'applyMissingAssignmentsNow', 'applyMissingAssignmentsForRealNow'].forEach(action => {
     const out = ctx.doPost({ parameter: {}, postData: { contents: JSON.stringify({
       action, secret: 'x' }) } });
     const body = JSON.parse(out._text);
