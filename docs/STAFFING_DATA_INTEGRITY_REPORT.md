@@ -5,7 +5,11 @@
 up, and writes the result into the spreadsheet as two tabs Moran can work
 from — **«דוח תקינות»** and **«ניקוי נתונים»**. It never touches a data tab:
 every write goes through one function that refuses, by name, to write
-anywhere except those two report tabs.
+anywhere except the report tabs it owns.
+
+A third tab, **«שיבוצים חסרים»**, is built by a separate editor function and
+goes through the same guarded write path — see
+[PAYROLL_VERIFIED_FIXES.md](PAYROLL_VERIFIED_FIXES.md).
 
 ---
 
@@ -70,6 +74,7 @@ meant for a person to read is Hebrew.
 | `NAME_SYNC_RISK` | warn | The name would **fail an exact-match sync** to the coordinators / therapists apps: leading or trailing whitespace, a double space, a bidi control character, a Hebrew geresh/gershayim where the consumer has an ASCII quote, or a curly quote. These are invisible on screen and are the classic cause of "the guide disappeared from the coordinators app". |
 | `ABSENCE_OVERLAP` | warn | Two absences overlap for the same worker **and** house. |
 | `ORPHAN_ABSENCE` / `ORPHAN_COVERAGE` | warn | The absence's worker, or the coverage's covering worker, has no row in `workers`. |
+| `ESTIMATED_START_DATE` | info | The worker's `start_date` was reconstructed from the payroll book (`start_date_source = 'payroll_floor'`), so the true start is that month **or earlier**. No action is required; entering the exact date clears the tag. The row exists so an approximation cannot quietly become the record — see [PAYROLL_VERIFIED_FIXES.md](PAYROLL_VERIFIED_FIXES.md). |
 | `WORKER_NO_ASSIGNMENT` | warn / info | A worker with no assignment at all, **cross-checked against `archive_v3`** and classified in the `סיווג` column: `probably_departed` (`info`) when an archived placement exists — the detail names the house and the termination date — or `never_assigned` (`warn`) when there is no trace anywhere. **Nothing is archived automatically on the strength of this**; it is a reading, not a verdict. |
 | `UNSTAFFED_POSITION` | info | An absence with no worker: an unstaffed position, not an employee absence. Expected — recorded so the two are not confused. |
 | `DANGLING_COVERAGE_LINK` | info | The coverage points at an absence that has since been deleted. The coverage still stands on its own. |

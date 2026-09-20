@@ -1,3 +1,18 @@
+// ============================================================
+// GENERATED FILE — DO NOT EDIT.
+//
+// A byte-for-byte copy of lib/cost-engine.js, so the Apps Script
+// editor functions and the browser price a month with ONE engine.
+// Edit lib/cost-engine.js and run:
+//
+//   node scripts/sync_cost_engine_gs.js
+//
+// tests/cost-engine-gs-sync.test.js fails if this copy is stale.
+//
+// The UMD tail assigns globalThis.CostEngine, which is how Code.gs
+// reaches it (module is undefined in Apps Script, so the Node branch
+// is simply skipped).
+// ============================================================
 'use strict';
 
 // ============================================================

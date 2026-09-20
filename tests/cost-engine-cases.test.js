@@ -654,3 +654,91 @@ test('parity: hourly and per_session with actuals match lib/calc.js monthlyAssig
       'engine and lib/calc.js disagree on ' + a.id + ' with actuals');
   });
 });
+
+// ============================================================
+// a payroll-floor start date — a date that is only a floor
+// ============================================================
+
+// applyVerifiedFixesNow writes a start date recovered from the payroll book
+// and tags it start_date_source = 'payroll_floor'. The engine's job is to
+// price the month exactly as it would with any other date, and to make sure
+// nothing downstream can present that DATE as confirmed.
+
+const FLOOR = E.START_DATE_SOURCE_PAYROLL_FLOOR;
+
+test('a payroll-floor date prices the month exactly as a known date would', () => {
+  const known = run({
+    workers: [worker('w1', '2026-01-01')],
+    assignments: [fullTime('a1', 'w1', 'ramot', 10000)],
+  }, '2026-08');
+  const floor = run({
+    workers: [worker('w1', '2026-01-01', { startDateSource: FLOOR })],
+    assignments: [fullTime('a1', 'w1', 'ramot', 10000)],
+  }, '2026-08');
+  assert.strictEqual(lineOf(floor, 'a1').cost, lineOf(known, 'a1').cost,
+    'the money must not move — only what the page may claim about the date');
+  assert.strictEqual(floor.totals.projectedTotal, known.totals.projectedTotal);
+});
+
+test('every line it prices is tagged, so the DATE is never reported as confirmed', () => {
+  const report = run({
+    workers: [worker('w1', '2026-01-01', { startDateSource: FLOOR })],
+    assignments: [fullTime('a1', 'w1', 'ramot', 10000)],
+  }, '2026-08');
+  const line = lineOf(report, 'a1');
+  assert.strictEqual(line.startDateEstimated, true);
+  assert.strictEqual(line.startDateSource, FLOOR);
+  assert.strictEqual(line.missingStartDate, false,
+    'a floor is not a missing date: something IS known');
+  assert.strictEqual(report.startDateEstimatedLines, 1);
+});
+
+test('a date a person entered carries no tag at all', () => {
+  const report = run({
+    workers: [worker('w1', '2026-01-01')],
+    assignments: [fullTime('a1', 'w1', 'ramot', 10000)],
+  }, '2026-08');
+  const line = lineOf(report, 'a1');
+  assert.strictEqual(line.startDateEstimated, false);
+  assert.strictEqual(line.startDateSource, '');
+  assert.strictEqual(report.startDateEstimatedLines, 0);
+});
+
+test('a month BEFORE the floor is counted separately — it may be understating', () => {
+  // The floor says June or earlier. April therefore shows 0, and that 0 is
+  // the one number a floor can quietly get wrong.
+  const report = run({
+    workers: [worker('w1', '2026-06-01', { startDateSource: FLOOR })],
+    assignments: [fullTime('a1', 'w1', 'ramot', 10000)],
+  }, '2026-04');
+  const line = lineOf(report, 'a1');
+  assert.strictEqual(line.rule, 'NOT_STARTED');
+  assert.strictEqual(line.cost, 0);
+  assert.strictEqual(report.startDateFloorNotStarted, 1);
+});
+
+test('the three buckets still sum with floor-dated lines in the mix', () => {
+  const report = run({
+    workers: [
+      worker('w1', '2026-01-01', { startDateSource: FLOOR }),
+      worker('w2', ''),
+      worker('w3', '2026-01-01'),
+    ],
+    assignments: [
+      fullTime('a1', 'w1', 'ramot', 10000),
+      fullTime('a2', 'w2', 'ramot', 8000),
+      fullTime('a3', 'w3', 'asher', 9000),
+    ],
+    actuals: [{ id: 'm1', assignmentId: 'a3', month: '2026-08', actualHours: 0, actualSessions: 0 }],
+  }, '2026-08');
+  const t = report.totals;
+  assert.strictEqual(t.actualConfirmed + t.estimated + t.missingDataCost, t.projectedTotal);
+  assert.strictEqual(lineOf(report, 'a2').bucket, 'missing', 'a BLANK date still goes to missing-data');
+  assert.strictEqual(lineOf(report, 'a1').missingStartDate, false, 'a floor does not');
+});
+
+test('the floor rule is named, with its alternative, rather than being folklore', () => {
+  assert.ok(E.PAYROLL_FLOOR_HANDLINGS.includes(E.PAYROLL_FLOOR_HANDLING));
+  assert.ok(E.PAYROLL_FLOOR_HANDLINGS.includes('missing_data'), 'the other choice is documented');
+  assert.ok(E.RULES_TO_CONFIRM.some(r => r.id === 'PAYROLL_FLOOR_HANDLING'));
+});

@@ -398,7 +398,7 @@ function fakeSheet(rows) {
   return sh;
 }
 
-const HEADERS = ['id', 'name', 'notes', 'created_at', 'shift_commitment', 'start_date', 'gmach_month', 'phone'];
+const HEADERS = ['id', 'name', 'notes', 'created_at', 'shift_commitment', 'start_date', 'gmach_month', 'phone', 'start_date_source'];
 
 test('createWorker persists phone in column 8 as TEXT (number format "@") and echoes it', () => {
   const ctx = loadCtx();
@@ -514,9 +514,14 @@ test('the feed authorizes via its own property through the constant-time compara
   assert.ok(/case 'getGuidesForCoordinators'/.test(gs) === false, 'GET-only: never a doPost case');
 });
 
-test('HEADERS_WORKERS: phone is APPENDED LAST — every earlier column keeps its index', () => {
+test('HEADERS_WORKERS: phone keeps index 7 — later columns are APPENDED after it', () => {
   assert.deepStrictEqual(parseStringArray('HEADERS_WORKERS'), HEADERS);
+  assert.strictEqual(HEADERS.indexOf('phone'), 7, 'phone must never move');
   assert.ok(/phone: formatPhoneCell\(r\[7\]\)/.test(gs), 'readWorkersSafe reads index 7 as phone');
+  // start_date_source was appended by the payroll-verified fixes. The rule
+  // it must obey is the one this test exists for: it goes on the END, so
+  // every column the feeds read keeps its position.
+  assert.strictEqual(HEADERS[HEADERS.length - 1], 'start_date_source');
 });
 test('index.html: the worker form carries the phone field and posts it on create + update', () => {
   const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8');
