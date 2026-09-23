@@ -360,6 +360,8 @@ const MIGRATION_NOTE_COVERAGE = 'יובא ממודל ישן';
 // ---------- entry points ----------
 
 function doGet(e) {
+  // Every doGet path is a read: never flush the bundle cache from here.
+  READ_ONLY_EXECUTION_ = true;
   // Read-only guide feed for the hadrachot app. Routed BEFORE the main
   // SHARED_SECRET gate and authorized ONLY by HADRACHOT_READ_SECRET (see
   // the "Hadrachot read feed" section below) — the roster secret never
@@ -381,68 +383,68 @@ function doGet(e) {
   if (e && e.parameter && e.parameter.action === 'getGuidesForCoordinators') {
     return handleCoordinatorsRead_(e);
   }
+  // Everything below is the main app's one read. Mark the execution
+  // read-only so opening the spreadsheet does not flush the bundle cache
+  // (see ss()). The feeds above are read-only too, but they are routed first
+  // and never reach here.
+  READ_ONLY_EXECUTION_ = true;
+  // action=getInitialBundle is the explicit name for the default read — the
+  // proxy calls doGet with no action and gets the same bundle.
   return handle(e, function () {
-    const houses = {};
-    HOUSE_IDS.forEach(function (h) { houses[h] = readLegacyHouseSafe(h); });
-    return {
-      // v3 shape
-      workers: readWorkersSafe(),
-      assignments: readAssignmentsSafe(),
-      absences: readAbsencesSafe(),
-      coverages: readCoveragesSafe(),
-      archiveV3: readArchiveV3Safe(),
-      monthlyActuals: readMonthlyActualsSafe(),
-      budgets: readBudgetsSafe(),
-      hearings: readHearingsSafe(),
-      // Per-consumer sync status for the «סטטוס סנכרון» panel. Missing tab
-      // (nothing has pulled yet) → [].
-      feedLog: readFeedLogSafe(),
-      // legacy passthrough — empty arrays/objects when tabs are missing
-      // (e.g. after finalizeV3 or on a fresh v3-only install).
-      houses: houses,
-      events: readLegacyEventsSafe(),
-      archive: readLegacyArchiveSafe(),
-      _compat: true,
-    };
+    return getInitialBundle_();
   });
 }
 
 function doPost(e) {
+  READ_ONLY_EXECUTION_ = false;
   return handle(e, function () {
-    const body = parseBody(e);
-    let result;
-    switch (body.action) {
-      case 'createWorker':         result = createWorker(body); break;
-      case 'updateWorker':         result = updateWorker(body); break;
-      case 'deleteWorker':         result = deleteWorker(body); break;
-      case 'setWorkerStartDates':  result = setWorkerStartDates(body); break;
-      case 'addAssignment':        result = addAssignment(body); break;
-      case 'updateAssignment':     result = updateAssignment(body); break;
-      case 'deleteAssignment':     result = deleteAssignment(body); break;
-      case 'moveAssignment':       result = moveAssignment(body); break;
-      case 'terminateAssignment':  result = terminateAssignment(body); break;
-      case 'logAbsence':           result = logAbsence(body); break;
-      case 'endAbsence':           result = endAbsence(body); break;
-      case 'deleteAbsence':        result = deleteAbsence(body); break;
-      case 'addCoverage':          result = addCoverage(body); break;
-      case 'deleteCoverage':       result = deleteCoverage(body); break;
-      case 'upsertMonthlyActuals': result = upsertMonthlyActuals(body); break;
-      case 'getMonthlyActuals':    return getMonthlyActuals(body);
-      case 'setBudget':            result = setBudget(body); break;
-      case 'getBudgets':           return getBudgets(body);
-      case 'getHearings':          return getHearings(body);
-      case 'addHearing':           result = addHearing(body); break;
-      case 'updateHearing':        result = updateHearing(body); break;
-      case 'deleteHearing':        result = deleteHearing(body); break;
-      default: throw httpError(400, 'unknown action');
+    // Every POST may write. Drop the cached read bundle before the write (so
+    // a read that starts now cannot be served the old snapshot) AND after it
+    // — success or failure — so a read that ran concurrently cannot leave a
+    // pre-write copy behind. Only reached once the caller is authorized.
+    invalidateBundleCache_();
+    try {
+      return doPostAction_(e);
+    } finally {
+      invalidateBundleCache_();
     }
-    // Rebuild the NewGuides digest after any write that can change a guide's
-    // name / house / role / start date. Best-effort — a digest failure must
-    // never fail the user's mutation (see rebuildDigestSafe). The periodic
-    // trigger installed by installDigestTrigger() is the backstop.
-    if (DIGEST_REBUILD_ACTIONS.indexOf(body.action) >= 0) rebuildDigestSafe();
-    return result;
   });
+}
+
+function doPostAction_(e) {
+  const body = parseBody(e);
+  let result;
+  switch (body.action) {
+    case 'createWorker':         result = createWorker(body); break;
+    case 'updateWorker':         result = updateWorker(body); break;
+    case 'deleteWorker':         result = deleteWorker(body); break;
+    case 'setWorkerStartDates':  result = setWorkerStartDates(body); break;
+    case 'addAssignment':        result = addAssignment(body); break;
+    case 'updateAssignment':     result = updateAssignment(body); break;
+    case 'deleteAssignment':     result = deleteAssignment(body); break;
+    case 'moveAssignment':       result = moveAssignment(body); break;
+    case 'terminateAssignment':  result = terminateAssignment(body); break;
+    case 'logAbsence':           result = logAbsence(body); break;
+    case 'endAbsence':           result = endAbsence(body); break;
+    case 'deleteAbsence':        result = deleteAbsence(body); break;
+    case 'addCoverage':          result = addCoverage(body); break;
+    case 'deleteCoverage':       result = deleteCoverage(body); break;
+    case 'upsertMonthlyActuals': result = upsertMonthlyActuals(body); break;
+    case 'getMonthlyActuals':    return getMonthlyActuals(body);
+    case 'setBudget':            result = setBudget(body); break;
+    case 'getBudgets':           return getBudgets(body);
+    case 'getHearings':          return getHearings(body);
+    case 'addHearing':           result = addHearing(body); break;
+    case 'updateHearing':        result = updateHearing(body); break;
+    case 'deleteHearing':        result = deleteHearing(body); break;
+    default: throw httpError(400, 'unknown action');
+  }
+  // Rebuild the NewGuides digest after any write that can change a guide's
+  // name / house / role / start date. Best-effort — a digest failure must
+  // never fail the user's mutation (see rebuildDigestSafe). The periodic
+  // trigger installed by installDigestTrigger() is the backstop.
+  if (DIGEST_REBUILD_ACTIONS.indexOf(body.action) >= 0) rebuildDigestSafe();
+  return result;
 }
 
 // Error fields a thrower may attach that are safe to send back to the
@@ -510,10 +512,27 @@ function httpError(status, message) {
 
 // ---------- sheet plumbing ----------
 
+// The spreadsheet handle, opened ONCE per execution. Every reader used to
+// call SpreadsheetApp.openById again — the page-load read opened the same
+// file ~23 times (9 v3 tabs + legacy tabs tried under two names each), and
+// openById is one of the slowest calls in Apps Script. Globals are reset
+// for every execution, so this memo can never outlive one request.
+var SS_MEMO_ = null;
+var SS_MEMO_ID_ = null;
+// true only for executions that are known reads (every doGet path). Any
+// OTHER execution that opens the spreadsheet — doPost, an editor-run
+// migration, a trigger — flushes the read-bundle cache on first open: the
+// safe default is "might write".
+var READ_ONLY_EXECUTION_ = false;
+
 function ss() {
   const id = PropertiesService.getScriptProperties().getProperty('SHEET_ID');
   if (!id) throw httpError(500, 'SHEET_ID script property is not set');
-  return SpreadsheetApp.openById(id);
+  if (SS_MEMO_ && SS_MEMO_ID_ === id) return SS_MEMO_;
+  if (!READ_ONLY_EXECUTION_) invalidateBundleCache_();
+  SS_MEMO_ = SpreadsheetApp.openById(id);
+  SS_MEMO_ID_ = id;
+  return SS_MEMO_;
 }
 
 function sheetByName(name) {
@@ -891,6 +910,181 @@ function validateBudget(b) {
     instructorsAmount = validateNonNegative(b.instructorsAmount, 'instructorsAmount', BUDGET_MAX, 0);
   }
   return { house: b.house, month: month, amount: amount, instructorsAmount: instructorsAmount };
+}
+
+// ---------- initial bundle (the page-load read) + CacheService ----------
+//
+// getInitialBundle_ is the ONE read the app makes on load: every tab, one
+// getDataRange() read per tab, one spreadsheet open (see ss()). Its output
+// is identical to calling each reader separately (pinned by
+// tests/perf-bundle.test.js).
+//
+// The cached part (everything except feedLog) is kept in the script cache
+// for BUNDLE_CACHE_TTL_S. feedLog is always read fresh: the consumer feeds
+// write it on every pull, and flushing the bundle on every feed pull would
+// defeat the cache.
+//
+// Invalidation is by VERSION TOKEN: the chunks live under
+// bundle:<ver>:<i>, and invalidateBundleCache_() swaps <ver> for a new random
+// value. A read that started before a write stores its (old) copy under the
+// old token, where nobody looks. If the token itself is evicted, the next
+// read mints a new one — i.e. eviction is a miss, never a stale hit.
+//
+// CacheService caps a value at 100 KB, so the JSON is split into chunks of
+// BUNDLE_CHUNK_CHARS characters (≤ 3 bytes each in UTF-8 → ≤ 90 KB). A
+// bundle bigger than BUNDLE_MAX_CHUNKS chunks is simply not cached.
+//
+// Everything here is best-effort: any CacheService failure (or no
+// CacheService at all) falls back to reading the Sheet. Stale bound for an
+// edit made by hand in the Sheet, which no code path can see: the TTL.
+const BUNDLE_CACHE_TTL_S = 300;
+const BUNDLE_CACHE_VER_KEY = 'bundle:ver';
+const BUNDLE_CHUNK_CHARS = 30000;
+const BUNDLE_MAX_CHUNKS = 200;
+
+function scriptCache_() {
+  try {
+    if (typeof CacheService === 'undefined' || !CacheService) return null;
+    return CacheService.getScriptCache() || null;
+  } catch (err) {
+    return null;
+  }
+}
+
+function invalidateBundleCache_() {
+  const c = scriptCache_();
+  if (!c) return;
+  try {
+    c.put(BUNDLE_CACHE_VER_KEY, newId('v'), 21600);
+  } catch (err) {
+    try { c.remove(BUNDLE_CACHE_VER_KEY); } catch (err2) { /* best-effort */ }
+  }
+}
+
+// Editor-run: drop the cached bundle by hand (e.g. after editing the Sheet
+// directly and not wanting to wait out the TTL).
+function clearBundleCacheNow() {
+  invalidateBundleCache_();
+  return 'bundle cache cleared';
+}
+
+function bundleCacheVersion_(c) {
+  let v = c.get(BUNDLE_CACHE_VER_KEY);
+  if (!v) {
+    v = newId('v');
+    c.put(BUNDLE_CACHE_VER_KEY, v, 21600);
+  }
+  return v;
+}
+
+function readBundleCache_(c, ver) {
+  const n = Number(c.get('bundle:' + ver + ':n'));
+  if (!n || n < 1 || n > BUNDLE_MAX_CHUNKS) return null;
+  const keys = [];
+  for (let i = 0; i < n; i++) keys.push('bundle:' + ver + ':' + i);
+  const got = c.getAll(keys) || {};
+  const parts = [];
+  for (let i = 0; i < keys.length; i++) {
+    if (typeof got[keys[i]] !== 'string') return null;
+    parts.push(got[keys[i]]);
+  }
+  try { return JSON.parse(parts.join('')); } catch (err) { return null; }
+}
+
+// Split a string into chunks of at most `size` characters without cutting a
+// UTF-16 surrogate pair in half (a lone surrogate would not survive storage).
+function chunkString_(str, size) {
+  const out = [];
+  let i = 0;
+  while (i < str.length) {
+    let end = Math.min(i + size, str.length);
+    if (end < str.length) {
+      const code = str.charCodeAt(end - 1);
+      if (code >= 0xD800 && code <= 0xDBFF) end--;
+    }
+    out.push(str.slice(i, end));
+    i = end;
+  }
+  return out;
+}
+
+function writeBundleCache_(c, ver, core) {
+  const chunks = chunkString_(JSON.stringify(core), BUNDLE_CHUNK_CHARS);
+  if (!chunks.length || chunks.length > BUNDLE_MAX_CHUNKS) return false;
+  const map = {};
+  chunks.forEach(function (part, i) { map['bundle:' + ver + ':' + i] = part; });
+  c.putAll(map, BUNDLE_CACHE_TTL_S);
+  // The count goes in LAST: a reader never sees a count whose chunks are
+  // not all there yet.
+  c.put('bundle:' + ver + ':n', String(chunks.length), BUNDLE_CACHE_TTL_S);
+  return true;
+}
+
+// The cacheable part of the bundle — every tab except FeedLog.
+function computeInitialBundleCore_() {
+  const houses = {};
+  HOUSE_IDS.forEach(function (h) { houses[h] = readLegacyHouseSafe(h); });
+  return {
+    // v3 shape
+    workers: readWorkersSafe(),
+    assignments: readAssignmentsSafe(),
+    absences: readAbsencesSafe(),
+    coverages: readCoveragesSafe(),
+    archiveV3: readArchiveV3Safe(),
+    monthlyActuals: readMonthlyActualsSafe(),
+    budgets: readBudgetsSafe(),
+    hearings: readHearingsSafe(),
+    // legacy passthrough — empty arrays/objects when tabs are missing
+    // (e.g. after finalizeV3 or on a fresh v3-only install).
+    houses: houses,
+    events: readLegacyEventsSafe(),
+    archive: readLegacyArchiveSafe(),
+  };
+}
+
+function assembleBundle_(core, feedLog, cacheState) {
+  return {
+    workers: core.workers,
+    assignments: core.assignments,
+    absences: core.absences,
+    coverages: core.coverages,
+    archiveV3: core.archiveV3,
+    monthlyActuals: core.monthlyActuals,
+    budgets: core.budgets,
+    hearings: core.hearings,
+    // Per-consumer sync status for the «סטטוס סנכרון» panel. Missing tab
+    // (nothing has pulled yet) → []. Never cached (see above).
+    feedLog: feedLog,
+    houses: core.houses,
+    events: core.events,
+    archive: core.archive,
+    _compat: true,
+    // 'hit' | 'miss' | 'off' — read by the Express proxy for its timing log
+    // and stripped there; the browser never sees it.
+    _gasCache: cacheState,
+  };
+}
+
+function getInitialBundle_() {
+  const c = scriptCache_();
+  let core = null;
+  let ver = null;
+  if (c) {
+    try {
+      ver = bundleCacheVersion_(c);
+      core = readBundleCache_(c, ver);
+    } catch (err) {
+      core = null;
+    }
+  }
+  const hit = !!core;
+  if (!core) {
+    core = computeInitialBundleCore_();
+    if (c && ver) {
+      try { writeBundleCache_(c, ver, core); } catch (err) { /* best-effort */ }
+    }
+  }
+  return assembleBundle_(core, readFeedLogSafe(), c ? (hit ? 'hit' : 'miss') : 'off');
 }
 
 // ---------- v3 readers ----------
