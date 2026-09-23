@@ -167,8 +167,7 @@ test('computeGuidesForCoordinators_ emits exactly the contracted key set', () =>
   assert.ok(rows.length > 0, 'fixture should yield entries');
   rows.forEach(g => {
     assert.deepStrictEqual(Object.keys(g).sort(),
-      ['active', 'allowedShifts', 'assignmentIds', 'houses', 'minimumsByHouse', 'name', 'phone',
-        'startDate', 'weekdayMin', 'weekendMin', 'workerId']);
+      ['active', 'assignmentIds', 'houses', 'name', 'phone', 'startDate', 'workerId']);
     // The original five, unchanged.
     assert.strictEqual(typeof g.name, 'string');
     assert.strictEqual(typeof g.phone, 'string');

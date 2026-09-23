@@ -916,12 +916,6 @@ tr.sync-never td{color:var(--muted)}
 .field input::placeholder,
 .field textarea::placeholder{color:var(--muted)}
 .field textarea{resize:vertical;min-height:72px}
-.shift-checks{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center}
-.shift-checks .shift-checks-title{display:block;width:100%;font-size:12px;font-weight:600;color:var(--ink-soft);letter-spacing:0.04em}
-.shift-checks .shift-check{display:inline-flex;align-items:center;gap:6px}
-.field.shift-checks input[type=checkbox]{width:auto;padding:0;margin:0;accent-color:var(--accent-2)}
-.field.shift-checks .shift-check label{display:inline;margin:0;text-transform:none;font-size:14px;color:var(--ink)}
-.shift-checks .hint{width:100%}
 .field select{
   appearance:none;
   -webkit-appearance:none;
@@ -1161,28 +1155,6 @@ tr.sync-never td{color:var(--muted)}
           <label for="w_roleDetail" id="w_roleDetail_label">פירוט תפקיד</label>
           <input id="w_roleDetail" type="text" maxlength="80"/>
         </div>
-      <!-- Guide shift minimum, PER PLACEMENT (this house). A mirror of the
-           ezone-coordinators Guides columns weekdayMin / weekendMin /
-           allowedShifts — staffing is the source of truth and the
-           coordinators feed carries them. Shown only for מדריך/ה. Blank =
-           not set (the feed sends null, never 0). -->
-      <div class="field hidden" id="w_min_wrap">
-        <label for="w_weekdayMin">מינימום משמרות חול בשבוע</label>
-        <input id="w_weekdayMin" type="number" min="0" max="6" step="1" inputmode="numeric" placeholder="לא הוגדר"/>
-        <div class="hint">0–6 משמרות בשבוע · ריק = לא הוגדר</div>
-      </div>
-      <div class="field hidden" id="w_minWe_wrap">
-        <label for="w_weekendMin">מינימום משמרות סופ״ש בחודש</label>
-        <input id="w_weekendMin" type="number" min="0" max="10" step="1" inputmode="numeric" placeholder="לא הוגדר"/>
-        <div class="hint">0–10 משמרות שישי-שבת בחודש · ריק = לא הוגדר</div>
-      </div>
-      <div class="field hidden shift-checks" id="w_allowed_wrap" role="group" aria-labelledby="w_allowed_title">
-        <span class="shift-checks-title" id="w_allowed_title">משמרות מותרות</span>
-        <span class="shift-check"><input type="checkbox" id="w_shift_0" value="בוקר"/><label for="w_shift_0">בוקר</label></span>
-        <span class="shift-check"><input type="checkbox" id="w_shift_1" value="אחר צהריים"/><label for="w_shift_1">אחר צהריים</label></span>
-        <span class="shift-check"><input type="checkbox" id="w_shift_2" value="לילה"/><label for="w_shift_2">לילה</label></span>
-        <div class="hint">ללא סימון = לא הוגדר · שלושתן = כל המשמרות</div>
-      </div>
         <div class="field">
           <label for="w_type">סוג העסקה</label>
           <select id="w_type" onchange="onWorkerTypeChange()"></select>
@@ -1337,28 +1309,6 @@ tr.sync-never td{color:var(--muted)}
       <div class="field hidden" id="asg_roleDetail_wrap">
         <label for="asg_roleDetail" id="asg_roleDetail_label">פירוט תפקיד</label>
         <input id="asg_roleDetail" type="text" maxlength="80"/>
-      </div>
-      <!-- Guide shift minimum, PER PLACEMENT (this house). A mirror of the
-           ezone-coordinators Guides columns weekdayMin / weekendMin /
-           allowedShifts — staffing is the source of truth and the
-           coordinators feed carries them. Shown only for מדריך/ה. Blank =
-           not set (the feed sends null, never 0). -->
-      <div class="field hidden" id="asg_min_wrap">
-        <label for="asg_weekdayMin">מינימום משמרות חול בשבוע</label>
-        <input id="asg_weekdayMin" type="number" min="0" max="6" step="1" inputmode="numeric" placeholder="לא הוגדר"/>
-        <div class="hint">0–6 משמרות בשבוע · ריק = לא הוגדר</div>
-      </div>
-      <div class="field hidden" id="asg_minWe_wrap">
-        <label for="asg_weekendMin">מינימום משמרות סופ״ש בחודש</label>
-        <input id="asg_weekendMin" type="number" min="0" max="10" step="1" inputmode="numeric" placeholder="לא הוגדר"/>
-        <div class="hint">0–10 משמרות שישי-שבת בחודש · ריק = לא הוגדר</div>
-      </div>
-      <div class="field hidden shift-checks" id="asg_allowed_wrap" role="group" aria-labelledby="asg_allowed_title">
-        <span class="shift-checks-title" id="asg_allowed_title">משמרות מותרות</span>
-        <span class="shift-check"><input type="checkbox" id="asg_shift_0" value="בוקר"/><label for="asg_shift_0">בוקר</label></span>
-        <span class="shift-check"><input type="checkbox" id="asg_shift_1" value="אחר צהריים"/><label for="asg_shift_1">אחר צהריים</label></span>
-        <span class="shift-check"><input type="checkbox" id="asg_shift_2" value="לילה"/><label for="asg_shift_2">לילה</label></span>
-        <div class="hint">ללא סימון = לא הוגדר · שלושתן = כל המשמרות</div>
       </div>
       <div class="field">
         <label for="asg_type">סוג העסקה</label>
@@ -2823,7 +2773,6 @@ function openWorker(workerId, house){
   fillWorkerRoleDropdown(asg ? asg.role : ROLE_OPTIONS[0]);
   fillWorkerTypeDropdown(asg ? asg.employmentType : 'full_time');
   document.getElementById('w_roleDetail').value = asg ? (asg.roleDetail || '') : '';
-  setShiftMinimumFields('w', asg);
   ALL_COST_FIELDS.forEach(f => {
     const el = document.getElementById('w_' + f);
     if (el) el.value = asg && asg[f] ? asg[f] : '';
@@ -2895,55 +2844,6 @@ function fillWorkerTypeDropdown(selectedType){
     `<option value="${k}"${k===selectedType?' selected':''}>${escapeHtml(EMPLOYMENT_TYPE_LABELS[k])}</option>`
   ).join('');
 }
-/* ---------- guide shift minimum (per placement) ----------
-   Mirror of the ezone-coordinators Guides columns. Same ids (the Hebrew
-   shift labels) and ranges as lib/validate.js / Code.gs; the server is
-   still the source of truth. */
-const GUIDE_SHIFT_LABELS = ['בוקר', 'אחר צהריים', 'לילה'];
-const GUIDE_WEEKDAY_MIN_MAX = 6;
-const GUIDE_WEEKEND_MIN_MAX = 10;
-const MIN_WRAPS = ['_min_wrap', '_minWe_wrap', '_allowed_wrap'];
-
-function setShiftMinimumFields(prefix, asg){
-  const v = k => (asg && asg[k] !== null && asg[k] !== undefined) ? asg[k] : '';
-  document.getElementById(prefix + '_weekdayMin').value = v('weekdayMin');
-  document.getElementById(prefix + '_weekendMin').value = v('weekendMin');
-  const allowed = String(v('allowedShifts')).split(',');
-  GUIDE_SHIFT_LABELS.forEach((l, i) => {
-    document.getElementById(prefix + '_shift_' + i).checked = allowed.indexOf(l) >= 0;
-  });
-}
-
-// Show for מדריך/ה only; any other role hides AND clears, so a stray value
-// can never be saved on a non-guide placement.
-function toggleShiftMinimumFields(prefix, role){
-  const guide = role === 'מדריך/ה';
-  MIN_WRAPS.forEach(w => document.getElementById(prefix + w).classList.toggle('hidden', !guide));
-  if (!guide) setShiftMinimumFields(prefix, null);
-}
-
-// → { weekdayMin, weekendMin, allowedShifts } (null = not set), or null
-// after showing the Hebrew error when a value is out of range.
-function readShiftMinimumFields(prefix, role){
-  if (role !== 'מדריך/ה') return { weekdayMin: null, weekendMin: null, allowedShifts: null };
-  const num = (id, max, label) => {
-    const raw = document.getElementById(prefix + '_' + id).value.trim();
-    if (raw === '') return null;
-    const n = Number(raw);
-    if (!Number.isInteger(n) || n < 0 || n > max){
-      toast(label + ' — מספר שלם בין 0 ל-' + max, true);
-      return undefined;
-    }
-    return n;
-  };
-  const weekdayMin = num('weekdayMin', GUIDE_WEEKDAY_MIN_MAX, 'מינימום משמרות חול בשבוע');
-  if (weekdayMin === undefined) return null;
-  const weekendMin = num('weekendMin', GUIDE_WEEKEND_MIN_MAX, 'מינימום משמרות סופ״ש בחודש');
-  if (weekendMin === undefined) return null;
-  const picked = GUIDE_SHIFT_LABELS.filter((l, i) => document.getElementById(prefix + '_shift_' + i).checked);
-  return { weekdayMin, weekendMin, allowedShifts: picked.length ? picked.join(',') : null };
-}
-
 function onWorkerRoleChange(){
   const role = document.getElementById('w_role').value;
   const wrap = document.getElementById('w_roleDetail_wrap');
@@ -2970,7 +2870,7 @@ function onWorkerRoleChange(){
   } else {
     scWrap.classList.add('hidden');
     document.getElementById('w_shiftCommitment').value = '';
-  }  toggleShiftMinimumFields('w', role);
+  }
 }
 function onWorkerTypeChange(){
   const t = document.getElementById('w_type').value;
@@ -3137,10 +3037,6 @@ async function saveWorker(){
     if (!statusDate){ toast('בחל"ד/חל"ת יש להזין תאריך תחילה', true); return; }
   }
 
-  // Guide shift minimum for this house (null = not set).
-  const minimums = readShiftMinimumFields('w', role);
-  if (!minimums) return;
-
   const wasEdit = !!editingWorker.id;
   const assignmentId = editingWorker.assignmentId;
 
@@ -3184,7 +3080,6 @@ async function saveWorker(){
     const assignment = Object.assign(
       { workerId, house, role, roleDetail, employmentType, notes: '', allowance, status, statusDate },
       costFields,
-      minimums,
     );
     const asgPayload = assignmentId
       ? { action: 'updateAssignment', id: assignmentId, assignment }
@@ -3416,7 +3311,6 @@ function onAssignmentRoleChange(){
     wrap.classList.add('hidden');
     inp.value = '';
   }
-  toggleShiftMinimumFields('asg', role);
 }
 
 function onAssignmentTypeChange(){
@@ -3475,7 +3369,6 @@ function openAssignment(opts){
     el.value = a && a[f] ? a[f] : '';
   });
   document.getElementById('asg_roleDetail').value = a ? (a.roleDetail || '') : '';
-  setShiftMinimumFields('asg', a);
   document.getElementById('asg_notes').value = a ? (a.notes || '') : '';
   // Allowance: prefill on edit, default to none on create. Coerce to a
   // whitelisted string so the <select> matches an existing <option>.
@@ -3529,14 +3422,9 @@ async function saveAssignment(){
   const allowanceRaw = Number(document.getElementById('asg_allowance').value);
   const allowance = [0, 2000, 6000].indexOf(allowanceRaw) >= 0 ? allowanceRaw : 0;
 
-  // Guide shift minimum (null = not set).
-  const minimums = readShiftMinimumFields('asg', role);
-  if (!minimums) return;
-
   const assignment = Object.assign(
     { workerId, house, role, roleDetail, employmentType, notes, allowance },
     costFields,
-    minimums,
   );
 
   setBusy('assignmentSaveBtn', true);
