@@ -64,7 +64,8 @@ const H = {
     'salary', 'pct', 'hourly_rate', 'est_hours', 'session_rate', 'est_sessions',
     'retainer_amount', 'notes', 'created_at', 'allowance', 'status', 'status_date',
     'rate_individual', 'sessions_individual', 'rate_group', 'sessions_group',
-    'rate_external', 'external_patients', 'effective_from'],
+    'rate_external', 'external_patients', 'effective_from',
+    'weekday_min', 'weekend_min', 'allowed_shifts'],
   absences: ['id', 'worker_id', 'house', 'start_date', 'end_date', 'reason_type',
     'reason_detail', 'notes', 'status', 'created_at'],
   coverages: ['id', 'absence_id', 'covering_worker_id', 'covering_house', 'receiving_house',
@@ -581,7 +582,9 @@ test('every appended column is at the END of its header array', () => {
   assert.deepStrictEqual(cov, H.coverages);
   assert.deepStrictEqual(constOf(ctx, 'HEADERS_AUDIT_LOG'), H.audit_log);
   // The columns that existed before Phase 2 keep their exact positions.
-  assert.strictEqual(asg.indexOf('effective_from'), asg.length - 1);
+  // effective_from was appended at 24; the guide shift minimum after it.
+  assert.strictEqual(asg.indexOf('effective_from'), 24);
+  assert.deepStrictEqual(asg.slice(25), ['weekday_min', 'weekend_min', 'allowed_shifts']);
   ['id', 'absence_id', 'covering_worker_id', 'covering_house', 'receiving_house',
     'start_date', 'end_date', 'extra_payment', 'notes', 'created_at']
     .forEach((h, i) => assert.strictEqual(cov[i], h, h + ' must stay at index ' + i));

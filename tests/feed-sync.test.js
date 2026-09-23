@@ -152,7 +152,8 @@ test('the coordinators feed adds workerId and assignmentIds, keeping all five or
 
   const two = byName['מדריכה בשני בתים'];
   assert.deepStrictEqual(Object.keys(two).sort(),
-    ['active', 'assignmentIds', 'houses', 'name', 'phone', 'startDate', 'workerId']);
+    ['active', 'allowedShifts', 'assignmentIds', 'houses', 'minimumsByHouse', 'name', 'phone',
+      'startDate', 'weekdayMin', 'weekendMin', 'workerId']);
   assert.strictEqual(two.workerId, 'w1');
   assert.deepStrictEqual(two.assignmentIds, ['a1', 'a2'],
     'one entry per WORKER, so the ids are a sorted list — a scalar would be a lie here');
@@ -347,7 +348,7 @@ test('the feed_log headers are append-only and the consumer list is frozen', () 
   const ctx = loadCtx({}, { workers: [[]] });
   assert.deepStrictEqual(constOf(ctx, 'HEADERS_FEED_LOG'), FEED_LOG_HEADERS);
   assert.deepStrictEqual(constOf(ctx, 'FEED_CONSUMERS'),
-    ['coordinators', 'therapists', 'hadrachot']);
+    ['coordinators', 'therapists', 'hadrachot', 'coordinators_therapists']);
 });
 
 test('the main doGet payload carries feedLog for the sync-status panel', () => {

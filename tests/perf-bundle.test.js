@@ -376,7 +376,7 @@ const HEADERS_SNAPSHOT = {
   HEADERS_WORKERS: ['id', 'name', 'notes', 'created_at', 'shift_commitment', 'start_date', 'gmach_month', 'phone', 'start_date_source'],
   HEADERS_AUDIT_LOG: ['ts', 'action', 'entity', 'entity_id', 'field', 'before', 'after', 'reason'],
   HEADERS_FEED_LOG: ['consumer', 'last_served_at', 'last_row_count', 'serve_count', 'status'],
-  HEADERS_ASSIGNMENTS: ['id', 'worker_id', 'house', 'role', 'role_detail', 'employment_type', 'salary', 'pct', 'hourly_rate', 'est_hours', 'session_rate', 'est_sessions', 'retainer_amount', 'notes', 'created_at', 'allowance', 'status', 'status_date', 'rate_individual', 'sessions_individual', 'rate_group', 'sessions_group', 'rate_external', 'external_patients', 'effective_from'],
+  HEADERS_ASSIGNMENTS: ['id', 'worker_id', 'house', 'role', 'role_detail', 'employment_type', 'salary', 'pct', 'hourly_rate', 'est_hours', 'session_rate', 'est_sessions', 'retainer_amount', 'notes', 'created_at', 'allowance', 'status', 'status_date', 'rate_individual', 'sessions_individual', 'rate_group', 'sessions_group', 'rate_external', 'external_patients', 'effective_from', 'weekday_min', 'weekend_min', 'allowed_shifts'],
   HEADERS_ABSENCES: ['id', 'worker_id', 'house', 'start_date', 'end_date', 'reason_type', 'reason_detail', 'notes', 'status', 'created_at'],
   HEADERS_COVERAGES: ['id', 'absence_id', 'covering_worker_id', 'covering_house', 'receiving_house', 'start_date', 'end_date', 'extra_payment', 'notes', 'created_at', 'replaced_assignment_id', 'role', 'shift_count', 'approval_status', 'approved_by', 'cancelled'],
   HEADERS_MONTHLY_ACTUALS: ['id', 'assignment_id', 'month', 'actual_hours', 'actual_sessions', 'note', 'created_at', 'updated_at'],
