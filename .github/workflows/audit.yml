@@ -2,17 +2,24 @@ name: Dependency audit
 
 # Fails when a PRODUCTION dependency has a high or critical advisory.
 #
-# Deliberately a SEPARATE workflow from "Tests": Railway gates deploys on the
-# Tests check, and a newly published advisory must never silently block a
-# deploy of unrelated work. This check goes red and is seen; it does not stop
-# the deploy. devDependencies (jsdom and its tree, used only by the test
-# suite) are excluded with --omit=dev — they never run in production.
+# NEVER runs on a push to main. Railway's "wait for CI" gates a deploy on
+# EVERY workflow that runs on a push to the deployed branch — not just
+# "Tests" — so an audit on push:main would skip deploys the day a new
+# advisory is published against an unchanged lockfile. Instead it runs:
+#   - on pull requests into main (a PR that adds a vulnerable dep goes red),
+#   - weekly (Sunday 06:00 UTC), to catch advisories published since,
+#   - on demand (Actions tab → Run workflow).
+# It is also kept OUT of the Tests workflow for the same reason.
+# devDependencies (jsdom and its tree, used only by the test suite) are
+# excluded with --omit=dev — they never run in production.
 
 on:
   pull_request:
-  push:
     branches:
       - main
+  schedule:
+    - cron: '0 6 * * 0'
+  workflow_dispatch:
 
 permissions:
   contents: read
