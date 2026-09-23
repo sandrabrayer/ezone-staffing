@@ -152,8 +152,7 @@ test('the coordinators feed adds workerId and assignmentIds, keeping all five or
 
   const two = byName['מדריכה בשני בתים'];
   assert.deepStrictEqual(Object.keys(two).sort(),
-    ['active', 'allowedShifts', 'assignmentIds', 'houses', 'minimumsByHouse', 'name', 'phone',
-      'startDate', 'weekdayMin', 'weekendMin', 'workerId']);
+    ['active', 'assignmentIds', 'houses', 'name', 'phone', 'startDate', 'workerId']);
   assert.strictEqual(two.workerId, 'w1');
   assert.deepStrictEqual(two.assignmentIds, ['a1', 'a2'],
     'one entry per WORKER, so the ids are a sorted list — a scalar would be a lie here');

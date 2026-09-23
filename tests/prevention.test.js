@@ -582,7 +582,8 @@ test('every appended column is at the END of its header array', () => {
   assert.deepStrictEqual(cov, H.coverages);
   assert.deepStrictEqual(constOf(ctx, 'HEADERS_AUDIT_LOG'), H.audit_log);
   // The columns that existed before Phase 2 keep their exact positions.
-  // effective_from was appended at 24; the guide shift minimum after it.
+  // effective_from was appended at 24; 25-27 are RETIRED reserved positions
+  // (the dropped guide shift minimum) — kept so they are never reused.
   assert.strictEqual(asg.indexOf('effective_from'), 24);
   assert.deepStrictEqual(asg.slice(25), ['weekday_min', 'weekend_min', 'allowed_shifts']);
   ['id', 'absence_id', 'covering_worker_id', 'covering_house', 'receiving_house',
