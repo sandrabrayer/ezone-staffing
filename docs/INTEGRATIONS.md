@@ -30,6 +30,8 @@ its own Script Property secret — no secret unlocks another feed.
 | **Retry** | none on the staffing side. The consumer's sync takes `tryLock(2s)`; on failure it skips the sync entirely. |
 | **Failure visibility** | **consumer-side**: feed down ⇒ **zero writes**, the last-synced local roster is served, `rosterSource:'local'` and an amber «לא סונכרן מהסטאפינג» notice. **Staffing-side: the `feed_log` tab and the «סטטוס סנכרון» panel** (Phase 3) show when this consumer last pulled and how many rows it got. Amber past 24 h, grey if it has never pulled. |
 
+**Guide shift minimum (added):** each guide entry also carries `weekdayMin` (int 0–6, per week), `weekendMin` (int 0–10, per month) and `allowedShifts` (comma-joined `בוקר,אחר צהריים,לילה` in that order; all three = every shift) — the coordinators Guides columns, now owned by staffing **per placement** (`assignments.weekday_min / weekend_min / allowed_shifts`, HR edits them in the worker / assignment form). The scalar is the value shared by every current guide placement; it is `null` when not set **or** when the guide's houses differ — `minimumsByHouse` (`{ <house id>: { weekdayMin, weekendMin, allowedShifts } }`) always carries the exact per-house values. Unset is always `null`, never `0`. Archived-only guides: `null` and `{}`.
+
 ## 2. Therapists app — therapist roster
 
 | | |
@@ -48,6 +50,21 @@ its own Script Property secret — no secret unlocks another feed.
 | **Error handling** | same fail-closed `401`. Orphans and blank names skipped. |
 | **Retry** | none. Unset or unreachable ⇒ **no writes**; the last-synced list is served. |
 | **Failure visibility** | consumer-side amber «לא סונכרנה» toast; staffing-side the `feed_log` row and the «סטטוס סנכרון» panel, amber past 24 h. |
+
+## 2b. Coordinators app (רכזים) — therapist roster
+
+| | |
+|---|---|
+| **Source of truth** | staffing `workers` + `assignments` |
+| **Endpoint** | `GET <staffing /exec>?action=getTherapistsForCoordinators&secret=…` |
+| **Key** | staffing `COORDINATORS_READ_SECRET` — the **same** secret as the guides feed (no new secret); constant-time `secretMatches_`, fail-closed |
+| **Direction** | staffing → coordinators |
+| **Payload** | `{ therapists: [ { name, phone, role, active, houses, startDate } ], feedGeneratedAt }` — one entry **per worker**, sorted by name. **Nothing else** (no id, pay, rate, bank, notes, role_detail). |
+| **Selection** | CURRENT placements whose trimmed role ∈ `{ 'מטפל/ת', 'פסיכיאטר/ית' }`. `archive_v3` is **not** read — a terminated therapist is absent. |
+| **`role`** | `'פסיכיאטר/ית'` if any current therapist-role placement is psychiatry, else `'מטפל/ת'` |
+| **`active`** | `true` iff any therapist-role placement's status is `active`; חל"ד / חל"ת / final_settlement → `false` |
+| **`houses`** | sorted internal staffing house ids — the same convention as the guides feed (the consumer maps them) |
+| **Failure visibility** | `feed_log` consumer `coordinators_therapists` |
 
 ## 3. Hadrachot app (הדרכות) — supervision-relevant roster
 
@@ -95,7 +112,7 @@ its own Script Property secret — no secret unlocks another feed.
 |---|---|
 | **Endpoint** | `APPS_SCRIPT_URL` with `?secret=SHARED_SECRET` |
 | **Direction** | both (GET roster bundle, POST mutations) |
-| **Frequency** | every `/api/data` and `/api/action` |
+| **Frequency** | every `/api/action`; `/api/data` only on a proxy-cache MISS / background refresh (60 s fresh + 5 min stale, invalidated by every write — see `docs/perf-load.md`). Inside Apps Script the GET bundle is itself cached for 300 s in CacheService (`_gasCache`, stripped by the proxy) |
 | **Error handling** | non-JSON upstream → `502`; upstream `_status ≥ 400` is re-thrown with that status |
 | **Retry** | **none** — a transient Apps Script hiccup surfaces to Moran as an error |
 | **Failure visibility** | a Hebrew error in the UI; details in the Railway log |
@@ -106,7 +123,8 @@ its own Script Property secret — no secret unlocks another feed.
 
 | Feed | Current key set | May never do |
 |---|---|---|
-| `getGuidesForCoordinators` | `workerId`, `assignmentIds`, `name`, `phone`, `active`, `houses`, `startDate` | remove or rename any of them; change a worker name; expose money |
+| `getGuidesForCoordinators` | `workerId`, `assignmentIds`, `name`, `phone`, `active`, `houses`, `startDate`, `weekdayMin`, `weekendMin`, `allowedShifts`, `minimumsByHouse` | remove or rename any of them; change a worker name; expose money; send `0` for an unset minimum (unset = `null`) |
+| `getTherapistsForCoordinators` | `name`, `phone`, `role`, `active`, `houses`, `startDate` — exactly | add, remove or rename any key without a contract change; expose money or ids |
 | `getTherapistsForTherapists` | `workerId`, `assignmentIds`, `name`, `active`, `houses`, `startDate` | remove or rename any of them; expose money |
 | `getGuidesForHadrachot` | `workerId`, `assignmentId`, `name`, `house`, `role`, `active`, `startDate` | remove or rename any of them; expose `role_detail` or money |
 

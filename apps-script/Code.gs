@@ -163,7 +163,8 @@ const HEADERS_FEED_LOG = [
 ];
 // The three consumers, as ASCII keys. Also the order the sync-status panel
 // lists them in.
-const FEED_CONSUMERS = ['coordinators', 'therapists', 'hadrachot'];
+// APPEND-ONLY. 'coordinators_therapists' = getTherapistsForCoordinators.
+const FEED_CONSUMERS = ['coordinators', 'therapists', 'hadrachot', 'coordinators_therapists'];
 // APPEND-ONLY (columns 0-14 are the original v3 shape). Columns 15+ were
 // appended later and MUST stay in this order — read/write map by position:
 //   15 allowance, 16 status, 17 status_date  (fixes the leave-status bug —
@@ -185,7 +186,25 @@ const HEADERS_ASSIGNMENTS = [
   //    transfer date rather than from the 1st of the month. Blank on every
   //    earlier row, where the cost engine falls back to created_at.
   'effective_from',
+  // 25-27 the GUIDE shift minimum, per placement — a mirror of the
+  //    ezone-coordinators Guides columns of the same names (staffing is the
+  //    source of truth; coordinators reads them through
+  //    getGuidesForCoordinators). Blank = not set (the feed sends null,
+  //    never 0). Only meaningful on a מדריך/ה placement.
+  //    weekday_min    int 0–6, minimum weekday shifts per WEEK
+  //    weekend_min    int 0–10, minimum weekend shifts per MONTH
+  //    allowed_shifts comma-joined shift labels in canonical order
+  //                   (בוקר,אחר צהריים,לילה); all three = every shift
+  'weekday_min', 'weekend_min', 'allowed_shifts',
 ];
+
+// ---------- guide shift minimums (mirror of ezone-coordinators) ----------
+// Same ids and ranges as the coordinators app (apps-script/Code.gs SHIFTS,
+// WEEKDAY_MIN_MAX, WEEKEND_MIN_MAX there). Byte-exact Hebrew labels.
+const SHIFT_LABELS = ['בוקר', 'אחר צהריים', 'לילה'];
+const WEEKDAY_MIN_MAX = 6;
+const WEEKEND_MIN_MAX = 10;
+const SHIFT_MINIMUM_ROLE = 'מדריך/ה';
 // The `status` column carries a DERIVED value: 'future' before the start
 // date, 'active' between the dates, 'ended' after the end date. It is a
 // cached hint, recomputed on every read — the dates are the truth. 'future'
@@ -360,6 +379,8 @@ const MIGRATION_NOTE_COVERAGE = 'יובא ממודל ישן';
 // ---------- entry points ----------
 
 function doGet(e) {
+  // Every doGet path is a read: never flush the bundle cache from here.
+  READ_ONLY_EXECUTION_ = true;
   // Read-only guide feed for the hadrachot app. Routed BEFORE the main
   // SHARED_SECRET gate and authorized ONLY by HADRACHOT_READ_SECRET (see
   // the "Hadrachot read feed" section below) — the roster secret never
@@ -381,68 +402,74 @@ function doGet(e) {
   if (e && e.parameter && e.parameter.action === 'getGuidesForCoordinators') {
     return handleCoordinatorsRead_(e);
   }
+  // Read-only THERAPIST roster feed for the coordinators app. Same secret as
+  // the guides feed (COORDINATORS_READ_SECRET, constant-time, fail-closed);
+  // routed BEFORE the SHARED_SECRET gate like every feed.
+  if (e && e.parameter && e.parameter.action === 'getTherapistsForCoordinators') {
+    return handleCoordinatorsTherapistsRead_(e);
+  }
+  // Everything below is the main app's one read. Mark the execution
+  // read-only so opening the spreadsheet does not flush the bundle cache
+  // (see ss()). The feeds above are read-only too, but they are routed first
+  // and never reach here.
+  READ_ONLY_EXECUTION_ = true;
+  // action=getInitialBundle is the explicit name for the default read — the
+  // proxy calls doGet with no action and gets the same bundle.
   return handle(e, function () {
-    const houses = {};
-    HOUSE_IDS.forEach(function (h) { houses[h] = readLegacyHouseSafe(h); });
-    return {
-      // v3 shape
-      workers: readWorkersSafe(),
-      assignments: readAssignmentsSafe(),
-      absences: readAbsencesSafe(),
-      coverages: readCoveragesSafe(),
-      archiveV3: readArchiveV3Safe(),
-      monthlyActuals: readMonthlyActualsSafe(),
-      budgets: readBudgetsSafe(),
-      hearings: readHearingsSafe(),
-      // Per-consumer sync status for the «סטטוס סנכרון» panel. Missing tab
-      // (nothing has pulled yet) → [].
-      feedLog: readFeedLogSafe(),
-      // legacy passthrough — empty arrays/objects when tabs are missing
-      // (e.g. after finalizeV3 or on a fresh v3-only install).
-      houses: houses,
-      events: readLegacyEventsSafe(),
-      archive: readLegacyArchiveSafe(),
-      _compat: true,
-    };
+    return getInitialBundle_();
   });
 }
 
 function doPost(e) {
+  READ_ONLY_EXECUTION_ = false;
   return handle(e, function () {
-    const body = parseBody(e);
-    let result;
-    switch (body.action) {
-      case 'createWorker':         result = createWorker(body); break;
-      case 'updateWorker':         result = updateWorker(body); break;
-      case 'deleteWorker':         result = deleteWorker(body); break;
-      case 'setWorkerStartDates':  result = setWorkerStartDates(body); break;
-      case 'addAssignment':        result = addAssignment(body); break;
-      case 'updateAssignment':     result = updateAssignment(body); break;
-      case 'deleteAssignment':     result = deleteAssignment(body); break;
-      case 'moveAssignment':       result = moveAssignment(body); break;
-      case 'terminateAssignment':  result = terminateAssignment(body); break;
-      case 'logAbsence':           result = logAbsence(body); break;
-      case 'endAbsence':           result = endAbsence(body); break;
-      case 'deleteAbsence':        result = deleteAbsence(body); break;
-      case 'addCoverage':          result = addCoverage(body); break;
-      case 'deleteCoverage':       result = deleteCoverage(body); break;
-      case 'upsertMonthlyActuals': result = upsertMonthlyActuals(body); break;
-      case 'getMonthlyActuals':    return getMonthlyActuals(body);
-      case 'setBudget':            result = setBudget(body); break;
-      case 'getBudgets':           return getBudgets(body);
-      case 'getHearings':          return getHearings(body);
-      case 'addHearing':           result = addHearing(body); break;
-      case 'updateHearing':        result = updateHearing(body); break;
-      case 'deleteHearing':        result = deleteHearing(body); break;
-      default: throw httpError(400, 'unknown action');
+    // Every POST may write. Drop the cached read bundle before the write (so
+    // a read that starts now cannot be served the old snapshot) AND after it
+    // — success or failure — so a read that ran concurrently cannot leave a
+    // pre-write copy behind. Only reached once the caller is authorized.
+    invalidateBundleCache_();
+    try {
+      return doPostAction_(e);
+    } finally {
+      invalidateBundleCache_();
     }
-    // Rebuild the NewGuides digest after any write that can change a guide's
-    // name / house / role / start date. Best-effort — a digest failure must
-    // never fail the user's mutation (see rebuildDigestSafe). The periodic
-    // trigger installed by installDigestTrigger() is the backstop.
-    if (DIGEST_REBUILD_ACTIONS.indexOf(body.action) >= 0) rebuildDigestSafe();
-    return result;
   });
+}
+
+function doPostAction_(e) {
+  const body = parseBody(e);
+  let result;
+  switch (body.action) {
+    case 'createWorker':         result = createWorker(body); break;
+    case 'updateWorker':         result = updateWorker(body); break;
+    case 'deleteWorker':         result = deleteWorker(body); break;
+    case 'setWorkerStartDates':  result = setWorkerStartDates(body); break;
+    case 'addAssignment':        result = addAssignment(body); break;
+    case 'updateAssignment':     result = updateAssignment(body); break;
+    case 'deleteAssignment':     result = deleteAssignment(body); break;
+    case 'moveAssignment':       result = moveAssignment(body); break;
+    case 'terminateAssignment':  result = terminateAssignment(body); break;
+    case 'logAbsence':           result = logAbsence(body); break;
+    case 'endAbsence':           result = endAbsence(body); break;
+    case 'deleteAbsence':        result = deleteAbsence(body); break;
+    case 'addCoverage':          result = addCoverage(body); break;
+    case 'deleteCoverage':       result = deleteCoverage(body); break;
+    case 'upsertMonthlyActuals': result = upsertMonthlyActuals(body); break;
+    case 'getMonthlyActuals':    return getMonthlyActuals(body);
+    case 'setBudget':            result = setBudget(body); break;
+    case 'getBudgets':           return getBudgets(body);
+    case 'getHearings':          return getHearings(body);
+    case 'addHearing':           result = addHearing(body); break;
+    case 'updateHearing':        result = updateHearing(body); break;
+    case 'deleteHearing':        result = deleteHearing(body); break;
+    default: throw httpError(400, 'unknown action');
+  }
+  // Rebuild the NewGuides digest after any write that can change a guide's
+  // name / house / role / start date. Best-effort — a digest failure must
+  // never fail the user's mutation (see rebuildDigestSafe). The periodic
+  // trigger installed by installDigestTrigger() is the backstop.
+  if (DIGEST_REBUILD_ACTIONS.indexOf(body.action) >= 0) rebuildDigestSafe();
+  return result;
 }
 
 // Error fields a thrower may attach that are safe to send back to the
@@ -510,10 +537,27 @@ function httpError(status, message) {
 
 // ---------- sheet plumbing ----------
 
+// The spreadsheet handle, opened ONCE per execution. Every reader used to
+// call SpreadsheetApp.openById again — the page-load read opened the same
+// file ~23 times (9 v3 tabs + legacy tabs tried under two names each), and
+// openById is one of the slowest calls in Apps Script. Globals are reset
+// for every execution, so this memo can never outlive one request.
+var SS_MEMO_ = null;
+var SS_MEMO_ID_ = null;
+// true only for executions that are known reads (every doGet path). Any
+// OTHER execution that opens the spreadsheet — doPost, an editor-run
+// migration, a trigger — flushes the read-bundle cache on first open: the
+// safe default is "might write".
+var READ_ONLY_EXECUTION_ = false;
+
 function ss() {
   const id = PropertiesService.getScriptProperties().getProperty('SHEET_ID');
   if (!id) throw httpError(500, 'SHEET_ID script property is not set');
-  return SpreadsheetApp.openById(id);
+  if (SS_MEMO_ && SS_MEMO_ID_ === id) return SS_MEMO_;
+  if (!READ_ONLY_EXECUTION_) invalidateBundleCache_();
+  SS_MEMO_ = SpreadsheetApp.openById(id);
+  SS_MEMO_ID_ = id;
+  return SS_MEMO_;
 }
 
 function sheetByName(name) {
@@ -701,8 +745,78 @@ function validateAssignment(a) {
     allowance: allowance,
     status: status, statusDate: statusDate,
     notes: notes,
+    shiftMinimums: validateShiftMinimums_(a, role),
   };
 }
+
+// A minimum count: blank / null / missing → null ("not set" — never 0).
+// Anything else must be an integer in [0, max]. Mirror of lib/validate.js.
+function validateMinInt_(v, max, field) {
+  if (v === undefined || v === null) return null;
+  if (typeof v !== 'number' && typeof v !== 'string') throw httpError(400, 'bad ' + field);
+  if (String(v).trim() === '') return null;
+  const n = Number(v);
+  if (!isFinite(n) || n !== Math.floor(n) || n < 0 || n > max) throw httpError(400, 'bad ' + field);
+  return n;
+}
+
+// allowedShifts: an array or a comma-joined string of SHIFT_LABELS. Returns
+// the canonical comma-joined string, or null when nothing is selected. An
+// unknown label is a 400, never silently dropped.
+function validateAllowedShifts_(v) {
+  if (v === undefined || v === null) return null;
+  const parts = Array.isArray(v) ? v : (typeof v === 'string' ? v.split(',') : null);
+  if (!parts) throw httpError(400, 'bad allowedShifts');
+  const seen = {};
+  parts.forEach(function (p) {
+    if (typeof p !== 'string') throw httpError(400, 'bad allowedShifts');
+    const t = p.trim();
+    if (!t) return;
+    if (SHIFT_LABELS.indexOf(t) < 0) throw httpError(400, 'bad allowedShifts');
+    seen[t] = true;
+  });
+  const canon = SHIFT_LABELS.filter(function (l) { return seen[l]; }).join(',');
+  return canon || null;
+}
+
+// The three minimum fields of an assignment payload, by KEY PRESENCE: an
+// absent key means "leave the stored value alone" (has* = false), so a
+// client that does not know these fields can never wipe them. On a
+// non-guide placement the fields are cleared, and a value sent for one is
+// a 400 — a minimum on a therapist would be a number nobody schedules by.
+function validateShiftMinimums_(a, role) {
+  const has = function (k) { return Object.prototype.hasOwnProperty.call(a, k); };
+  const out = {
+    weekdayMin: has('weekdayMin') ? validateMinInt_(a.weekdayMin, WEEKDAY_MIN_MAX, 'weekdayMin') : null,
+    weekendMin: has('weekendMin') ? validateMinInt_(a.weekendMin, WEEKEND_MIN_MAX, 'weekendMin') : null,
+    allowedShifts: has('allowedShifts') ? validateAllowedShifts_(a.allowedShifts) : null,
+    hasWeekdayMin: has('weekdayMin'),
+    hasWeekendMin: has('weekendMin'),
+    hasAllowedShifts: has('allowedShifts'),
+  };
+  if (role !== SHIFT_MINIMUM_ROLE) {
+    if (out.weekdayMin !== null || out.weekendMin !== null || out.allowedShifts !== null) {
+      throw httpError(400, 'shift minimums apply to ' + SHIFT_MINIMUM_ROLE + ' only');
+    }
+    out.hasWeekdayMin = out.hasWeekendMin = out.hasAllowedShifts = true; // clear
+  }
+  return out;
+}
+
+// Stored cell → value or null. A cell that is not a valid value reads as
+// null (not set) rather than being passed on.
+function minIntCell_(v, max) {
+  if (v === '' || v === null || v === undefined) return null;
+  const n = Number(v);
+  return isFinite(n) && n === Math.floor(n) && n >= 0 && n <= max ? n : null;
+}
+function allowedShiftsCell_(v) {
+  const seen = {};
+  String(v === null || v === undefined ? '' : v).split(',').forEach(function (p) { seen[p.trim()] = true; });
+  const canon = SHIFT_LABELS.filter(function (l) { return seen[l]; }).join(',');
+  return canon || null;
+}
+const nullToBlank_ = function (v) { return v === null || v === undefined ? '' : v; };
 
 // v3.1: workerId is optional (stub rows). Mirror of lib/validate.js.
 function validateAbsence(a) {
@@ -893,6 +1007,181 @@ function validateBudget(b) {
   return { house: b.house, month: month, amount: amount, instructorsAmount: instructorsAmount };
 }
 
+// ---------- initial bundle (the page-load read) + CacheService ----------
+//
+// getInitialBundle_ is the ONE read the app makes on load: every tab, one
+// getDataRange() read per tab, one spreadsheet open (see ss()). Its output
+// is identical to calling each reader separately (pinned by
+// tests/perf-bundle.test.js).
+//
+// The cached part (everything except feedLog) is kept in the script cache
+// for BUNDLE_CACHE_TTL_S. feedLog is always read fresh: the consumer feeds
+// write it on every pull, and flushing the bundle on every feed pull would
+// defeat the cache.
+//
+// Invalidation is by VERSION TOKEN: the chunks live under
+// bundle:<ver>:<i>, and invalidateBundleCache_() swaps <ver> for a new random
+// value. A read that started before a write stores its (old) copy under the
+// old token, where nobody looks. If the token itself is evicted, the next
+// read mints a new one — i.e. eviction is a miss, never a stale hit.
+//
+// CacheService caps a value at 100 KB, so the JSON is split into chunks of
+// BUNDLE_CHUNK_CHARS characters (≤ 3 bytes each in UTF-8 → ≤ 90 KB). A
+// bundle bigger than BUNDLE_MAX_CHUNKS chunks is simply not cached.
+//
+// Everything here is best-effort: any CacheService failure (or no
+// CacheService at all) falls back to reading the Sheet. Stale bound for an
+// edit made by hand in the Sheet, which no code path can see: the TTL.
+const BUNDLE_CACHE_TTL_S = 300;
+const BUNDLE_CACHE_VER_KEY = 'bundle:ver';
+const BUNDLE_CHUNK_CHARS = 30000;
+const BUNDLE_MAX_CHUNKS = 200;
+
+function scriptCache_() {
+  try {
+    if (typeof CacheService === 'undefined' || !CacheService) return null;
+    return CacheService.getScriptCache() || null;
+  } catch (err) {
+    return null;
+  }
+}
+
+function invalidateBundleCache_() {
+  const c = scriptCache_();
+  if (!c) return;
+  try {
+    c.put(BUNDLE_CACHE_VER_KEY, newId('v'), 21600);
+  } catch (err) {
+    try { c.remove(BUNDLE_CACHE_VER_KEY); } catch (err2) { /* best-effort */ }
+  }
+}
+
+// Editor-run: drop the cached bundle by hand (e.g. after editing the Sheet
+// directly and not wanting to wait out the TTL).
+function clearBundleCacheNow() {
+  invalidateBundleCache_();
+  return 'bundle cache cleared';
+}
+
+function bundleCacheVersion_(c) {
+  let v = c.get(BUNDLE_CACHE_VER_KEY);
+  if (!v) {
+    v = newId('v');
+    c.put(BUNDLE_CACHE_VER_KEY, v, 21600);
+  }
+  return v;
+}
+
+function readBundleCache_(c, ver) {
+  const n = Number(c.get('bundle:' + ver + ':n'));
+  if (!n || n < 1 || n > BUNDLE_MAX_CHUNKS) return null;
+  const keys = [];
+  for (let i = 0; i < n; i++) keys.push('bundle:' + ver + ':' + i);
+  const got = c.getAll(keys) || {};
+  const parts = [];
+  for (let i = 0; i < keys.length; i++) {
+    if (typeof got[keys[i]] !== 'string') return null;
+    parts.push(got[keys[i]]);
+  }
+  try { return JSON.parse(parts.join('')); } catch (err) { return null; }
+}
+
+// Split a string into chunks of at most `size` characters without cutting a
+// UTF-16 surrogate pair in half (a lone surrogate would not survive storage).
+function chunkString_(str, size) {
+  const out = [];
+  let i = 0;
+  while (i < str.length) {
+    let end = Math.min(i + size, str.length);
+    if (end < str.length) {
+      const code = str.charCodeAt(end - 1);
+      if (code >= 0xD800 && code <= 0xDBFF) end--;
+    }
+    out.push(str.slice(i, end));
+    i = end;
+  }
+  return out;
+}
+
+function writeBundleCache_(c, ver, core) {
+  const chunks = chunkString_(JSON.stringify(core), BUNDLE_CHUNK_CHARS);
+  if (!chunks.length || chunks.length > BUNDLE_MAX_CHUNKS) return false;
+  const map = {};
+  chunks.forEach(function (part, i) { map['bundle:' + ver + ':' + i] = part; });
+  c.putAll(map, BUNDLE_CACHE_TTL_S);
+  // The count goes in LAST: a reader never sees a count whose chunks are
+  // not all there yet.
+  c.put('bundle:' + ver + ':n', String(chunks.length), BUNDLE_CACHE_TTL_S);
+  return true;
+}
+
+// The cacheable part of the bundle — every tab except FeedLog.
+function computeInitialBundleCore_() {
+  const houses = {};
+  HOUSE_IDS.forEach(function (h) { houses[h] = readLegacyHouseSafe(h); });
+  return {
+    // v3 shape
+    workers: readWorkersSafe(),
+    assignments: readAssignmentsSafe(),
+    absences: readAbsencesSafe(),
+    coverages: readCoveragesSafe(),
+    archiveV3: readArchiveV3Safe(),
+    monthlyActuals: readMonthlyActualsSafe(),
+    budgets: readBudgetsSafe(),
+    hearings: readHearingsSafe(),
+    // legacy passthrough — empty arrays/objects when tabs are missing
+    // (e.g. after finalizeV3 or on a fresh v3-only install).
+    houses: houses,
+    events: readLegacyEventsSafe(),
+    archive: readLegacyArchiveSafe(),
+  };
+}
+
+function assembleBundle_(core, feedLog, cacheState) {
+  return {
+    workers: core.workers,
+    assignments: core.assignments,
+    absences: core.absences,
+    coverages: core.coverages,
+    archiveV3: core.archiveV3,
+    monthlyActuals: core.monthlyActuals,
+    budgets: core.budgets,
+    hearings: core.hearings,
+    // Per-consumer sync status for the «סטטוס סנכרון» panel. Missing tab
+    // (nothing has pulled yet) → []. Never cached (see above).
+    feedLog: feedLog,
+    houses: core.houses,
+    events: core.events,
+    archive: core.archive,
+    _compat: true,
+    // 'hit' | 'miss' | 'off' — read by the Express proxy for its timing log
+    // and stripped there; the browser never sees it.
+    _gasCache: cacheState,
+  };
+}
+
+function getInitialBundle_() {
+  const c = scriptCache_();
+  let core = null;
+  let ver = null;
+  if (c) {
+    try {
+      ver = bundleCacheVersion_(c);
+      core = readBundleCache_(c, ver);
+    } catch (err) {
+      core = null;
+    }
+  }
+  const hit = !!core;
+  if (!core) {
+    core = computeInitialBundleCore_();
+    if (c && ver) {
+      try { writeBundleCache_(c, ver, core); } catch (err) { /* best-effort */ }
+    }
+  }
+  return assembleBundle_(core, readFeedLogSafe(), c ? (hit ? 'hit' : 'miss') : 'off');
+}
+
 // ---------- v3 readers ----------
 
 function rowsOf(sheet) {
@@ -963,6 +1252,10 @@ function readAssignmentsSafe() {
       // Appended column — blank on every row written before Phase 2. The
       // cost engine falls back to created_at when it is blank.
       effectiveFrom: formatDateCell(r[24]),
+      // Guide shift minimum (appended) — null when not set, never 0.
+      weekdayMin: minIntCell_(r[25], WEEKDAY_MIN_MAX),
+      weekendMin: minIntCell_(r[26], WEEKEND_MIN_MAX),
+      allowedShifts: allowedShiftsCell_(r[27]),
     };
   });
 }
@@ -1593,6 +1886,17 @@ function syncWorkerGmachMonth_(workerId) {
   return '';
 }
 
+// The validated assignment as returned to the client: the internal
+// shiftMinimums envelope replaced by the three resolved values.
+function assignmentOut_(a, weekdayMin, weekendMin, allowedShifts) {
+  const out = Object.assign({}, a);
+  delete out.shiftMinimums;
+  out.weekdayMin = weekdayMin;
+  out.weekendMin = weekendMin;
+  out.allowedShifts = allowedShifts;
+  return out;
+}
+
 function addAssignment(body) {
   const a = validateAssignment(body.assignment || {});
   const lock = LockService.getScriptLock();
@@ -1610,7 +1914,10 @@ function addAssignment(body) {
 
     const id = newId('a');
     const createdAt = new Date().toISOString();
-    sheetByName(ASSIGNMENTS_TAB).appendRow([
+    const m = a.shiftMinimums;
+    const out = assignmentOut_(a, m.weekdayMin, m.weekendMin, m.allowedShifts);
+    const sh = sheetByName(ASSIGNMENTS_TAB);
+    sh.appendRow([
       id, a.workerId, a.house, a.role, a.roleDetail, a.employmentType,
       a.salary, a.pct, a.hourlyRate, a.estHours,
       a.sessionRate, a.estSessions, a.retainerAmount,
@@ -1619,11 +1926,14 @@ function addAssignment(body) {
       a.rateIndividual, a.sessionsIndividual,
       a.rateGroup, a.sessionsGroup,
       a.rateExternal, a.externalPatients,
+      '', // effective_from — only a transfer sets it
+      nullToBlank_(out.weekdayMin), nullToBlank_(out.weekendMin), nullToBlank_(out.allowedShifts),
     ]);
+    ensureHeaders(sh, HEADERS_ASSIGNMENTS);
     const gmachMonth = syncWorkerGmachMonth_(a.workerId);
     return {
       ok: true,
-      assignment: Object.assign({ id: id, createdAt: createdAt }, a),
+      assignment: Object.assign({ id: id, createdAt: createdAt }, out),
       workerGmachMonth: gmachMonth,
     };
   } finally {
@@ -1645,6 +1955,16 @@ function updateAssignment(body) {
     const current = sh.getRange(row, 1, 1, HEADERS_ASSIGNMENTS.length).getValues()[0];
     if (String(current[1]) !== a.workerId) throw httpError(409, 'workerId mismatch');
     if (String(current[2]) !== a.house) throw httpError(409, 'house mismatch');
+    // A key the client did not send keeps the stored value.
+    const m = a.shiftMinimums;
+    const out = assignmentOut_(a,
+      m.hasWeekdayMin ? m.weekdayMin : minIntCell_(current[25], WEEKDAY_MIN_MAX),
+      m.hasWeekendMin ? m.weekendMin : minIntCell_(current[26], WEEKEND_MIN_MAX),
+      m.hasAllowedShifts ? m.allowedShifts : allowedShiftsCell_(current[27]));
+    // The row is written at FULL header width. Before this, 24 values were
+    // written into a 25-column range (effective_from was appended without
+    // updating this write), which Apps Script rejects — and would have
+    // blanked effective_from. effective_from is preserved as stored.
     sh.getRange(row, 1, 1, HEADERS_ASSIGNMENTS.length).setValues([[
       id, a.workerId, a.house, a.role, a.roleDetail, a.employmentType,
       a.salary, a.pct, a.hourlyRate, a.estHours,
@@ -1654,11 +1974,14 @@ function updateAssignment(body) {
       a.rateIndividual, a.sessionsIndividual,
       a.rateGroup, a.sessionsGroup,
       a.rateExternal, a.externalPatients,
+      current[24] === undefined ? '' : current[24],
+      nullToBlank_(out.weekdayMin), nullToBlank_(out.weekendMin), nullToBlank_(out.allowedShifts),
     ]]);
+    ensureHeaders(sh, HEADERS_ASSIGNMENTS);
     const gmachMonth = syncWorkerGmachMonth_(a.workerId);
     return {
       ok: true,
-      assignment: Object.assign({ id: id }, a),
+      assignment: Object.assign({ id: id, effectiveFrom: formatDateCell(current[24]) }, out),
       workerGmachMonth: gmachMonth,
     };
   } finally {
@@ -1775,6 +2098,9 @@ function moveAssignment(body) {
       snapshot.rateGroup, snapshot.sessionsGroup,
       snapshot.rateExternal, snapshot.externalPatients,
       effectiveFrom,
+      // The guide minimum travels with the placement.
+      nullToBlank_(snapshot.weekdayMin), nullToBlank_(snapshot.weekendMin),
+      nullToBlank_(snapshot.allowedShifts),
     ]);
     ensureHeaders(sh, HEADERS_ASSIGNMENTS);
 
@@ -1820,6 +2146,9 @@ function moveAssignment(body) {
       rateExternal: snapshot.rateExternal,
       externalPatients: snapshot.externalPatients,
       effectiveFrom: effectiveFrom,
+      weekdayMin: snapshot.weekdayMin,
+      weekendMin: snapshot.weekendMin,
+      allowedShifts: snapshot.allowedShifts,
     };
     return {
       ok: true,
@@ -1875,6 +2204,10 @@ function assignmentSnapshotFromRow_(id, r) {
     sessionsGroup: Number(r[21]) || 0,
     rateExternal: Number(r[22]) || 0,
     externalPatients: Number(r[23]) || 0,
+    // Not archived (archive_v3 has no minimum columns); carried by a move.
+    weekdayMin: minIntCell_(r[25], WEEKDAY_MIN_MAX),
+    weekendMin: minIntCell_(r[26], WEEKEND_MIN_MAX),
+    allowedShifts: allowedShiftsCell_(r[27]),
   };
 }
 
@@ -3813,6 +4146,16 @@ function computeTherapistsFeed_() {
                  can scope the retirement)
      startDate — 'YYYY-MM-DD' employment start date, '' when not
                  yet entered
+     weekdayMin / weekendMin / allowedShifts — the guide shift
+                 minimum (mirror of the coordinators Guides columns).
+                 Set per PLACEMENT; the scalar is the value shared by
+                 every current guide placement, and null when it is
+                 not set there or the houses differ. NEVER 0 for "not
+                 set". Archived-only guides → null.
+     minimumsByHouse — { <house id>: { weekdayMin, weekendMin,
+                 allowedShifts } } for every current guide placement
+                 (the exact per-house values; {} for archived-only).
+   (Plus the Phase 3 additive workerId / assignmentIds.)
 
    HARD RULE: every other field is stripped. No salary, cost, rate,
    pct, allowance, retainer, budget, notes, gmach_month,
@@ -3874,6 +4217,7 @@ function computeGuidesForCoordinators_() {
         archivedHousesSeen: {},
         assignmentIds: [],
         archivedAssignmentIds: [],
+        minimumsByHouse: {},
         startDate: w.startDate || '',
       };
     }
@@ -3885,7 +4229,14 @@ function computeGuidesForCoordinators_() {
     const entry = entryFor(a.workerId);
     if (!entry) return;
     entry.current = true;
-    if (a.house) entry.housesSeen[a.house] = true;
+    if (a.house) {
+      entry.housesSeen[a.house] = true;
+      entry.minimumsByHouse[a.house] = {
+        weekdayMin: a.weekdayMin === undefined ? null : a.weekdayMin,
+        weekendMin: a.weekendMin === undefined ? null : a.weekendMin,
+        allowedShifts: a.allowedShifts === undefined ? null : a.allowedShifts,
+      };
+    }
     if (a.id) entry.assignmentIds.push(a.id);
     if (normalizeStatus(a.status) === 'active') entry.active = true;
   });
@@ -3911,6 +4262,8 @@ function computeGuidesForCoordinators_() {
     // guide, the archived ones for an archived-only guide, so the two arrays
     // always describe the same set of placements.
     const ids = (g.current ? g.assignmentIds : g.archivedAssignmentIds).slice().sort();
+    const byHouse = {};
+    if (g.current) houses.forEach(function (h) { byHouse[h] = g.minimumsByHouse[h]; });
     return {
       // ADDED (Phase 3), additive only. One entry per WORKER, so
       // `assignmentIds` is a list — see the note in the therapists feed.
@@ -3921,10 +4274,148 @@ function computeGuidesForCoordinators_() {
       active: g.current && g.active,
       houses: houses,
       startDate: g.startDate,
+      weekdayMin: sharedMinimum_(byHouse, 'weekdayMin'),
+      weekendMin: sharedMinimum_(byHouse, 'weekendMin'),
+      allowedShifts: sharedMinimum_(byHouse, 'allowedShifts'),
+      minimumsByHouse: byHouse,
     };
   });
   guides.sort(function (x, y) { return x.name.localeCompare(y.name); });
   return guides;
+}
+
+// The value of `field` shared by EVERY current placement in `byHouse`, or
+// null when there is none, it is unset anywhere, or the houses disagree.
+function sharedMinimum_(byHouse, field) {
+  const houses = Object.keys(byHouse);
+  if (!houses.length) return null;
+  const first = byHouse[houses[0]][field];
+  if (first === null || first === undefined) return null;
+  for (let i = 1; i < houses.length; i++) {
+    if (byHouse[houses[i]][field] !== first) return null;
+  }
+  return first;
+}
+
+/* ============================================================
+   Coordinators THERAPIST feed — getTherapistsForCoordinators
+   ------------------------------------------------------------
+   doGet?action=getTherapistsForCoordinators&secret=<...>
+
+   Auth: the SAME Script Property as the guides feed,
+   COORDINATORS_READ_SECRET (no new secret), compared in constant
+   time via secretMatches_. Fail-closed: unset / missing / wrong →
+   401 { error }, never data. No other secret unlocks it.
+
+   Payload { therapists, feedGeneratedAt } — ONE entry per WORKER
+   holding a CURRENT placement whose trimmed role is מטפל/ת or
+   פסיכיאטר/ית. ArchiveV3 is NOT read: a terminated therapist is
+   simply absent. EXACTLY these fields:
+     name      — trimmed full name
+     phone     — 10-digit TEXT with the leading zero, '' when unset
+     role      — 'פסיכיאטר/ית' if ANY current therapist-role
+                 placement is psychiatry, else 'מטפל/ת'
+     active    — true iff ANY therapist-role placement's status is
+                 'active'; חל"ד / חל"ת / final_settlement → false
+     houses    — sorted internal house ids (same convention as the
+                 guides feed — the consumer maps them)
+     startDate — 'YYYY-MM-DD' employment start, '' when unset
+
+   HARD RULE: nothing else. No id, workerId, pay, rate, salary,
+   bank, allowance, notes, role_detail or employment_type.
+   ============================================================ */
+
+function handleCoordinatorsTherapistsRead_(e) {
+  try {
+    if (!coordinatorsAuthorized_(e)) return json({ error: 'unauthorized' }, 401);
+    const therapists = computeTherapistsForCoordinators_();
+    const servedAt = new Date().toISOString();
+    recordFeedServed_('coordinators_therapists', therapists.length, 'ok');
+    return json({ therapists: therapists, feedGeneratedAt: servedAt }, 200);
+  } catch (err) {
+    const status = err && err.status ? err.status : 500;
+    return json({ error: (err && err.message) || String(err) }, status);
+  }
+}
+
+function computeTherapistsForCoordinators_() {
+  const workerById = {};
+  readWorkersSafe().forEach(function (w) { workerById[w.id] = w; });
+  const byWorker = {};
+  readAssignmentsSafe().forEach(function (a) {
+    const role = String(a.role || '').trim();
+    if (THERAPISTS_FEED_ROLES.indexOf(role) < 0) return;
+    const w = workerById[a.workerId];
+    if (!w) return; // orphaned placement
+    const name = String(w.name || '').trim();
+    if (!name) return;
+    let t = byWorker[a.workerId];
+    if (!t) {
+      t = byWorker[a.workerId] = {
+        name: name, phone: String(w.phone || ''), psychiatry: false,
+        active: false, housesSeen: {}, startDate: w.startDate || '',
+      };
+    }
+    if (role === 'פסיכיאטר/ית') t.psychiatry = true;
+    if (a.house) t.housesSeen[a.house] = true;
+    if (normalizeStatus(a.status) === 'active') t.active = true;
+  });
+  const out = Object.keys(byWorker).map(function (id) {
+    const t = byWorker[id];
+    return {
+      name: t.name,
+      phone: t.phone,
+      role: t.psychiatry ? 'פסיכיאטר/ית' : 'מטפל/ת',
+      active: t.active,
+      houses: Object.keys(t.housesSeen).sort(),
+      startDate: t.startDate,
+    };
+  });
+  out.sort(function (x, y) { return x.name.localeCompare(y.name); });
+  return out;
+}
+
+/* EDITOR-RUN, READ-ONLY: reportRecentTherapistsNow(n)
+   The n (default 2) most recently ADDED workers holding a current
+   therapist-role placement (מטפל/ת / פסיכיאטר/ית), newest first by the
+   worker's created_at, with what the coordinators feed will show for each
+   and what HR still has to fill in. Writes nothing; logs and returns. No
+   financial field is read into the result. */
+function reportRecentTherapistsNow(n) {
+  const limit = Number(n) > 0 ? Math.floor(Number(n)) : 2;
+  const workers = readWorkersSafe();
+  const byId = {};
+  workers.forEach(function (w) { byId[w.id] = w; });
+  const feedByName = {};
+  computeTherapistsForCoordinators_().forEach(function (t) { feedByName[t.name] = t; });
+  const placements = {};
+  readAssignmentsSafe().forEach(function (a) {
+    const role = String(a.role || '').trim();
+    if (THERAPISTS_FEED_ROLES.indexOf(role) < 0) return;
+    (placements[a.workerId] = placements[a.workerId] || []).push(
+      { house: a.house, role: role, status: normalizeStatus(a.status) });
+  });
+  const rows = Object.keys(placements).filter(function (id) { return byId[id]; }).map(function (id) {
+    const w = byId[id];
+    const missing = [];
+    if (!String(w.name || '').trim()) missing.push('שם');
+    if (!w.phone) missing.push('טלפון נייד');
+    if (!w.startDate) missing.push('תאריך תחילת עבודה');
+    placements[id].forEach(function (p) { if (!isHouse(p.house)) missing.push('בית לא תקין בשיבוץ'); });
+    return {
+      name: String(w.name || '').trim(),
+      createdAt: w.createdAt || '',
+      placements: placements[id],
+      inCoordinatorsFeed: !!feedByName[String(w.name || '').trim()],
+      feedEntry: feedByName[String(w.name || '').trim()] || null,
+      missing: missing,
+      complete: missing.length === 0,
+    };
+  });
+  rows.sort(function (x, y) { return String(y.createdAt).localeCompare(String(x.createdAt)); });
+  const result = rows.slice(0, limit);
+  Logger.log(JSON.stringify(result, null, 2));
+  return result;
 }
 
 /* ============================================================
