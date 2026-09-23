@@ -163,7 +163,8 @@ const HEADERS_FEED_LOG = [
 ];
 // The three consumers, as ASCII keys. Also the order the sync-status panel
 // lists them in.
-const FEED_CONSUMERS = ['coordinators', 'therapists', 'hadrachot'];
+// APPEND-ONLY. 'coordinators_therapists' = getTherapistsForCoordinators.
+const FEED_CONSUMERS = ['coordinators', 'therapists', 'hadrachot', 'coordinators_therapists'];
 // APPEND-ONLY (columns 0-14 are the original v3 shape). Columns 15+ were
 // appended later and MUST stay in this order — read/write map by position:
 //   15 allowance, 16 status, 17 status_date  (fixes the leave-status bug —
@@ -185,7 +186,25 @@ const HEADERS_ASSIGNMENTS = [
   //    transfer date rather than from the 1st of the month. Blank on every
   //    earlier row, where the cost engine falls back to created_at.
   'effective_from',
+  // 25-27 the GUIDE shift minimum, per placement — a mirror of the
+  //    ezone-coordinators Guides columns of the same names (staffing is the
+  //    source of truth; coordinators reads them through
+  //    getGuidesForCoordinators). Blank = not set (the feed sends null,
+  //    never 0). Only meaningful on a מדריך/ה placement.
+  //    weekday_min    int 0–6, minimum weekday shifts per WEEK
+  //    weekend_min    int 0–10, minimum weekend shifts per MONTH
+  //    allowed_shifts comma-joined shift labels in canonical order
+  //                   (בוקר,אחר צהריים,לילה); all three = every shift
+  'weekday_min', 'weekend_min', 'allowed_shifts',
 ];
+
+// ---------- guide shift minimums (mirror of ezone-coordinators) ----------
+// Same ids and ranges as the coordinators app (apps-script/Code.gs SHIFTS,
+// WEEKDAY_MIN_MAX, WEEKEND_MIN_MAX there). Byte-exact Hebrew labels.
+const SHIFT_LABELS = ['בוקר', 'אחר צהריים', 'לילה'];
+const WEEKDAY_MIN_MAX = 6;
+const WEEKEND_MIN_MAX = 10;
+const SHIFT_MINIMUM_ROLE = 'מדריך/ה';
 // The `status` column carries a DERIVED value: 'future' before the start
 // date, 'active' between the dates, 'ended' after the end date. It is a
 // cached hint, recomputed on every read — the dates are the truth. 'future'
@@ -382,6 +401,12 @@ function doGet(e) {
   // below) — no other secret unlocks it and it unlocks nothing else.
   if (e && e.parameter && e.parameter.action === 'getGuidesForCoordinators') {
     return handleCoordinatorsRead_(e);
+  }
+  // Read-only THERAPIST roster feed for the coordinators app. Same secret as
+  // the guides feed (COORDINATORS_READ_SECRET, constant-time, fail-closed);
+  // routed BEFORE the SHARED_SECRET gate like every feed.
+  if (e && e.parameter && e.parameter.action === 'getTherapistsForCoordinators') {
+    return handleCoordinatorsTherapistsRead_(e);
   }
   // Everything below is the main app's one read. Mark the execution
   // read-only so opening the spreadsheet does not flush the bundle cache
@@ -720,8 +745,78 @@ function validateAssignment(a) {
     allowance: allowance,
     status: status, statusDate: statusDate,
     notes: notes,
+    shiftMinimums: validateShiftMinimums_(a, role),
   };
 }
+
+// A minimum count: blank / null / missing → null ("not set" — never 0).
+// Anything else must be an integer in [0, max]. Mirror of lib/validate.js.
+function validateMinInt_(v, max, field) {
+  if (v === undefined || v === null) return null;
+  if (typeof v !== 'number' && typeof v !== 'string') throw httpError(400, 'bad ' + field);
+  if (String(v).trim() === '') return null;
+  const n = Number(v);
+  if (!isFinite(n) || n !== Math.floor(n) || n < 0 || n > max) throw httpError(400, 'bad ' + field);
+  return n;
+}
+
+// allowedShifts: an array or a comma-joined string of SHIFT_LABELS. Returns
+// the canonical comma-joined string, or null when nothing is selected. An
+// unknown label is a 400, never silently dropped.
+function validateAllowedShifts_(v) {
+  if (v === undefined || v === null) return null;
+  const parts = Array.isArray(v) ? v : (typeof v === 'string' ? v.split(',') : null);
+  if (!parts) throw httpError(400, 'bad allowedShifts');
+  const seen = {};
+  parts.forEach(function (p) {
+    if (typeof p !== 'string') throw httpError(400, 'bad allowedShifts');
+    const t = p.trim();
+    if (!t) return;
+    if (SHIFT_LABELS.indexOf(t) < 0) throw httpError(400, 'bad allowedShifts');
+    seen[t] = true;
+  });
+  const canon = SHIFT_LABELS.filter(function (l) { return seen[l]; }).join(',');
+  return canon || null;
+}
+
+// The three minimum fields of an assignment payload, by KEY PRESENCE: an
+// absent key means "leave the stored value alone" (has* = false), so a
+// client that does not know these fields can never wipe them. On a
+// non-guide placement the fields are cleared, and a value sent for one is
+// a 400 — a minimum on a therapist would be a number nobody schedules by.
+function validateShiftMinimums_(a, role) {
+  const has = function (k) { return Object.prototype.hasOwnProperty.call(a, k); };
+  const out = {
+    weekdayMin: has('weekdayMin') ? validateMinInt_(a.weekdayMin, WEEKDAY_MIN_MAX, 'weekdayMin') : null,
+    weekendMin: has('weekendMin') ? validateMinInt_(a.weekendMin, WEEKEND_MIN_MAX, 'weekendMin') : null,
+    allowedShifts: has('allowedShifts') ? validateAllowedShifts_(a.allowedShifts) : null,
+    hasWeekdayMin: has('weekdayMin'),
+    hasWeekendMin: has('weekendMin'),
+    hasAllowedShifts: has('allowedShifts'),
+  };
+  if (role !== SHIFT_MINIMUM_ROLE) {
+    if (out.weekdayMin !== null || out.weekendMin !== null || out.allowedShifts !== null) {
+      throw httpError(400, 'shift minimums apply to ' + SHIFT_MINIMUM_ROLE + ' only');
+    }
+    out.hasWeekdayMin = out.hasWeekendMin = out.hasAllowedShifts = true; // clear
+  }
+  return out;
+}
+
+// Stored cell → value or null. A cell that is not a valid value reads as
+// null (not set) rather than being passed on.
+function minIntCell_(v, max) {
+  if (v === '' || v === null || v === undefined) return null;
+  const n = Number(v);
+  return isFinite(n) && n === Math.floor(n) && n >= 0 && n <= max ? n : null;
+}
+function allowedShiftsCell_(v) {
+  const seen = {};
+  String(v === null || v === undefined ? '' : v).split(',').forEach(function (p) { seen[p.trim()] = true; });
+  const canon = SHIFT_LABELS.filter(function (l) { return seen[l]; }).join(',');
+  return canon || null;
+}
+const nullToBlank_ = function (v) { return v === null || v === undefined ? '' : v; };
 
 // v3.1: workerId is optional (stub rows). Mirror of lib/validate.js.
 function validateAbsence(a) {
@@ -1157,6 +1252,10 @@ function readAssignmentsSafe() {
       // Appended column — blank on every row written before Phase 2. The
       // cost engine falls back to created_at when it is blank.
       effectiveFrom: formatDateCell(r[24]),
+      // Guide shift minimum (appended) — null when not set, never 0.
+      weekdayMin: minIntCell_(r[25], WEEKDAY_MIN_MAX),
+      weekendMin: minIntCell_(r[26], WEEKEND_MIN_MAX),
+      allowedShifts: allowedShiftsCell_(r[27]),
     };
   });
 }
@@ -1787,6 +1886,17 @@ function syncWorkerGmachMonth_(workerId) {
   return '';
 }
 
+// The validated assignment as returned to the client: the internal
+// shiftMinimums envelope replaced by the three resolved values.
+function assignmentOut_(a, weekdayMin, weekendMin, allowedShifts) {
+  const out = Object.assign({}, a);
+  delete out.shiftMinimums;
+  out.weekdayMin = weekdayMin;
+  out.weekendMin = weekendMin;
+  out.allowedShifts = allowedShifts;
+  return out;
+}
+
 function addAssignment(body) {
   const a = validateAssignment(body.assignment || {});
   const lock = LockService.getScriptLock();
@@ -1804,7 +1914,10 @@ function addAssignment(body) {
 
     const id = newId('a');
     const createdAt = new Date().toISOString();
-    sheetByName(ASSIGNMENTS_TAB).appendRow([
+    const m = a.shiftMinimums;
+    const out = assignmentOut_(a, m.weekdayMin, m.weekendMin, m.allowedShifts);
+    const sh = sheetByName(ASSIGNMENTS_TAB);
+    sh.appendRow([
       id, a.workerId, a.house, a.role, a.roleDetail, a.employmentType,
       a.salary, a.pct, a.hourlyRate, a.estHours,
       a.sessionRate, a.estSessions, a.retainerAmount,
@@ -1813,11 +1926,14 @@ function addAssignment(body) {
       a.rateIndividual, a.sessionsIndividual,
       a.rateGroup, a.sessionsGroup,
       a.rateExternal, a.externalPatients,
+      '', // effective_from — only a transfer sets it
+      nullToBlank_(out.weekdayMin), nullToBlank_(out.weekendMin), nullToBlank_(out.allowedShifts),
     ]);
+    ensureHeaders(sh, HEADERS_ASSIGNMENTS);
     const gmachMonth = syncWorkerGmachMonth_(a.workerId);
     return {
       ok: true,
-      assignment: Object.assign({ id: id, createdAt: createdAt }, a),
+      assignment: Object.assign({ id: id, createdAt: createdAt }, out),
       workerGmachMonth: gmachMonth,
     };
   } finally {
@@ -1839,6 +1955,16 @@ function updateAssignment(body) {
     const current = sh.getRange(row, 1, 1, HEADERS_ASSIGNMENTS.length).getValues()[0];
     if (String(current[1]) !== a.workerId) throw httpError(409, 'workerId mismatch');
     if (String(current[2]) !== a.house) throw httpError(409, 'house mismatch');
+    // A key the client did not send keeps the stored value.
+    const m = a.shiftMinimums;
+    const out = assignmentOut_(a,
+      m.hasWeekdayMin ? m.weekdayMin : minIntCell_(current[25], WEEKDAY_MIN_MAX),
+      m.hasWeekendMin ? m.weekendMin : minIntCell_(current[26], WEEKEND_MIN_MAX),
+      m.hasAllowedShifts ? m.allowedShifts : allowedShiftsCell_(current[27]));
+    // The row is written at FULL header width. Before this, 24 values were
+    // written into a 25-column range (effective_from was appended without
+    // updating this write), which Apps Script rejects — and would have
+    // blanked effective_from. effective_from is preserved as stored.
     sh.getRange(row, 1, 1, HEADERS_ASSIGNMENTS.length).setValues([[
       id, a.workerId, a.house, a.role, a.roleDetail, a.employmentType,
       a.salary, a.pct, a.hourlyRate, a.estHours,
@@ -1848,11 +1974,14 @@ function updateAssignment(body) {
       a.rateIndividual, a.sessionsIndividual,
       a.rateGroup, a.sessionsGroup,
       a.rateExternal, a.externalPatients,
+      current[24] === undefined ? '' : current[24],
+      nullToBlank_(out.weekdayMin), nullToBlank_(out.weekendMin), nullToBlank_(out.allowedShifts),
     ]]);
+    ensureHeaders(sh, HEADERS_ASSIGNMENTS);
     const gmachMonth = syncWorkerGmachMonth_(a.workerId);
     return {
       ok: true,
-      assignment: Object.assign({ id: id }, a),
+      assignment: Object.assign({ id: id, effectiveFrom: formatDateCell(current[24]) }, out),
       workerGmachMonth: gmachMonth,
     };
   } finally {
@@ -1969,6 +2098,9 @@ function moveAssignment(body) {
       snapshot.rateGroup, snapshot.sessionsGroup,
       snapshot.rateExternal, snapshot.externalPatients,
       effectiveFrom,
+      // The guide minimum travels with the placement.
+      nullToBlank_(snapshot.weekdayMin), nullToBlank_(snapshot.weekendMin),
+      nullToBlank_(snapshot.allowedShifts),
     ]);
     ensureHeaders(sh, HEADERS_ASSIGNMENTS);
 
@@ -2014,6 +2146,9 @@ function moveAssignment(body) {
       rateExternal: snapshot.rateExternal,
       externalPatients: snapshot.externalPatients,
       effectiveFrom: effectiveFrom,
+      weekdayMin: snapshot.weekdayMin,
+      weekendMin: snapshot.weekendMin,
+      allowedShifts: snapshot.allowedShifts,
     };
     return {
       ok: true,
@@ -2069,6 +2204,10 @@ function assignmentSnapshotFromRow_(id, r) {
     sessionsGroup: Number(r[21]) || 0,
     rateExternal: Number(r[22]) || 0,
     externalPatients: Number(r[23]) || 0,
+    // Not archived (archive_v3 has no minimum columns); carried by a move.
+    weekdayMin: minIntCell_(r[25], WEEKDAY_MIN_MAX),
+    weekendMin: minIntCell_(r[26], WEEKEND_MIN_MAX),
+    allowedShifts: allowedShiftsCell_(r[27]),
   };
 }
 
@@ -4007,6 +4146,16 @@ function computeTherapistsFeed_() {
                  can scope the retirement)
      startDate — 'YYYY-MM-DD' employment start date, '' when not
                  yet entered
+     weekdayMin / weekendMin / allowedShifts — the guide shift
+                 minimum (mirror of the coordinators Guides columns).
+                 Set per PLACEMENT; the scalar is the value shared by
+                 every current guide placement, and null when it is
+                 not set there or the houses differ. NEVER 0 for "not
+                 set". Archived-only guides → null.
+     minimumsByHouse — { <house id>: { weekdayMin, weekendMin,
+                 allowedShifts } } for every current guide placement
+                 (the exact per-house values; {} for archived-only).
+   (Plus the Phase 3 additive workerId / assignmentIds.)
 
    HARD RULE: every other field is stripped. No salary, cost, rate,
    pct, allowance, retainer, budget, notes, gmach_month,
@@ -4068,6 +4217,7 @@ function computeGuidesForCoordinators_() {
         archivedHousesSeen: {},
         assignmentIds: [],
         archivedAssignmentIds: [],
+        minimumsByHouse: {},
         startDate: w.startDate || '',
       };
     }
@@ -4079,7 +4229,14 @@ function computeGuidesForCoordinators_() {
     const entry = entryFor(a.workerId);
     if (!entry) return;
     entry.current = true;
-    if (a.house) entry.housesSeen[a.house] = true;
+    if (a.house) {
+      entry.housesSeen[a.house] = true;
+      entry.minimumsByHouse[a.house] = {
+        weekdayMin: a.weekdayMin === undefined ? null : a.weekdayMin,
+        weekendMin: a.weekendMin === undefined ? null : a.weekendMin,
+        allowedShifts: a.allowedShifts === undefined ? null : a.allowedShifts,
+      };
+    }
     if (a.id) entry.assignmentIds.push(a.id);
     if (normalizeStatus(a.status) === 'active') entry.active = true;
   });
@@ -4105,6 +4262,8 @@ function computeGuidesForCoordinators_() {
     // guide, the archived ones for an archived-only guide, so the two arrays
     // always describe the same set of placements.
     const ids = (g.current ? g.assignmentIds : g.archivedAssignmentIds).slice().sort();
+    const byHouse = {};
+    if (g.current) houses.forEach(function (h) { byHouse[h] = g.minimumsByHouse[h]; });
     return {
       // ADDED (Phase 3), additive only. One entry per WORKER, so
       // `assignmentIds` is a list — see the note in the therapists feed.
@@ -4115,10 +4274,148 @@ function computeGuidesForCoordinators_() {
       active: g.current && g.active,
       houses: houses,
       startDate: g.startDate,
+      weekdayMin: sharedMinimum_(byHouse, 'weekdayMin'),
+      weekendMin: sharedMinimum_(byHouse, 'weekendMin'),
+      allowedShifts: sharedMinimum_(byHouse, 'allowedShifts'),
+      minimumsByHouse: byHouse,
     };
   });
   guides.sort(function (x, y) { return x.name.localeCompare(y.name); });
   return guides;
+}
+
+// The value of `field` shared by EVERY current placement in `byHouse`, or
+// null when there is none, it is unset anywhere, or the houses disagree.
+function sharedMinimum_(byHouse, field) {
+  const houses = Object.keys(byHouse);
+  if (!houses.length) return null;
+  const first = byHouse[houses[0]][field];
+  if (first === null || first === undefined) return null;
+  for (let i = 1; i < houses.length; i++) {
+    if (byHouse[houses[i]][field] !== first) return null;
+  }
+  return first;
+}
+
+/* ============================================================
+   Coordinators THERAPIST feed — getTherapistsForCoordinators
+   ------------------------------------------------------------
+   doGet?action=getTherapistsForCoordinators&secret=<...>
+
+   Auth: the SAME Script Property as the guides feed,
+   COORDINATORS_READ_SECRET (no new secret), compared in constant
+   time via secretMatches_. Fail-closed: unset / missing / wrong →
+   401 { error }, never data. No other secret unlocks it.
+
+   Payload { therapists, feedGeneratedAt } — ONE entry per WORKER
+   holding a CURRENT placement whose trimmed role is מטפל/ת or
+   פסיכיאטר/ית. ArchiveV3 is NOT read: a terminated therapist is
+   simply absent. EXACTLY these fields:
+     name      — trimmed full name
+     phone     — 10-digit TEXT with the leading zero, '' when unset
+     role      — 'פסיכיאטר/ית' if ANY current therapist-role
+                 placement is psychiatry, else 'מטפל/ת'
+     active    — true iff ANY therapist-role placement's status is
+                 'active'; חל"ד / חל"ת / final_settlement → false
+     houses    — sorted internal house ids (same convention as the
+                 guides feed — the consumer maps them)
+     startDate — 'YYYY-MM-DD' employment start, '' when unset
+
+   HARD RULE: nothing else. No id, workerId, pay, rate, salary,
+   bank, allowance, notes, role_detail or employment_type.
+   ============================================================ */
+
+function handleCoordinatorsTherapistsRead_(e) {
+  try {
+    if (!coordinatorsAuthorized_(e)) return json({ error: 'unauthorized' }, 401);
+    const therapists = computeTherapistsForCoordinators_();
+    const servedAt = new Date().toISOString();
+    recordFeedServed_('coordinators_therapists', therapists.length, 'ok');
+    return json({ therapists: therapists, feedGeneratedAt: servedAt }, 200);
+  } catch (err) {
+    const status = err && err.status ? err.status : 500;
+    return json({ error: (err && err.message) || String(err) }, status);
+  }
+}
+
+function computeTherapistsForCoordinators_() {
+  const workerById = {};
+  readWorkersSafe().forEach(function (w) { workerById[w.id] = w; });
+  const byWorker = {};
+  readAssignmentsSafe().forEach(function (a) {
+    const role = String(a.role || '').trim();
+    if (THERAPISTS_FEED_ROLES.indexOf(role) < 0) return;
+    const w = workerById[a.workerId];
+    if (!w) return; // orphaned placement
+    const name = String(w.name || '').trim();
+    if (!name) return;
+    let t = byWorker[a.workerId];
+    if (!t) {
+      t = byWorker[a.workerId] = {
+        name: name, phone: String(w.phone || ''), psychiatry: false,
+        active: false, housesSeen: {}, startDate: w.startDate || '',
+      };
+    }
+    if (role === 'פסיכיאטר/ית') t.psychiatry = true;
+    if (a.house) t.housesSeen[a.house] = true;
+    if (normalizeStatus(a.status) === 'active') t.active = true;
+  });
+  const out = Object.keys(byWorker).map(function (id) {
+    const t = byWorker[id];
+    return {
+      name: t.name,
+      phone: t.phone,
+      role: t.psychiatry ? 'פסיכיאטר/ית' : 'מטפל/ת',
+      active: t.active,
+      houses: Object.keys(t.housesSeen).sort(),
+      startDate: t.startDate,
+    };
+  });
+  out.sort(function (x, y) { return x.name.localeCompare(y.name); });
+  return out;
+}
+
+/* EDITOR-RUN, READ-ONLY: reportRecentTherapistsNow(n)
+   The n (default 2) most recently ADDED workers holding a current
+   therapist-role placement (מטפל/ת / פסיכיאטר/ית), newest first by the
+   worker's created_at, with what the coordinators feed will show for each
+   and what HR still has to fill in. Writes nothing; logs and returns. No
+   financial field is read into the result. */
+function reportRecentTherapistsNow(n) {
+  const limit = Number(n) > 0 ? Math.floor(Number(n)) : 2;
+  const workers = readWorkersSafe();
+  const byId = {};
+  workers.forEach(function (w) { byId[w.id] = w; });
+  const feedByName = {};
+  computeTherapistsForCoordinators_().forEach(function (t) { feedByName[t.name] = t; });
+  const placements = {};
+  readAssignmentsSafe().forEach(function (a) {
+    const role = String(a.role || '').trim();
+    if (THERAPISTS_FEED_ROLES.indexOf(role) < 0) return;
+    (placements[a.workerId] = placements[a.workerId] || []).push(
+      { house: a.house, role: role, status: normalizeStatus(a.status) });
+  });
+  const rows = Object.keys(placements).filter(function (id) { return byId[id]; }).map(function (id) {
+    const w = byId[id];
+    const missing = [];
+    if (!String(w.name || '').trim()) missing.push('שם');
+    if (!w.phone) missing.push('טלפון נייד');
+    if (!w.startDate) missing.push('תאריך תחילת עבודה');
+    placements[id].forEach(function (p) { if (!isHouse(p.house)) missing.push('בית לא תקין בשיבוץ'); });
+    return {
+      name: String(w.name || '').trim(),
+      createdAt: w.createdAt || '',
+      placements: placements[id],
+      inCoordinatorsFeed: !!feedByName[String(w.name || '').trim()],
+      feedEntry: feedByName[String(w.name || '').trim()] || null,
+      missing: missing,
+      complete: missing.length === 0,
+    };
+  });
+  rows.sort(function (x, y) { return String(y.createdAt).localeCompare(String(x.createdAt)); });
+  const result = rows.slice(0, limit);
+  Logger.log(JSON.stringify(result, null, 2));
+  return result;
 }
 
 /* ============================================================
