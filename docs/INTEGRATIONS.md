@@ -95,7 +95,7 @@ its own Script Property secret — no secret unlocks another feed.
 |---|---|
 | **Endpoint** | `APPS_SCRIPT_URL` with `?secret=SHARED_SECRET` |
 | **Direction** | both (GET roster bundle, POST mutations) |
-| **Frequency** | every `/api/data` and `/api/action` |
+| **Frequency** | every `/api/action`; `/api/data` only on a proxy-cache MISS / background refresh (60 s fresh + 5 min stale, invalidated by every write — see `docs/perf-load.md`). Inside Apps Script the GET bundle is itself cached for 300 s in CacheService (`_gasCache`, stripped by the proxy) |
 | **Error handling** | non-JSON upstream → `502`; upstream `_status ≥ 400` is re-thrown with that status |
 | **Retry** | **none** — a transient Apps Script hiccup surfaces to Moran as an error |
 | **Failure visibility** | a Hebrew error in the UI; details in the Railway log |
