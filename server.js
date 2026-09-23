@@ -2,9 +2,12 @@
 const express = require('express');
 const path = require('path');
 const crypto = require('crypto');
+const fs = require('fs');
+const compression = require('compression');
 
 const { signToken, parseToken, checkPin } = require('./lib/auth');
 const { validateAction } = require('./lib/validate');
+const { createProxyCache } = require('./lib/proxy-cache');
 
 const PORT = Number(process.env.PORT) || 3000;
 const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL || '';
@@ -35,6 +38,34 @@ if (process.env.NODE_ENV !== 'test' && require.main === module) {
 
 const app = express();
 app.disable('x-powered-by');
+
+// ---- request timing log ----
+// One line per request: method, PATH ONLY (never the query string), status,
+// duration and — for cached reads — the cache outcome. Never headers, never
+// a body: the login body carries the PIN and responses carry the token and
+// salary data. This is what docs/perf-load.md reads its timings from.
+app.use((req, res, next) => {
+  const t0 = process.hrtime.bigint();
+  res.on('finish', () => {
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    const xc = res.getHeader('X-Cache');
+    console.log(`[timing] ${req.method} ${req.path} ${res.statusCode} ${ms.toFixed(1)}ms` +
+      (xc ? ` cache=${xc}` : ''));
+  });
+  next();
+});
+
+// ---- gzip ----
+// The page is ~215 KB of HTML + ~125 KB of JS and /api/data is a large JSON
+// document; all of it was sent uncompressed. /api/login and /api/logout are
+// excluded: tiny bodies, and the login response carries the session token.
+app.use(compression({
+  filter: (req, res) => {
+    if (req.path === '/api/login' || req.path === '/api/logout') return false;
+    return compression.filter(req, res);
+  },
+}));
+
 app.use(express.json({ limit: '64kb' }));
 
 // ---- security headers ----
@@ -71,28 +102,92 @@ app.use((req, res, next) => {
   next();
 });
 
-// ---- static (public) but gate the index ----
-app.use(express.static(path.join(__dirname, 'public'), { index: false }));
-// expose only the shared client-safe helper (calc.js).
-// Server-only modules in lib/ (auth.js, validate.js) MUST NOT be exposed.
-app.get('/lib/calc.js', (req, res) => {
-  res.setHeader('Cache-Control', 'no-cache');
-  res.sendFile(path.join(__dirname, 'lib', 'calc.js'));
+// ---- static shell + PWA files ----
+//
+// None of these are behind the PIN — the PIN gate is the client-side overlay
+// plus requireAuth on /api/data and /api/action, and that is where the data
+// lives. The shell, the manifest, the icons and the service worker carry no
+// data and MUST be reachable without a session: a browser fetches the
+// manifest and icons without credentials, and an install check that gets a
+// 401 or an HTML page instead of JSON reports "app can't be installed".
+const PUBLIC_DIR = path.join(__dirname, 'public');
+const LONG_CACHE = 'public, max-age=31536000, immutable';
+const WEEK_CACHE = 'public, max-age=604800';
+
+// The client-safe libraries the page loads. Each is served with a content
+// hash in its URL (?v=<hash>), so the browser may keep it for a year and a
+// deploy that changes a file changes its URL. Server-only modules in lib/
+// (auth.js, validate.js, proxy-cache.js) are NOT exposed.
+const CLIENT_LIBS = ['calc.js', 'cost-engine.js', 'exports.js'];
+function sha(buf, n) {
+  return crypto.createHash('sha256').update(buf).digest('hex').slice(0, n || 12);
+}
+const LIB_VERSIONS = {};
+CLIENT_LIBS.forEach((name) => {
+  LIB_VERSIONS[name] = sha(fs.readFileSync(path.join(__dirname, 'lib', name)));
 });
-// The monthly cost engine. Same rule as calc.js: it is pure, client-safe
-// arithmetic over data the browser already holds, and contains no secret.
-app.get('/lib/cost-engine.js', (req, res) => {
+
+// index.html, read once, with the library URLs versioned. Served from memory
+// with an ETag and `no-cache`, so every load revalidates (a 304 when nothing
+// changed) and a deploy is picked up immediately.
+function buildIndexHtml() {
+  let html = fs.readFileSync(path.join(PUBLIC_DIR, 'index.html'), 'utf8');
+  CLIENT_LIBS.forEach((name) => {
+    html = html.split(`<script src="/lib/${name}"></script>`)
+      .join(`<script src="/lib/${name}?v=${LIB_VERSIONS[name]}"></script>`);
+  });
+  return html;
+}
+const INDEX_HTML = buildIndexHtml();
+const INDEX_ETAG = `"${sha(INDEX_HTML, 16)}"`;
+
+function sendIndex(req, res) {
   res.setHeader('Cache-Control', 'no-cache');
-  res.sendFile(path.join(__dirname, 'lib', 'cost-engine.js'));
+  res.setHeader('ETag', INDEX_ETAG);
+  if (req.get('if-none-match') === INDEX_ETAG) return res.status(304).end();
+  res.type('html').send(INDEX_HTML);
+}
+app.get('/', sendIndex);
+app.get('/index.html', sendIndex);
+
+CLIENT_LIBS.forEach((name) => {
+  app.get(`/lib/${name}`, (req, res) => {
+    res.setHeader('Cache-Control', req.query.v === LIB_VERSIONS[name] ? LONG_CACHE : 'no-cache');
+    res.sendFile(path.join(__dirname, 'lib', name));
+  });
 });
-// The CSV export builders. Same rule again: pure, client-safe projections of
-// data the browser already holds, and no secret.
-app.get('/lib/exports.js', (req, res) => {
+
+// Service worker: root scope, JavaScript MIME type, never cached by the HTTP
+// cache (the browser must see a new sw.js as soon as it is deployed).
+app.get('/sw.js', (req, res) => {
+  res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache');
-  res.sendFile(path.join(__dirname, 'lib', 'exports.js'));
+  res.setHeader('Service-Worker-Allowed', '/');
+  res.sendFile(path.join(PUBLIC_DIR, 'sw.js'));
 });
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+
+app.get('/manifest.webmanifest', (req, res) => {
+  res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.sendFile(path.join(PUBLIC_DIR, 'manifest.webmanifest'));
+});
+
+// Everything else in public/ (emblem, icons). Not content-hashed, so a week
+// rather than a year; the SW refreshes them network-first anyway.
+app.use(express.static(PUBLIC_DIR, {
+  index: false,
+  setHeaders(res, filePath) {
+    if (/\.png$/i.test(filePath)) res.setHeader('Cache-Control', WEEK_CACHE);
+  },
+}));
+
+// ---- /api responses are never stored by a browser or intermediary ----
+// They carry salary data and session tokens. (The proxy's own in-memory
+// cache below is server-side and keyed by route, not by anything the client
+// sends.)
+app.use('/api', (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  next();
 });
 
 // ---- health ----
@@ -251,8 +346,11 @@ async function callAppsScript(method, body) {
   };
   if (body !== undefined) init.body = JSON.stringify(body);
 
+  const t0 = Date.now();
   const resp = await fetch(url, init);
   const text = await resp.text();
+  // Timing only — never the URL (it carries SHARED_SECRET) and never a body.
+  console.log(`[upstream] ${method} ${resp.status} ${Date.now() - t0}ms bytes=${text.length}`);
   let parsed;
   try { parsed = JSON.parse(text); }
   catch (e) {
@@ -281,9 +379,19 @@ async function callAppsScript(method, body) {
 // sentence; the detail stays in the Railway log, where it is useful and not
 // public. Any extra keys the upstream attached (duplicates, conflictId) ride
 // along on a 4xx so the UI can act on them.
+// Log lines must never carry the upstream URL (it names the deployment) or
+// any secret, even when an error message happens to echo them.
+function redact(msg) {
+  let out = String(msg || '');
+  [APPS_SCRIPT_URL, SHARED_SECRET, HADRACHOT_STATUS_URL, HADRACHOT_STATUS_SECRET]
+    .filter((v) => v && v.length >= 8)
+    .forEach((v) => { out = out.split(v).join('[redacted]'); });
+  return out.replace(/([?&]secret=)[^&\s"']+/gi, '$1[redacted]');
+}
+
 function sendUpstreamError(res, err, tag) {
   const status = err.status || 500;
-  console.error(tag, status, err.message);
+  console.error(tag, status, redact(err.message));
   if (status >= 400 && status < 500) {
     const body = Object.assign({}, err.body || {}, { error: err.message });
     delete body._status;
@@ -292,10 +400,64 @@ function sendUpstreamError(res, err, tag) {
   return res.status(status).json({ error: 'שגיאה בשרת. נסי שוב בעוד רגע.' });
 }
 
+// ---- read cache for /api/data (see lib/proxy-cache.js) ----
+// One key, 'data', for the whole-Sheet read. The app is single-tenant — one
+// PIN, one data set — so every authenticated session sees the same payload;
+// requireAuth still runs BEFORE the cache on every request, so an
+// unauthenticated caller never reaches a cached value.
+const DATA_CACHE_KEY = 'data';
+function envMs(name, fallback) {
+  const raw = process.env[name];
+  const n = Number(raw);
+  return raw !== undefined && raw !== '' && Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+const proxyCache = createProxyCache({
+  freshMs: envMs('DATA_CACHE_FRESH_MS', 60 * 1000),
+  staleMs: envMs('DATA_CACHE_STALE_MS', 5 * 60 * 1000),
+  log: (line) => console.error(line),
+});
+// The Apps Script bundle reports whether IT served from CacheService
+// (_gasCache: hit | miss | off). Logged for docs/perf-load.md, then removed:
+// the browser never sees it.
+async function loadData() {
+  const data = await callAppsScript('GET');
+  if (data && Object.prototype.hasOwnProperty.call(data, '_gasCache')) {
+    console.log(`[upstream] bundle gas_cache=${String(data._gasCache).slice(0, 8)}`);
+    delete data._gasCache;
+  }
+  return data;
+}
+
+// Actions that only read. Every OTHER action is a write and drops the data
+// cache — whether it succeeded or not, since a 5xx/timeout may still have
+// written. An unknown future action is therefore treated as a write, which
+// is the safe direction.
+const READ_ONLY_ACTIONS = new Set(['getMonthlyActuals', 'getBudgets', 'getHearings']);
+
+// After a write the cache is empty, so the NEXT page load would pay for a
+// full Apps Script read. Re-fill it in the background once writes go quiet
+// (debounced, so a burst of edits costs one refresh, not one per edit).
+// Off by default under NODE_ENV=test so a timer can never leak one test's
+// fake upstream into the next; tests/perf-proxy.test.js turns it on.
+const REWARM_MS = envMs('DATA_CACHE_REWARM_MS', process.env.NODE_ENV === 'test' ? 0 : 1500);
+let rewarmTimer = null;
+function scheduleRewarm() {
+  if (!REWARM_MS) return;
+  if (rewarmTimer) clearTimeout(rewarmTimer);
+  rewarmTimer = setTimeout(() => {
+    rewarmTimer = null;
+    proxyCache.warm(DATA_CACHE_KEY, loadData);
+  }, REWARM_MS);
+  if (rewarmTimer.unref) rewarmTimer.unref();
+}
+
 app.get('/api/data', requireAuth, async (req, res) => {
+  const t0 = Date.now();
   try {
-    const data = await callAppsScript('GET');
-    res.json(data);
+    const { value, status } = await proxyCache.get(DATA_CACHE_KEY, loadData);
+    res.setHeader('X-Cache', status);
+    res.setHeader('Server-Timing', `proxy;desc="${status}";dur=${Date.now() - t0}`);
+    res.json(value);
   } catch (err) {
     sendUpstreamError(res, err, '[GET /api/data]');
   }
@@ -329,7 +491,7 @@ app.get('/api/hadrachot-status', requireAuth, async (req, res) => {
     }
     res.json({ configured: true, data: parsed });
   } catch (err) {
-    console.error('[GET /api/hadrachot-status]', err.status || 502, err.message);
+    console.error('[GET /api/hadrachot-status]', err.status || 502, redact(err.message));
     // Generic body on purpose — never echo upstream details to the browser.
     res.status(err.status || 502).json({ error: 'hadrachot status unavailable' });
   }
@@ -342,11 +504,20 @@ app.post('/api/action', requireAuth, async (req, res) => {
   } catch (err) {
     return res.status(err.status || 400).json({ error: err.message });
   }
+  const isWrite = !READ_ONLY_ACTIONS.has(payload.action);
+  // Invalidate BEFORE the write too: a read that starts while the write is
+  // in flight must not be served (or cache) the pre-write snapshot.
+  if (isWrite) proxyCache.invalidate(DATA_CACHE_KEY);
   try {
     const result = await callAppsScript('POST', payload);
     res.json(result);
   } catch (err) {
     sendUpstreamError(res, err, '[POST /api/action]');
+  } finally {
+    if (isWrite) {
+      proxyCache.invalidate(DATA_CACHE_KEY);
+      scheduleRewarm();
+    }
   }
 });
 
@@ -361,6 +532,9 @@ if (require.main === module) {
   // but is unreachable from outside.
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`E-ZONE staffing server listening on 0.0.0.0:${PORT} (PORT=${PORT}, process.env.PORT=${process.env.PORT || '<unset>'})`);
+    // Warm the data cache so the first page load after a deploy/restart is
+    // not the one that pays for the cold Apps Script execution.
+    proxyCache.warm(DATA_CACHE_KEY, loadData);
   });
 }
 
@@ -368,4 +542,7 @@ module.exports = {
   app, callAppsScript,
   _loginAttempts: loginAttempts,
   _revokedSessions: revokedSessions,
+  _proxyCache: proxyCache,
+  _libVersions: LIB_VERSIONS,
+  READ_ONLY_ACTIONS,
 };

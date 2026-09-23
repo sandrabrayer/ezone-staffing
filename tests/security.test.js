@@ -14,7 +14,7 @@ process.env.SHARED_SECRET = 's'.repeat(40);
 process.env.MORAN_PIN = '4242';
 process.env.SESSION_SECRET = 'x'.repeat(64);
 
-const { app, _loginAttempts, _revokedSessions } = require('../server');
+const { app, _loginAttempts, _revokedSessions, _proxyCache } = require('../server');
 const { signToken, parseToken } = require('../lib/auth');
 
 const originalFetch = global.fetch;
@@ -39,6 +39,7 @@ async function raw(base, path, opts) {
 function reset() {
   _loginAttempts.clear();
   _revokedSessions.clear();
+  _proxyCache.clear();
 }
 
 async function login(base, pin) {

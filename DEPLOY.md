@@ -161,6 +161,14 @@ any fresh setup — and when enabling a new feed — confirm:
 | `THERAPISTS_READ_SECRET` | optional | unlocks ONLY the read-only `getTherapistsForTherapists` feed (therapists app roster sync). Fail-closed: unset → the feed answers 401. Never unlocks the roster. Generate with `openssl rand -hex 32`; copy the same value + the staffing `/exec` URL into the therapists app's Script Properties |
 | `COORDINATORS_READ_SECRET` | optional | unlocks ONLY the read-only `getGuidesForCoordinators` feed (coordinators app guide roster sync). Fail-closed: unset → the feed answers 401. Never unlocks the roster. Generate with `openssl rand -hex 32`; copy the same value into the coordinators Apps Script as `STAFFING_GUIDES_SECRET`, together with the staffing `/exec` URL as `STAFFING_SHEETS_URL` |
 
+No Script Property is needed for the read cache (see `docs/perf-load.md`):
+the page-load bundle lives in the script's CacheService for 300 s and every
+`doPost` clears it. After editing the Sheet **by hand** (or running an
+import straight against `/exec`), run **`clearBundleCacheNow`** from the
+editor if the change must show immediately; otherwise it appears within the
+TTL. The Railway proxy keeps its own copy (60 s fresh + 5 min stale,
+refreshed in the background) — a restart or any save in the app clears it.
+
 ---
 
 ## Security notes
