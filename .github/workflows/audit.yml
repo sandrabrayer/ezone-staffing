@@ -1,0 +1,38 @@
+name: Dependency audit
+
+# Fails when a PRODUCTION dependency has a high or critical advisory.
+#
+# Deliberately a SEPARATE workflow from "Tests": Railway gates deploys on the
+# Tests check, and a newly published advisory must never silently block a
+# deploy of unrelated work. This check goes red and is seen; it does not stop
+# the deploy. devDependencies (jsdom and its tree, used only by the test
+# suite) are excluded with --omit=dev — they never run in production.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audit-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      # Audits the committed lockfile; no install and no lifecycle scripts run.
+      - name: npm audit (production dependencies, high+)
+        run: npm audit --audit-level=high --omit=dev
