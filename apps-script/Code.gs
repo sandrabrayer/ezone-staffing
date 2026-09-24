@@ -170,7 +170,7 @@ const FEED_CONSUMERS = ['coordinators', 'therapists', 'hadrachot', 'coordinators
 //   15 allowance, 16 status, 17 status_date  (fixes the leave-status bug —
 //      previously validated but never persisted, so חל"ד never stuck);
 //   18-23 the per_session 3-rate model (individual / group / external),
-//      populated for existing rows by migratePerSessionRatesToThreeRate().
+//      populated for existing rows by applyPerSessionRatesMigrationNow().
 const HEADERS_ASSIGNMENTS = [
   'id', 'worker_id', 'house', 'role', 'role_detail', 'employment_type',
   'salary', 'pct', 'hourly_rate', 'est_hours',
@@ -2766,7 +2766,7 @@ function setupSheetsV3() {
 
 // ---------- one-time migration: per_session single rate → 3-rate model ----------
 //
-// Run ONCE from the Apps Script editor (Run ▸ migratePerSessionRatesToThreeRate)
+// Run ONCE from the Apps Script editor (Run ▸ applyPerSessionRatesMigrationNow)
 // AFTER deploying the new Code.gs. For every existing per_session assignment
 // it copies the legacy single pair into the new `individual` pair:
 //   session_rate  → rate_individual
@@ -2776,21 +2776,29 @@ function setupSheetsV3() {
 // Idempotent: a row whose rate_individual is already populated is skipped,
 // so re-running is safe. Mirrors perSessionRatesToThreeRate() in
 // lib/migrate.js (the pure, unit-tested mapping). Use
-// dryRunMigratePerSessionRatesToThreeRate() first to preview the count.
-function migratePerSessionRatesToThreeRate() {
-  return _migratePerSessionRates(false);
+// perSessionRatesMigrationPreviewNow() first to preview the count. See
+// EDITOR-RUN PAIRS above cleanupDecisionsPreviewNow.
+// DRY RUN — writes nothing, ever. The run that writes is applyPerSessionRatesMigrationNow().
+function perSessionRatesMigrationPreviewNow() {
+  return runPerSessionRatesMigration_(true);
 }
 
-function dryRunMigratePerSessionRatesToThreeRate() {
-  return _migratePerSessionRates(true);
+// WRITES. The dry run is perSessionRatesMigrationPreviewNow(); its first log line says so.
+function applyPerSessionRatesMigrationNow() {
+  Logger.log('THIS RUN WRITES — applyPerSessionRatesMigrationNow copies the legacy per-session rates into the 3-rate columns. The DRY RUN is perSessionRatesMigrationPreviewNow(), ' +
+    'which writes nothing; run that first and read its plan if you have not.');
+  return runPerSessionRatesMigration_(false);
 }
 
-function _migratePerSessionRates(dryRun) {
+// dryRun defaults to TRUE. Only the explicit `false` writes anything —
+// the header repair included (it used to run on a dry run too).
+function runPerSessionRatesMigration_(dryRun) {
+  const apply = (dryRun === false);
   const sh = sheetByName(ASSIGNMENTS_TAB);
   // Guarantee the appended columns physically exist + carry their labels.
-  ensureHeaders(sh, HEADERS_ASSIGNMENTS);
+  if (apply) ensureHeaders(sh, HEADERS_ASSIGNMENTS);
   const lastRow = sh.getLastRow();
-  if (lastRow < 2) return { migrated: 0, skipped: 0, total: 0, dryRun: !!dryRun };
+  if (lastRow < 2) return { migrated: 0, skipped: 0, total: 0, dryRun: !apply };
 
   const lock = LockService.getScriptLock();
   lock.waitLock(15000);
@@ -2813,10 +2821,10 @@ function _migratePerSessionRates(dryRun) {
       indiv[i][1] = mapped.sessionsIndividual;
       migrated++;
     }
-    if (!dryRun && migrated > 0) {
+    if (apply && migrated > 0) {
       sh.getRange(2, 19, n, 2).setValues(indiv);
     }
-    return { migrated: migrated, skipped: skipped, total: total, dryRun: !!dryRun };
+    return { migrated: migrated, skipped: skipped, total: total, dryRun: !apply };
   } finally {
     lock.releaseLock();
   }
@@ -4322,8 +4330,8 @@ function reportRecentTherapistsNow(n) {
      runDataIntegrityReportNow()          → logs + the two tabs
      runDataIntegrityReportToSheetNow()   → the same, plus a dated
                                             IntegrityReport_ snapshot tab
-     applyCleanupDecisionsNow(dryRun)     → acts on «החלטה».
-                                            DRY RUN unless dryRun === false.
+     cleanupDecisionsPreviewNow()         → DRY RUN of «החלטה».
+     applyCleanupDecisionsNow()           → acts on «החלטה». WRITES.
 
    The whole computation is the pure function
    computeDataIntegrityReport_(data, todayYmd), so it is unit-tested
@@ -5180,7 +5188,7 @@ function cleanupSheetRow_(f, previous) {
   const prev = previous[key] || {};
   // A record-level finding has no group, so its own id goes in the ids
   // column: the row must name what it is about without anyone decoding the
-  // key, and applyCleanupDecisionsNow reads the same column either way.
+  // key, and runCleanupDecisions_ reads the same column either way.
   const ids = (f.members || []).length ? f.members : [f.entityId];
   return [
     f.code,
@@ -5200,7 +5208,7 @@ function cleanupSheetRow_(f, previous) {
 // Rebuild «ניקוי נתונים». Overwritten, never appended; decisions are carried
 // over by key. The «החלטה» column gets the four-value dropdown so a decision
 // is picked, never typed — a typo there would simply be ignored by
-// applyCleanupDecisionsNow, which is worse than being impossible.
+// runCleanupDecisions_, which is worse than being impossible.
 function writeCleanupTab_(report) {
   const previous = readCleanupDecisions_();
   const items = cleanupFindings_(report);
@@ -5267,7 +5275,7 @@ function runDataIntegrityReportToSheetNow() {
 }
 
 /* ============================================================
-   Guided cleanup — applyCleanupDecisionsNow(dryRun)
+   Guided cleanup — cleanupDecisionsPreviewNow() / applyCleanupDecisionsNow()
    ------------------------------------------------------------
    Reads the «החלטה» column of «ניקוי נתונים» and acts on it.
 
@@ -5283,9 +5291,9 @@ function runDataIntegrityReportToSheetNow() {
                      because that would orphan cost.
      תקן           — a manual edit. Reported, never performed.
 
-   DRY RUN BY DEFAULT. Nothing is written unless dryRun === false —
-   not the sheet, not the audit log. applyCleanupDecisionsNow() with
-   no argument is always safe to run.
+   cleanupDecisionsPreviewNow() writes nothing — not the sheet, not the
+   audit log — and is always safe to run. applyCleanupDecisionsNow()
+   is the run that writes.
 
    Every applied change is written to the audit log, one row per
    field, exactly like a mutation from the app.
@@ -5390,28 +5398,33 @@ function readCleanupPlan_() {
   return out;
 }
 
-// The Apps Script editor's Run button calls the selected function with NO
-// arguments, so `applyXNow(false)` cannot be triggered from the dropdown at
-// all — every Run is a dry run. Editing Code.gs in the editor to get around
-// that would mean hand-editing deployed code, which is worse than the
-// problem.
+// EDITOR-RUN PAIRS — one naming rule for every maintenance run that can
+// write (tests/for-real-wrappers.test.js pins it):
 //
-// So each dry-run-first function gets a zero-argument twin whose NAME says
-// what it does. The bare function keeps its dryRun=true default exactly as
-// it was: picking the wrong row in the dropdown must stay harmless, and the
-// one that writes has to be chosen on purpose, by a name nobody selects by
-// accident. Its first log line says so again, before anything happens.
+//   <thing>PreviewNow()   DRY RUN. Writes nothing, ever.
+//   apply<Thing>Now()     WRITES. Its FIRST log line is «THIS RUN WRITES»,
+//                         naming the preview, before anything happens.
+//
+// Both take NO arguments, because the editor's Run button passes none —
+// a `dryRun` parameter could never be set to false from the dropdown. The
+// shared work lives in run<Thing>_(dryRun); the trailing underscore keeps
+// it out of the Run dropdown entirely, and it stays dry unless handed the
+// literal `false`. None of these is an HTTP action.
 
-// WRITES. The dry run is applyCleanupDecisionsNow().
-function applyCleanupDecisionsForRealNow() {
-  Logger.log('THIS RUN WRITES — applyCleanupDecisionsForRealNow applies the «החלטה» ' +
-    'decisions to the sheet. The DRY RUN is applyCleanupDecisionsNow(), which writes ' +
-    'nothing; run that first and read its plan if you have not.');
-  return applyCleanupDecisionsNow(false);
+// DRY RUN — writes nothing, ever. The run that writes is applyCleanupDecisionsNow().
+function cleanupDecisionsPreviewNow() {
+  return runCleanupDecisions_(true);
+}
+
+// WRITES. The dry run is cleanupDecisionsPreviewNow(); its first log line says so.
+function applyCleanupDecisionsNow() {
+  Logger.log('THIS RUN WRITES — applyCleanupDecisionsNow applies the «החלטה» decisions to the sheet. The DRY RUN is cleanupDecisionsPreviewNow(), ' +
+    'which writes nothing; run that first and read its plan if you have not.');
+  return runCleanupDecisions_(false);
 }
 
 // dryRun defaults to TRUE. Only the explicit `false` applies anything.
-function applyCleanupDecisionsNow(dryRun) {
+function runCleanupDecisions_(dryRun) {
   const apply = (dryRun === false);
   const result = {
     dryRun: !apply,
@@ -5575,7 +5588,7 @@ function applyCleanupDecisionsNow(dryRun) {
   });
   result.skipped.forEach(function (s) { Logger.log('skip | ' + s.key + ' | ' + s.why); });
   if (result.dryRun) {
-    Logger.log('Run applyCleanupDecisionsNow(false) to apply. Nothing above has happened yet.');
+    Logger.log('Run applyCleanupDecisionsNow() to apply. Nothing above has happened yet.');
   }
   return result;
 }
@@ -5594,17 +5607,17 @@ function applyCleanupDecisionsNow(dryRun) {
                                           house. Run it BEFORE and
                                           AFTER every fix so each
                                           change is attributable.
-     applyVerifiedFixesNow(dryRun)      → the start-date typo, the
+     verifiedFixesPreviewNow()          → DRY RUN of the fixes below.
+     applyVerifiedFixesNow()            → the start-date typo, the
                                           leavers, the payroll-floor
-                                          dates and the rename.
-                                          DRY RUN unless dryRun === false.
+                                          dates and the rename. WRITES.
      writeMissingAssignmentsTabNow()    → builds «שיבוצים חסרים»,
                                           the proposal sheet for the
                                           paid-but-unplaced workers.
-     applyMissingAssignmentsNow(dryRun) → creates assignments ONLY
+     missingAssignmentsPreviewNow()     → DRY RUN of the one below.
+     applyMissingAssignmentsNow()       → creates assignments ONLY
                                           from rows that are fully
-                                          filled in AND approved.
-                                          DRY RUN unless dryRun === false.
+                                          filled in AND approved. WRITES.
 
    Two rules hold across all of it:
 
@@ -6092,17 +6105,21 @@ function readWorkersArchiveIds_() {
 
 /* ---------- applying it ---------- */
 
-// WRITES. The dry run is applyVerifiedFixesNow(). See the note on the
-// zero-argument twins above applyCleanupDecisionsForRealNow.
-function applyVerifiedFixesForRealNow() {
-  Logger.log('THIS RUN WRITES — applyVerifiedFixesForRealNow applies the payroll-verified ' +
-    'fixes to the sheet. The DRY RUN is applyVerifiedFixesNow(), which writes nothing; ' +
-    'run that first and read its plan if you have not.');
-  return applyVerifiedFixesNow(false);
+// See EDITOR-RUN PAIRS above cleanupDecisionsPreviewNow.
+// DRY RUN — writes nothing, ever. The run that writes is applyVerifiedFixesNow().
+function verifiedFixesPreviewNow() {
+  return runVerifiedFixes_(true);
+}
+
+// WRITES. The dry run is verifiedFixesPreviewNow(); its first log line says so.
+function applyVerifiedFixesNow() {
+  Logger.log('THIS RUN WRITES — applyVerifiedFixesNow applies the payroll-verified fixes to the sheet. The DRY RUN is verifiedFixesPreviewNow(), ' +
+    'which writes nothing; run that first and read its plan if you have not.');
+  return runVerifiedFixes_(false);
 }
 
 // dryRun defaults to TRUE. Only the explicit `false` writes anything.
-function applyVerifiedFixesNow(dryRun) {
+function runVerifiedFixes_(dryRun) {
   const apply = (dryRun === false);
   const result = { dryRun: !apply, planned: [], applied: [], alreadyDone: [], warnings: [] };
 
@@ -6118,7 +6135,7 @@ function applyVerifiedFixesNow(dryRun) {
     // still cheap.
     if (plan.errors.length) {
       plan.errors.forEach(function (e) { Logger.log('ABORT | ' + e); });
-      throw new Error('applyVerifiedFixesNow aborted — ' + plan.errors.length +
+      throw new Error('the verified fixes aborted — ' + plan.errors.length +
         ' unresolved name(s). NOTHING was written. ' + plan.errors.join(' | '));
     }
 
@@ -6193,7 +6210,7 @@ function applyVerifiedFixesNow(dryRun) {
   // two is wrong and only a person can say which.
   result.warnings.forEach(function (w) { Logger.log('WARN | ' + w); });
   if (result.dryRun) {
-    Logger.log('Run applyVerifiedFixesNow(false) to apply. Nothing above has happened yet.');
+    Logger.log('Run applyVerifiedFixesNow() to apply. Nothing above has happened yet.');
     Logger.log('Run logMonthTotalsNow() before and after, so every shekel that moves is attributable.');
   }
   return result;
@@ -6487,7 +6504,7 @@ function writeMissingAssignmentsTabNow() {
   }
   Logger.log('«' + MISSING_ASSIGNMENTS_TAB + '»: ' + items.length + ' worker(s) awaiting a placement.');
   Logger.log('Fill in בית / תפקיד / סוג העסקה / סכום / כמות / תאריך, set «אשר» to «' +
-    MA_APPROVE_YES + '», then run applyMissingAssignmentsNow() — a DRY RUN — to see the plan.');
+    MA_APPROVE_YES + '», then run missingAssignmentsPreviewNow() — a DRY RUN — to see the plan.');
   Logger.log('The «בית מוצע» column is a suggestion from the payroll department. It is never written anywhere.');
   // The reference columns, named out loud, because a number on a sheet that
   // nothing calculates with is exactly the kind of thing that gets used for
@@ -6512,17 +6529,21 @@ function maApplyDropdown_(sh, col, rowCount, values) {
   sh.getRange(2, col, rowCount, 1).setDataValidation(rule);
 }
 
-// WRITES. The dry run is applyMissingAssignmentsNow(). See the note on the
-// zero-argument twins above applyCleanupDecisionsForRealNow.
-function applyMissingAssignmentsForRealNow() {
-  Logger.log('THIS RUN WRITES — applyMissingAssignmentsForRealNow creates the approved ' +
-    'placements from «שיבוצים חסרים». The DRY RUN is applyMissingAssignmentsNow(), which ' +
-    'creates nothing; run that first and read its plan if you have not.');
-  return applyMissingAssignmentsNow(false);
+// See EDITOR-RUN PAIRS above cleanupDecisionsPreviewNow.
+// DRY RUN — writes nothing, ever. The run that writes is applyMissingAssignmentsNow().
+function missingAssignmentsPreviewNow() {
+  return runMissingAssignments_(true);
+}
+
+// WRITES. The dry run is missingAssignmentsPreviewNow(); its first log line says so.
+function applyMissingAssignmentsNow() {
+  Logger.log('THIS RUN WRITES — applyMissingAssignmentsNow creates the approved placements from «שיבוצים חסרים». The DRY RUN is missingAssignmentsPreviewNow(), ' +
+    'which writes nothing; run that first and read its plan if you have not.');
+  return runMissingAssignments_(false);
 }
 
 // dryRun defaults to TRUE. Only the explicit `false` creates anything.
-function applyMissingAssignmentsNow(dryRun) {
+function runMissingAssignments_(dryRun) {
   const apply = (dryRun === false);
   const result = { dryRun: !apply, rows: 0, planned: [], created: [], skipped: [] };
 
@@ -6624,7 +6645,7 @@ function applyMissingAssignmentsNow(dryRun) {
     Logger.log('skip | ' + (s.name || s.id) + ' | ' + s.why);
   });
   if (result.dryRun) {
-    Logger.log('Run applyMissingAssignmentsNow(false) to create them. Nothing above has happened yet.');
+    Logger.log('Run applyMissingAssignmentsNow() to create them. Nothing above has happened yet.');
   }
   return result;
 }
@@ -6643,17 +6664,14 @@ function maSetEffectiveFrom_(assignmentId, ymd) {
 }
 
 /* =====================================================================
-   Marketer migration — migrateMarketersNow(dryRun)   (editor-run)
+   Marketer migration — marketersMigrationPreviewNow() / applyMarketersMigrationNow()
 
    Before the «משווק/ת» role existed, a marketer was entered as role «אחר»
    with פירוט «משווק». This moves every such CURRENT placement to
    role «משווק/ת» + employment type «עמלה לפי מקרה» (per_case_commission).
 
-   - DRY RUN BY DEFAULT. Only the literal `false` writes anything. Run it
-     once as-is, read the «row |» lines in the log, then run
-     applyMarketersMigrationNow() — the zero-argument twin that calls
-     migrateMarketersNow(false), because the editor's Run button cannot
-     pass an argument.
+   - Run marketersMigrationPreviewNow() (writes nothing), read the «row |»
+     lines in the log, then run applyMarketersMigrationNow() to write.
    - Writes exactly two cells per placement: role and employment_type.
      NOTHING is deleted: role_detail and every cost column keep their
      values (the cost engine prices per_case_commission at 0 whatever they
@@ -6705,25 +6723,22 @@ function planMarketerMigration_(workers, assignments) {
   return { actions: actions, alreadyDone: alreadyDone };
 }
 
-// The Apps Script editor's Run button calls the selected function with NO
-// arguments, so migrateMarketersNow(false) cannot be started from the
-// dropdown — every Run of it is a dry run. Same fix as the other
-// dry-run-first functions: a zero-argument twin that passes the literal
-// `false` and nothing else, and says THIS RUN WRITES before anything
-// happens. It is exactly as idempotent as migrateMarketersNow (a second
-// run plans nothing and writes nothing) and returns and logs the same
-// report. Not an HTTP action — doPostAction_ does not name it.
+// See EDITOR-RUN PAIRS above cleanupDecisionsPreviewNow. Idempotent: a
+// second apply plans nothing and writes nothing.
+// DRY RUN — writes nothing, ever. The run that writes is applyMarketersMigrationNow().
+function marketersMigrationPreviewNow() {
+  return runMarketersMigration_(true);
+}
 
-// WRITES. The dry run is migrateMarketersNow().
+// WRITES. The dry run is marketersMigrationPreviewNow(); its first log line says so.
 function applyMarketersMigrationNow() {
-  Logger.log('THIS RUN WRITES — applyMarketersMigrationNow moves «אחר» + «משווק» ' +
-    'placements to משווק/ת + עמלה לפי מקרה. The DRY RUN is migrateMarketersNow(), which ' +
-    'writes nothing; run that first and read its plan if you have not.');
-  return migrateMarketersNow(false);
+  Logger.log('THIS RUN WRITES — applyMarketersMigrationNow moves «אחר» + «משווק» placements to משווק/ת + עמלה לפי מקרה. The DRY RUN is marketersMigrationPreviewNow(), ' +
+    'which writes nothing; run that first and read its plan if you have not.');
+  return runMarketersMigration_(false);
 }
 
 // dryRun defaults to TRUE. Only the explicit `false` writes anything.
-function migrateMarketersNow(dryRun) {
+function runMarketersMigration_(dryRun) {
   const apply = (dryRun === false);
   const result = { dryRun: !apply, planned: [], applied: [], alreadyDone: [] };
   const lock = LockService.getScriptLock();
