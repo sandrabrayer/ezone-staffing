@@ -94,7 +94,10 @@ npm start
    - `SHARED_SECRET`   — same value as in Apps Script Script Properties
    - `MORAN_PIN`       — Moran's PIN (digits, 4–12 chars)
    - `SESSION_SECRET`  — different long random hex (32+ bytes)
-4. Optional: `SESSION_DAYS` (default `7`).
+4. Optional: `SESSION_DAYS` (default `7`). Performance knobs (all optional,
+   defaults are right for production): `UPSTREAM_CONCURRENCY` (2),
+   `CACHE_SNAPSHOT_DIR` (defaults to `<volume>/staffing-cache` when a Railway
+   volume is mounted) — see `docs/perf-open.md`.
 5. Deploy. Open the public URL → enter the PIN → the app loads.
 6. Health check: `GET /api/health` → `{"ok":true,...}`.
 

@@ -580,7 +580,7 @@ test('tampered token is rejected', async () => {
 
 // ----- GET /api/data shape -----
 
-test('GET /api/data returns v3 shape with legacy passthrough keys', async () => {
+test('GET /api/data returns the v3 shape; legacy v2 keys and lazy parts are not sent', async () => {
   const { srv, base } = await listen();
   try {
     const token = await login(base);
@@ -592,10 +592,12 @@ test('GET /api/data returns v3 shape with legacy passthrough keys', async () => 
     assert.deepEqual(r.json.absences, []);
     assert.deepEqual(r.json.coverages, []);
     assert.deepEqual(r.json.archiveV3, []);
-    // legacy passthrough (still in the response during the transition)
-    assert.deepEqual(r.json.houses, { ramot: [], asher: [], ofroni: [], rehab: [] });
-    assert.deepEqual(r.json.events, []);
-    assert.deepEqual(r.json.archive, []);
+    // The legacy v2 passthrough (houses / events / archive / _compat) is
+    // read by nothing in the page, so the proxy no longer ships it (perf:
+    // docs/perf-open.md). hearings is a LAZY part: /api/data/hearings.
+    for (const k of ['houses', 'events', 'archive', '_compat', 'hearings']) {
+      assert.equal(k in r.json, false, k + ' is not in /api/data');
+    }
   } finally { await close(srv); }
 });
 

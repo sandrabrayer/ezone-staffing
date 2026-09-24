@@ -395,3 +395,53 @@ test('guard: every HEADERS_* array still starts with its snapshot (append-only)'
     assert.deepStrictEqual(now.slice(0, snap.length), snap, `${name} must only grow at the end`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// view=app — the LEAN bundle the Railway proxy asks for (docs/perf-open.md)
+// ---------------------------------------------------------------------------
+
+test('lean: view=app skips every legacy v2 tab read and returns them empty', () => {
+  const full = loadCtx();
+  get(full);
+  const fullReads = full.counters.dataRange;
+  const lean = loadCtx();
+  const b = get(lean, { view: 'app' });
+  assert.ok(lean.counters.dataRange < fullReads, `lean ${lean.counters.dataRange} < full ${fullReads} getDataRange reads`);
+  // The seed has one legacy tab (ramot): exactly that read is gone.
+  assert.equal(fullReads - lean.counters.dataRange, 1);
+  assert.deepStrictEqual(b.houses, {});
+  assert.deepStrictEqual(b.events, []);
+  assert.deepStrictEqual(b.archive, []);
+  assert.equal(b.workers.length, 2, 'the v3 tabs are all there');
+  assert.equal(b.feedLog.length, 1);
+});
+
+test('lean: every v3 key is identical to the full bundle', () => {
+  const a = get(loadCtx());
+  const b = get(loadCtx(), { view: 'app' });
+  for (const k of ['workers', 'assignments', 'absences', 'coverages', 'archiveV3', 'monthlyActuals', 'budgets', 'hearings', 'feedLog']) {
+    assert.deepStrictEqual(b[k], a[k], k);
+  }
+});
+
+test('lean: cached under its own prefix of the SAME version token — one invalidation drops both', () => {
+  const cache = fakeCache();
+  const ctx = loadCtx({ cache });
+  const first = get(ctx, { view: 'app' });
+  assert.equal(first._gasCache, 'miss', 'first lean read fills the cache');
+  newExecution(ctx);
+  const reads = ctx.counters.dataRange;
+  const again = out(ctx.doGet({ parameter: { secret: SECRET, view: 'app' } }));
+  assert.equal(ctx.counters.dataRange - reads, 1, 'cache hit: only feed_log is read');
+  assert.equal(again.workers.length, 2);
+  const keys = [...cache.store.keys()];
+  assert.ok(keys.some((k) => /^bundle:[^:]+:app:n$/.test(k)), 'lean count key');
+  newExecution(ctx);
+  get(ctx); // the full bundle must NOT be served from the lean entry
+  assert.ok([...cache.store.keys()].some((k) => /^bundle:[^:]+:n$/.test(k)), 'full bundle cached separately');
+  vm.runInContext('invalidateBundleCache_()', ctx);
+  newExecution(ctx);
+  const before = ctx.counters.dataRange;
+  get(ctx, { view: 'app' });
+  assert.ok(ctx.counters.dataRange - before > 1, 'after invalidation the lean bundle is re-read');
+});

@@ -8,6 +8,8 @@ const compression = require('compression');
 const { signToken, parseToken, checkPin } = require('./lib/auth');
 const { validateAction } = require('./lib/validate');
 const { createProxyCache } = require('./lib/proxy-cache');
+const { createUpstreamQueue, classifyUpstream, fetchWithDeadline } = require('./lib/upstream');
+const cacheSnapshot = require('./lib/cache-snapshot');
 
 const PORT = Number(process.env.PORT) || 3000;
 const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL || '';
@@ -333,38 +335,108 @@ app.post('/api/logout', (req, res) => {
 });
 
 // ---- Apps Script proxy ----
-async function callAppsScript(method, body) {
+//
+// Every call goes through ONE queue (lib/upstream.js), capped at
+// UPSTREAM_CONCURRENCY (default 2): a burst of simultaneous executions is
+// exactly what makes Apps Script answer with an HTML page instead of JSON
+// (the coordinators incident of Sep 15–16). User requests take the next free
+// slot ahead of queued background work (warm-up, refresh, keep-warm).
+//
+// READS are retried when the answer is retryable (HTML / quota page, 429,
+// 5xx, timeout): up to twice, after RETRY_BASE_MS and 3× that. WRITES are
+// never retried — a write that timed out may still have happened.
+function envMs(name, fallback) {
+  const raw = process.env[name];
+  const n = Number(raw);
+  return raw !== undefined && raw !== '' && Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+const UPSTREAM_CONCURRENCY = envMs('UPSTREAM_CONCURRENCY', 2);
+const upstreamQueue = createUpstreamQueue({ concurrency: UPSTREAM_CONCURRENCY });
+const READ_DEADLINE_MS = envMs('UPSTREAM_READ_TIMEOUT_MS', 45 * 1000);
+const WRITE_DEADLINE_MS = envMs('UPSTREAM_WRITE_TIMEOUT_MS', 120 * 1000);
+const RETRY_BASE_MS = envMs('UPSTREAM_RETRY_BASE_MS', 400);
+const READ_RETRIES = 2;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function queueDepth() {
+  const d = upstreamQueue.depth();
+  return `${d.active + d.queued}/${d.limit}`;
+}
+
+// opts: { lane: 'user' | 'background', retry: boolean, query: {k: v}, meta: {} }
+// meta is filled in with { upstream, attempts, kind } for the log line.
+async function callAppsScript(method, body, opts) {
+  const o = opts || {};
+  const meta = o.meta || {};
   if (!APPS_SCRIPT_URL || !SHARED_SECRET) {
     throw Object.assign(new Error('server misconfigured'), { status: 500 });
   }
   const sep = APPS_SCRIPT_URL.includes('?') ? '&' : '?';
-  const url = `${APPS_SCRIPT_URL}${sep}secret=${encodeURIComponent(SHARED_SECRET)}`;
+  let url = `${APPS_SCRIPT_URL}${sep}secret=${encodeURIComponent(SHARED_SECRET)}`;
+  Object.keys(o.query || {}).forEach((k) => {
+    url += `&${encodeURIComponent(k)}=${encodeURIComponent(o.query[k])}`;
+  });
   const init = {
     method,
     redirect: 'follow',
     headers: { 'Content-Type': 'application/json' },
   };
   if (body !== undefined) init.body = JSON.stringify(body);
+  const deadline = method === 'GET' ? READ_DEADLINE_MS : WRITE_DEADLINE_MS;
+  const maxAttempts = o.retry ? 1 + READ_RETRIES : 1;
+  const label = String((body && body.action) || (method === 'GET' ? 'data' : 'post')).slice(0, 40);
 
-  const t0 = Date.now();
-  const resp = await fetch(url, init);
-  const text = await resp.text();
-  // Timing only — never the URL (it carries SHARED_SECRET) and never a body.
-  console.log(`[upstream] ${method} ${resp.status} ${Date.now() - t0}ms bytes=${text.length}`);
-  let parsed;
-  try { parsed = JSON.parse(text); }
-  catch (e) {
-    throw Object.assign(new Error('upstream non-JSON: ' + text.slice(0, 200)), { status: 502 });
+  async function once() {
+    const t0 = Date.now();
+    const resp = await fetchWithDeadline(fetch, url, init, deadline);
+    const text = await resp.text();
+    meta.upstream = resp.status;
+    // Timing only — never the URL (it carries SHARED_SECRET) and never a body.
+    console.log(`[upstream] ${method} ${resp.status} ${Date.now() - t0}ms bytes=${text.length}`);
+    let parsed;
+    try { parsed = JSON.parse(text); }
+    catch (e) {
+      const cls = classifyUpstream(resp.status, text);
+      throw Object.assign(new Error('upstream non-JSON: ' + text.slice(0, 200)), {
+        status: 502, retryable: cls.retryable, upstreamKind: cls.kind, upstreamStatus: resp.status,
+      });
+    }
+    const status = Number(parsed._status) || 200;
+    delete parsed._status;
+    if (status >= 400) {
+      const err = new Error(parsed.error || 'upstream error');
+      err.status = status;
+      err.body = parsed;
+      err.upstreamStatus = resp.status;
+      err.upstreamKind = 'app';
+      // An Apps Script 5xx (lock or service timeout) is worth one more try on
+      // a read; a 4xx is a validation answer and final.
+      err.retryable = status >= 500;
+      throw err;
+    }
+    return parsed;
   }
-  const status = Number(parsed._status) || 200;
-  delete parsed._status;
-  if (status >= 400) {
-    const err = new Error(parsed.error || 'upstream error');
-    err.status = status;
-    err.body = parsed;
-    throw err;
+
+  let lastErr = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    meta.attempts = attempt;
+    try {
+      const out = await upstreamQueue.run(once, o.lane === 'background' ? 'background' : 'user');
+      if (attempt > 1) {
+        console.log(`[proxy] upstream recovered action=${label} attempt=${attempt} upstream=${meta.upstream}`);
+      }
+      meta.kind = 'ok';
+      return out;
+    } catch (err) {
+      lastErr = err;
+      meta.kind = err.upstreamKind || 'error';
+      if (err.upstreamStatus !== undefined) meta.upstream = err.upstreamStatus;
+      if (!err.retryable || attempt >= maxAttempts) break;
+      console.log(`[proxy] upstream retry action=${label} attempt=${attempt + 1} kind=${meta.kind} upstream=${meta.upstream}`);
+      await sleep(RETRY_BASE_MS * (attempt === 1 ? 1 : 3));
+    }
   }
-  return parsed;
+  throw lastErr;
 }
 
 // What the browser is told when an upstream call fails.
@@ -406,26 +478,69 @@ function sendUpstreamError(res, err, tag) {
 // requireAuth still runs BEFORE the cache on every request, so an
 // unauthenticated caller never reaches a cached value.
 const DATA_CACHE_KEY = 'data';
-function envMs(name, fallback) {
-  const raw = process.env[name];
-  const n = Number(raw);
-  return raw !== undefined && raw !== '' && Number.isFinite(n) && n >= 0 ? n : fallback;
-}
+//
+// Windows (all env-overridable, ms):
+//   fresh — 60 s: served as HIT.
+//   stale — 24 h: served at once as STALE while ONE refresh runs; the page
+//           shows «מתעדכן…» and asks again. It used to be 5 min, so ANY open
+//           after ~6 minutes of nobody using the app waited for a full Apps
+//           Script execution — the "staffing takes long to open" complaint.
+//   restored — 24 h: how long a copy read back from the disk snapshot may be
+//           served (as STALE, never as fresh).
+// Past the stale window, or with no copy at all, the read waits (MISS). If
+// that read fails upstream, the last good copy — at any age — is served as
+// STALE_ERROR instead of an error page.
 const proxyCache = createProxyCache({
   freshMs: envMs('DATA_CACHE_FRESH_MS', 60 * 1000),
-  staleMs: envMs('DATA_CACHE_STALE_MS', 5 * 60 * 1000),
+  staleMs: envMs('DATA_CACHE_STALE_MS', 24 * 60 * 60 * 1000),
+  restoredStaleMs: envMs('CACHE_SNAPSHOT_MAX_AGE_MS', 24 * 60 * 60 * 1000),
   log: (line) => console.error(line),
+  onStore: () => scheduleSnapshot(),
+  onRefreshError: (key, err) => {
+    console.error(`[proxy] refresh failed key=${key} upstream=${err && err.upstreamStatus !== undefined ? err.upstreamStatus : '-'}` +
+      ` kind=${(err && err.upstreamKind) || 'error'} reason=${redact(err && err.message).slice(0, 200)}`);
+  },
 });
 // The Apps Script bundle reports whether IT served from CacheService
 // (_gasCache: hit | miss | off). Logged for docs/perf-load.md, then removed:
 // the browser never sees it.
-async function loadData() {
-  const data = await callAppsScript('GET');
+//
+// `view=app` asks Code.gs for the lean bundle (no legacy v2 tabs, which the
+// page never reads). An older Code.gs ignores the parameter; the legacy keys
+// are dropped here either way, so the cache, the snapshot and the browser
+// never carry them.
+const LEGACY_BUNDLE_KEYS = ['houses', 'events', 'archive', '_compat'];
+async function loadData(how, meta) {
+  const data = await callAppsScript('GET', undefined, {
+    lane: how === 'background' ? 'background' : 'user',
+    retry: true,
+    query: { view: 'app' },
+    meta,
+  });
   if (data && Object.prototype.hasOwnProperty.call(data, '_gasCache')) {
     console.log(`[upstream] bundle gas_cache=${String(data._gasCache).slice(0, 8)}`);
     delete data._gasCache;
   }
+  if (data && typeof data === 'object') LEGACY_BUNDLE_KEYS.forEach((k) => { delete data[k]; });
   return data;
+}
+
+// The bundle minus the parts a screen loads lazily. `hearings` is read only
+// by the שימועים screen, so the first render does not wait to parse it; the
+// page asks /api/data/hearings when that screen opens.
+const LAZY_PARTS = { hearings: ['hearings'] };
+function withoutLazyParts(value) {
+  const out = Object.assign({}, value);
+  Object.keys(LAZY_PARTS).forEach((part) => LAZY_PARTS[part].forEach((k) => { delete out[k]; }));
+  return out;
+}
+
+// [proxy] GET action=data ms=12 cache=HIT upstream=- outcome=ok q=0/2
+function proxyLog(method, action, t0, fields) {
+  const f = Object.assign({ cache: '-', upstream: '-', outcome: 'ok' }, fields || {});
+  console.log(`[proxy] ${method} action=${action} ms=${Date.now() - t0} cache=${f.cache}` +
+    ` upstream=${f.upstream} outcome=${f.outcome}` + (f.kind ? ` kind=${f.kind}` : '') +
+    (f.ageMs !== undefined ? ` ageMs=${f.ageMs}` : '') + ` q=${queueDepth()}`);
 }
 
 // Actions that only read. Every OTHER action is a write and drops the data
@@ -456,17 +571,49 @@ function cancelRewarm() {
   rewarmTimer = null;
 }
 
-app.get('/api/data', requireAuth, async (req, res) => {
+// Serve one cached read. `pick` shapes the cached bundle into the response.
+async function serveCachedRead(req, res, action, pick) {
   const t0 = Date.now();
+  const meta = {};
   try {
-    const { value, status } = await proxyCache.get(DATA_CACHE_KEY, loadData);
-    res.setHeader('X-Cache', status);
-    res.setHeader('Server-Timing', `proxy;desc="${status}";dur=${Date.now() - t0}`);
-    res.json(value);
+    const r = await proxyCache.get(DATA_CACHE_KEY, (how) => loadData(how, meta));
+    res.setHeader('X-Cache', r.status);
+    res.setHeader('X-Data-Age', String(Math.max(0, Math.round((r.ageMs || 0) / 1000))));
+    res.setHeader('Server-Timing', `proxy;desc="${r.status}";dur=${Date.now() - t0}`);
+    const fields = { cache: r.status };
+    if (r.status === 'MISS') {
+      fields.upstream = meta.upstream !== undefined ? meta.upstream : 'joined';
+    }
+    if (r.status === 'STALE_ERROR') {
+      const e = r.error || {};
+      Object.assign(fields, {
+        outcome: 'stale_after_error', ageMs: r.ageMs,
+        upstream: e.upstreamStatus !== undefined ? e.upstreamStatus : (meta.upstream !== undefined ? meta.upstream : '-'),
+        kind: e.upstreamKind || meta.kind || 'error',
+      });
+      console.error(`[proxy] upstream failed, serving stale action=${action} ageMs=${r.ageMs} reason=${redact(e.message).slice(0, 200)}`);
+    }
+    proxyLog('GET', action, t0, fields);
+    res.json(pick(r.value));
   } catch (err) {
-    sendUpstreamError(res, err, '[GET /api/data]');
+    proxyLog('GET', action, t0, {
+      cache: 'MISS', outcome: 'error',
+      upstream: err.upstreamStatus !== undefined ? err.upstreamStatus : (meta.upstream !== undefined ? meta.upstream : '-'),
+      kind: err.upstreamKind || meta.kind || 'error',
+    });
+    sendUpstreamError(res, err, `[GET /api/${action}]`);
   }
-});
+}
+
+app.get('/api/data', requireAuth, (req, res) =>
+  serveCachedRead(req, res, 'data', withoutLazyParts));
+
+// Lazy part: the שימועים list, from the SAME cached bundle (no extra Apps
+// Script call when the cache is warm).
+app.get('/api/data/hearings', requireAuth, (req, res) =>
+  serveCachedRead(req, res, 'hearings', (v) => ({
+    hearings: Array.isArray(v && v.hearings) ? v.hearings : [],
+  })));
 
 // ---- first-hadracha status (optional, read-only) ----
 // Proxies the hadrachot app's status feed for the dashboard banner. Deliberate
@@ -513,10 +660,18 @@ app.post('/api/action', requireAuth, async (req, res) => {
   // Invalidate BEFORE the write too: a read that starts while the write is
   // in flight must not be served (or cache) the pre-write snapshot.
   if (isWrite) proxyCache.invalidate(DATA_CACHE_KEY);
+  const t0 = Date.now();
+  const meta = {};
   try {
-    const result = await callAppsScript('POST', payload);
+    // Only a read-only action may be retried; a write never is.
+    const result = await callAppsScript('POST', payload, { lane: 'user', retry: !isWrite, meta });
+    proxyLog('POST', payload.action, t0, { upstream: meta.upstream });
     res.json(result);
   } catch (err) {
+    proxyLog('POST', payload.action, t0, {
+      outcome: 'error', upstream: meta.upstream !== undefined ? meta.upstream : '-',
+      kind: err.upstreamKind || meta.kind || 'error',
+    });
     sendUpstreamError(res, err, '[POST /api/action]');
   } finally {
     if (isWrite) {
@@ -525,6 +680,99 @@ app.post('/api/action', requireAuth, async (req, res) => {
     }
   }
 });
+
+// ---- read-cache snapshot on disk (lib/cache-snapshot.js) ----
+//
+// Where: CACHE_SNAPSHOT_DIR if set; else, when Railway has a volume mounted
+// on this service, <RAILWAY_VOLUME_MOUNT_PATH>/staffing-cache (Railway sets
+// that variable itself); else <repo>/.cache, which survives a crash restart
+// but not a redeploy. CACHE_SNAPSHOT=0 turns the whole feature off.
+const RAILWAY_VOLUME = process.env.RAILWAY_VOLUME_MOUNT_PATH || '';
+const SNAPSHOT_ENABLED = process.env.CACHE_SNAPSHOT !== '0';
+const SNAPSHOT_DIR = process.env.CACHE_SNAPSHOT_DIR ||
+  (RAILWAY_VOLUME ? path.join(RAILWAY_VOLUME, 'staffing-cache') : path.join(__dirname, '.cache'));
+const SNAPSHOT_MAX_AGE_MS = envMs('CACHE_SNAPSHOT_MAX_AGE_MS', 24 * 60 * 60 * 1000);
+const SNAPSHOT_INTERVAL_MS = envMs('CACHE_SNAPSHOT_INTERVAL_MS', 5 * 60 * 1000);
+const SNAPSHOT_DEBOUNCE_MS = envMs('CACHE_SNAPSHOT_DEBOUNCE_MS', 5 * 1000);
+let snapshotArmed = false;   // only after bootProxy(): tests never write one
+let snapshotTimer = null;
+
+function saveSnapshot(reason) {
+  if (!SNAPSHOT_ENABLED || !snapshotArmed) return null;
+  const { text, count } = cacheSnapshot.serialize(proxyCache.snapshotPairs());
+  if (!count) return null;
+  const r = cacheSnapshot.writeSnapshot(SNAPSHOT_DIR, text);
+  if (r.ok) console.log(`[proxy] cache snapshot saved entries=${count} bytes=${r.bytes} reason=${reason}`);
+  else console.error(`[proxy] cache snapshot write failed reason=${r.reason}`);
+  return r;
+}
+
+function scheduleSnapshot() {
+  if (!SNAPSHOT_ENABLED || !snapshotArmed) return;
+  if (snapshotTimer) clearTimeout(snapshotTimer);
+  snapshotTimer = setTimeout(() => { snapshotTimer = null; saveSnapshot('refresh'); }, SNAPSHOT_DEBOUNCE_MS);
+  if (snapshotTimer.unref) snapshotTimer.unref();
+}
+
+// Boot: log where the snapshot lives, restore it, then warm. → a summary.
+function restoreSnapshot() {
+  const probe = cacheSnapshot.probeDir(SNAPSHOT_DIR);
+  let restored = 0;
+  let note = 'absent';
+  let ageMs = null;
+  const read = cacheSnapshot.readSnapshot(SNAPSHOT_DIR);
+  if (read.text !== null) {
+    const doc = cacheSnapshot.parse(read.text, { maxAgeMs: SNAPSHOT_MAX_AGE_MS });
+    if (!doc) note = 'ignored (corrupt, wrong version or too old)';
+    else {
+      ageMs = Date.now() - doc.savedAt;
+      doc.entries.forEach((e) => {
+        if (e.key === DATA_CACHE_KEY && proxyCache.restore(e.key, e.value, e.storedAt)) restored++;
+      });
+      note = 'ok';
+    }
+  } else if (read.reason !== 'absent') note = 'unreadable (' + read.reason + ')';
+  console.log(`[proxy] cache snapshot dir=${SNAPSHOT_DIR} writable=${probe.ok}` +
+    (probe.ok ? '' : ` reason=${probe.reason}`) + ` restored entries=${restored} (${note})` +
+    (ageMs !== null ? ` ageMs=${ageMs}` : ''));
+  return { dir: SNAPSHOT_DIR, writable: probe.ok, restored, note };
+}
+
+// Keep-warm: re-read the bundle in the background every
+// DATA_CACHE_KEEPWARM_MS (default 10 min, 0 = off) so the copy a user opens
+// is at most that old, and Apps Script's own cache stays warm.
+const KEEPWARM_MS = envMs('DATA_CACHE_KEEPWARM_MS', 10 * 60 * 1000);
+
+let booted = false;
+function bootProxy() {
+  if (booted) return null;
+  booted = true;
+  console.log(`[proxy] upstream concurrency=${upstreamQueue.limit} volume mount=${RAILWAY_VOLUME || 'none'}`);
+  let summary = { dir: SNAPSHOT_DIR, writable: false, restored: 0, note: 'disabled' };
+  if (SNAPSHOT_ENABLED) {
+    summary = restoreSnapshot();
+    snapshotArmed = true;
+    if (SNAPSHOT_INTERVAL_MS) {
+      const iv = setInterval(() => saveSnapshot('interval'), SNAPSHOT_INTERVAL_MS);
+      if (iv.unref) iv.unref();
+    }
+    // The freshest copy is the one the next process should inherit.
+    ['SIGTERM', 'SIGINT'].forEach((sig) => process.once(sig, () => {
+      saveSnapshot(sig);
+      process.exit(0);
+    }));
+  } else {
+    console.log('[proxy] cache snapshot disabled (CACHE_SNAPSHOT=0)');
+  }
+  // Warm (or, after a restore, refresh) the data cache so the first page
+  // load after a deploy is not the one that pays for Apps Script.
+  proxyCache.warm(DATA_CACHE_KEY, loadData);
+  if (KEEPWARM_MS) {
+    const kw = setInterval(() => proxyCache.warm(DATA_CACHE_KEY, loadData), KEEPWARM_MS);
+    if (kw.unref) kw.unref();
+  }
+  return summary;
+}
 
 // ---- 404 fallback for /api ----
 app.use('/api', (req, res) => res.status(404).json({ error: 'not found' }));
@@ -537,9 +785,7 @@ if (require.main === module) {
   // but is unreachable from outside.
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`E-ZONE staffing server listening on 0.0.0.0:${PORT} (PORT=${PORT}, process.env.PORT=${process.env.PORT || '<unset>'})`);
-    // Warm the data cache so the first page load after a deploy/restart is
-    // not the one that pays for the cold Apps Script execution.
-    proxyCache.warm(DATA_CACHE_KEY, loadData);
+    bootProxy();
   });
 }
 
@@ -549,6 +795,9 @@ module.exports = {
   _revokedSessions: revokedSessions,
   _proxyCache: proxyCache,
   _cancelRewarm: cancelRewarm,
+  _upstreamQueue: upstreamQueue,
+  _bootProxy: bootProxy,
+  _saveSnapshot: saveSnapshot,
   _libVersions: LIB_VERSIONS,
   READ_ONLY_ACTIONS,
 };
