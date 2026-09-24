@@ -27,10 +27,12 @@ process.env.SHARED_SECRET = 'shared-secret-'.padEnd(40, 'Q');
 process.env.MORAN_PIN = '918273';
 process.env.SESSION_SECRET = 'y'.repeat(64);
 // Re-warm on in this file (off by default under NODE_ENV=test).
-process.env.DATA_CACHE_REWARM_MS = '30';
+// Wide enough that three back-to-back writes on a loaded CI runner still
+// land inside one debounce window (30 ms was not — a slow runner fired two).
+process.env.DATA_CACHE_REWARM_MS = '200';
 
 const { createProxyCache } = require('../lib/proxy-cache');
-const { app, _loginAttempts, _proxyCache, _libVersions } = require('../server');
+const { app, _loginAttempts, _proxyCache, _cancelRewarm, _libVersions } = require('../server');
 
 // ---------------------------------------------------------------------------
 // unit: lib/proxy-cache.js
@@ -144,6 +146,7 @@ function fakeUpstream() {
 
 test.beforeEach(() => {
   _loginAttempts.clear();
+  _cancelRewarm();
   _proxyCache.clear();
   upstream = fakeUpstream();
   global.fetch = async (url, init) => {
@@ -293,7 +296,8 @@ test('after a write the cache is re-warmed in the background (debounced)', async
         body: JSON.stringify({ action: 'createWorker', worker: { name: 'n' + i } }),
       });
     }
-    await new Promise(r => setTimeout(r, 150));
+    // Wall-clock margin, not a tick count: 3× the debounce window.
+    await new Promise(r => setTimeout(r, 600));
     assert.equal(upstream.state.gets, 2, 'three writes → ONE background refresh');
     const after = await req(base, '/api/data', { headers: auth(t) });
     assert.equal(after.headers.get('x-cache'), 'HIT');

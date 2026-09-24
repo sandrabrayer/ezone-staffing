@@ -450,6 +450,11 @@ function scheduleRewarm() {
   }, REWARM_MS);
   if (rewarmTimer.unref) rewarmTimer.unref();
 }
+// Tests only: drop a pending re-warm so it cannot fire into the next test.
+function cancelRewarm() {
+  if (rewarmTimer) clearTimeout(rewarmTimer);
+  rewarmTimer = null;
+}
 
 app.get('/api/data', requireAuth, async (req, res) => {
   const t0 = Date.now();
@@ -543,6 +548,7 @@ module.exports = {
   _loginAttempts: loginAttempts,
   _revokedSessions: revokedSessions,
   _proxyCache: proxyCache,
+  _cancelRewarm: cancelRewarm,
   _libVersions: LIB_VERSIONS,
   READ_ONLY_ACTIONS,
 };
