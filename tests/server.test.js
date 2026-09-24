@@ -10,7 +10,7 @@ process.env.SHARED_SECRET = 's'.repeat(40);
 process.env.MORAN_PIN = '4242';
 process.env.SESSION_SECRET = 'x'.repeat(64);
 
-const { app, _loginAttempts } = require('../server');
+const { app, _loginAttempts, _proxyCache } = require('../server');
 
 // ----- fake upstream Apps Script (v3) -----
 // Models the v3 Sheet shape: workers, assignments, absences, coverages,
@@ -340,6 +340,9 @@ let fakeUpstream;
 
 test.beforeEach(() => {
   _loginAttempts.clear();
+  // Each test gets a fresh fake upstream, so it must also get a cold proxy
+  // read cache — otherwise one test's /api/data could be served to the next.
+  _proxyCache.clear();
   fakeUpstream = makeFakeUpstream();
   global.fetch = async (url, init) => {
     const r = fakeUpstream.handle((init && init.method) || 'GET', url, init && init.body);
@@ -577,7 +580,7 @@ test('tampered token is rejected', async () => {
 
 // ----- GET /api/data shape -----
 
-test('GET /api/data returns v3 shape with legacy passthrough keys', async () => {
+test('GET /api/data returns the v3 shape; legacy v2 keys and lazy parts are not sent', async () => {
   const { srv, base } = await listen();
   try {
     const token = await login(base);
@@ -589,10 +592,12 @@ test('GET /api/data returns v3 shape with legacy passthrough keys', async () => 
     assert.deepEqual(r.json.absences, []);
     assert.deepEqual(r.json.coverages, []);
     assert.deepEqual(r.json.archiveV3, []);
-    // legacy passthrough (still in the response during the transition)
-    assert.deepEqual(r.json.houses, { ramot: [], asher: [], ofroni: [], rehab: [] });
-    assert.deepEqual(r.json.events, []);
-    assert.deepEqual(r.json.archive, []);
+    // The legacy v2 passthrough (houses / events / archive / _compat) is
+    // read by nothing in the page, so the proxy no longer ships it (perf:
+    // docs/perf-open.md). hearings is a LAZY part: /api/data/hearings.
+    for (const k of ['houses', 'events', 'archive', '_compat', 'hearings']) {
+      assert.equal(k in r.json, false, k + ' is not in /api/data');
+    }
   } finally { await close(srv); }
 });
 

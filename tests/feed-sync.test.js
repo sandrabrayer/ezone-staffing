@@ -347,7 +347,7 @@ test('the feed_log headers are append-only and the consumer list is frozen', () 
   const ctx = loadCtx({}, { workers: [[]] });
   assert.deepStrictEqual(constOf(ctx, 'HEADERS_FEED_LOG'), FEED_LOG_HEADERS);
   assert.deepStrictEqual(constOf(ctx, 'FEED_CONSUMERS'),
-    ['coordinators', 'therapists', 'hadrachot']);
+    ['coordinators', 'therapists', 'hadrachot', 'coordinators_therapists']);
 });
 
 test('the main doGet payload carries feedLog for the sync-status panel', () => {

@@ -35,9 +35,11 @@ test('isHouse: accepts all new house codes', () => {
   });
 });
 
-test('ROLE_OPTIONS: nine roles', () => {
-  assert.equal(ROLE_OPTIONS.length, 9);
+test('ROLE_OPTIONS: ten roles (משווק/ת added before אחר)', () => {
+  assert.equal(ROLE_OPTIONS.length, 10);
   assert.ok(ROLE_OPTIONS.includes('מטפל/ת'));
+  assert.ok(ROLE_OPTIONS.includes('משווק/ת'));
+  assert.equal(ROLE_OPTIONS[ROLE_OPTIONS.length - 1], 'אחר');
   assert.ok(ROLE_OPTIONS.includes('אחר'));
 });
 
@@ -56,9 +58,10 @@ test('TERMINATION_REASONS: five reasons plus the explicit opt-out', () => {
   ]);
 });
 
-test('EMPLOYMENT_TYPES: five types', () => {
+test('EMPLOYMENT_TYPES: six types (per_case_commission appended)', () => {
   assert.deepEqual(EMPLOYMENT_TYPES, [
     'full_time', 'part_time', 'hourly', 'per_session', 'fixed_retainer',
+    'per_case_commission',
   ]);
 });
 

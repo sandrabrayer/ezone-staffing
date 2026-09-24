@@ -172,6 +172,10 @@ test('hearings DOM: the שימועים tab renders the table with names, dates, 
   await authAndBoot(dom, HEARINGS_FIXTURE);
   dom.window.go('hearings');
   const doc = dom.window.document;
+  // The list is a LAZY part: the screen shows «טוען שימועים…» first, then
+  // renders once /api/data/hearings answers.
+  assert.ok(doc.getElementById('app').innerHTML.includes('טוען שימועים'), 'loading state first');
+  await new Promise(r => setTimeout(r, 30));
   const appHtml = doc.getElementById('app').innerHTML;
   assert.ok(appHtml.includes('אורי לוי') && appHtml.includes('דנה כהן'), 'worker names shown');
   assert.ok(appHtml.includes('איחורים חוזרים'), 'free-text reason shown');
@@ -207,18 +211,22 @@ test('hearings DOM: the add form opens with a worker picker, date, reason and re
 });
 
 test('hearings gate: the tab data rides the PIN-gated payload and the actions post to /api/action', () => {
-  // All data arrives via loadData() → apiFetch('/api/data') (Bearer-token
-  // session, 401 → PIN gate) and every mutation goes through doAction() →
+  // The list arrives lazily via loadHearings() → apiFetch('/api/data/hearings')
+  // (Bearer-token session, 401 → PIN gate), served from the same cached
+  // bundle as /api/data; every mutation goes through doAction() →
   // POST /api/action behind the same requireAuth middleware — no separate
   // unauthenticated path exists for hearings.
-  assert.match(html, /HEARINGS = Array\.isArray\(d\.hearings\)/,
-    'hearings load from the same authenticated /api/data payload');
+  assert.match(html, /apiFetch\('\/api\/data\/hearings'\)/,
+    'hearings load from the authenticated lazy route');
+  assert.match(html, /HEARINGS = Array\.isArray\(body\.hearings\)/);
   for (const action of ['addHearing', 'updateHearing', 'deleteHearing']) {
     assert.ok(new RegExp(`action:\\s*'${action}'`).test(html), `frontend posts ${action} via doAction`);
   }
   const server = fs.readFileSync(path.join(ROOT, 'server.js'), 'utf8');
   assert.match(server, /app\.get\('\/api\/data', requireAuth/,
     '/api/data stays behind the session gate');
+  assert.match(server, /app\.get\('\/api\/data\/hearings', requireAuth/,
+    '/api/data/hearings is behind the same session gate');
   assert.match(server, /app\.post\('\/api\/action', requireAuth/,
     '/api/action stays behind the session gate');
 });

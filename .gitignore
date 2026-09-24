@@ -13,3 +13,6 @@ coverage/
 # (.clasp.json itself is committed — it holds only the non-secret Script ID.)
 .clasprc.json
 .clasp.local.json
+
+# Proxy read-cache snapshot (see docs/perf-open.md). Never commit it: it holds salary data.
+.cache/

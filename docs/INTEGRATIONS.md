@@ -49,6 +49,21 @@ its own Script Property secret — no secret unlocks another feed.
 | **Retry** | none. Unset or unreachable ⇒ **no writes**; the last-synced list is served. |
 | **Failure visibility** | consumer-side amber «לא סונכרנה» toast; staffing-side the `feed_log` row and the «סטטוס סנכרון» panel, amber past 24 h. |
 
+## 2b. Coordinators app (רכזים) — therapist roster
+
+| | |
+|---|---|
+| **Source of truth** | staffing `workers` + `assignments` |
+| **Endpoint** | `GET <staffing /exec>?action=getTherapistsForCoordinators&secret=…` |
+| **Key** | staffing `COORDINATORS_READ_SECRET` — the **same** secret as the guides feed (no new secret); constant-time `secretMatches_`, fail-closed |
+| **Direction** | staffing → coordinators |
+| **Payload** | `{ therapists: [ { name, phone, role, active, houses, startDate } ], feedGeneratedAt }` — one entry **per worker**, sorted by name. **Nothing else** (no id, pay, rate, bank, notes, role_detail). |
+| **Selection** | CURRENT placements whose trimmed role ∈ `{ 'מטפל/ת', 'פסיכיאטר/ית' }`. `archive_v3` is **not** read — a terminated therapist is absent. |
+| **`role`** | `'פסיכיאטר/ית'` if any current therapist-role placement is psychiatry, else `'מטפל/ת'` |
+| **`active`** | `true` iff any therapist-role placement's status is `active`; חל"ד / חל"ת / final_settlement → `false` |
+| **`houses`** | sorted internal staffing house ids — the same convention as the guides feed (the consumer maps them) |
+| **Failure visibility** | `feed_log` consumer `coordinators_therapists` |
+
 ## 3. Hadrachot app (הדרכות) — supervision-relevant roster
 
 | | |
@@ -95,7 +110,7 @@ its own Script Property secret — no secret unlocks another feed.
 |---|---|
 | **Endpoint** | `APPS_SCRIPT_URL` with `?secret=SHARED_SECRET` |
 | **Direction** | both (GET roster bundle, POST mutations) |
-| **Frequency** | every `/api/data` and `/api/action` |
+| **Frequency** | every `/api/action`; `/api/data` only on a proxy-cache MISS / background refresh (60 s fresh + 5 min stale, invalidated by every write — see `docs/perf-load.md`). Inside Apps Script the GET bundle is itself cached for 300 s in CacheService (`_gasCache`, stripped by the proxy) |
 | **Error handling** | non-JSON upstream → `502`; upstream `_status ≥ 400` is re-thrown with that status |
 | **Retry** | **none** — a transient Apps Script hiccup surfaces to Moran as an error |
 | **Failure visibility** | a Hebrew error in the UI; details in the Railway log |
@@ -106,9 +121,18 @@ its own Script Property secret — no secret unlocks another feed.
 
 | Feed | Current key set | May never do |
 |---|---|---|
-| `getGuidesForCoordinators` | `workerId`, `assignmentIds`, `name`, `phone`, `active`, `houses`, `startDate` | remove or rename any of them; change a worker name; expose money |
+| `getGuidesForCoordinators` | `workerId`, `assignmentIds`, `name`, `phone`, `active`, `houses`, `startDate` | remove or rename any of them; change a worker name; expose money; carry guide shift minimums (those are owned by the coordinators app) |
+| `getTherapistsForCoordinators` | `name`, `phone`, `role`, `active`, `houses`, `startDate` — exactly | add, remove or rename any key without a contract change; expose money or ids |
 | `getTherapistsForTherapists` | `workerId`, `assignmentIds`, `name`, `active`, `houses`, `startDate` | remove or rename any of them; expose money |
 | `getGuidesForHadrachot` | `workerId`, `assignmentId`, `name`, `house`, `role`, `active`, `startDate` | remove or rename any of them; expose `role_detail` or money |
+
+**Roles that never leave staffing.** Every feed is an ALLOWLIST of roles
+(`THERAPISTS_FEED_ROLES` = מטפל/ת + פסיכיאטר/ית, `COORDINATORS_FEED_ROLE` =
+מדריך/ה, `HADRACHA_ROLES`). «משווק/ת» (marketer, added Sep 24 2026) is in none
+of them: a marketer never appears in `getTherapistsForTherapists`,
+`getTherapistsForCoordinators` or `getGuidesForCoordinators` — pinned by
+`tests/marketer-role.test.js`. A person who is ALSO a therapist or a guide
+appears for that placement only. See `docs/marketer-role.md`.
 
 All three responses also carry **`feedGeneratedAt`** at the **top level** —
 it is a property of the feed, not of a worker, so it is not repeated on every

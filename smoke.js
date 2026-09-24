@@ -81,6 +81,8 @@ function assignmentCostInline(a) {
       return Math.round(Math.max(0, Number(a.sessionRate) || 0) * Math.max(0, Number(a.estSessions) || 0));
     case 'fixed_retainer':
       return Math.max(0, Math.round(Number(a.retainerAmount) || 0));
+    case 'per_case_commission':
+      return 0;
     default:
       return 0;
   }
