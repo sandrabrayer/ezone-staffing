@@ -1149,7 +1149,7 @@ tr.sync-never td{color:var(--muted)}
       <div id="w_terms">
         <div class="field">
           <label for="w_role">תפקיד</label>
-          <select id="w_role" onchange="onWorkerRoleChange()"></select>
+          <select id="w_role" onchange="onWorkerRoleChange();preselectCommission('w')"></select>
         </div>
         <div class="field hidden" id="w_roleDetail_wrap">
           <label for="w_roleDetail" id="w_roleDetail_label">פירוט תפקיד</label>
@@ -1212,6 +1212,9 @@ tr.sync-never td{color:var(--muted)}
         <div class="field" data-wcost-field="retainerAmount">
           <label for="w_retainerAmount">ריטיינר חודשי (₪)</label>
           <input id="w_retainerAmount" type="number" min="0" step="100" placeholder="0"/>
+        </div>
+        <div class="field hidden" id="w_commission_hint">
+          <div class="hint">עמלה לפי מקרה — אין תעריף קבוע ואין כמות חודשית. העמלה משולמת לפי מקרה ואינה נכללת בעלות החודשית.</div>
         </div>
         <!-- Allowance: applies to every employment type. -->
         <div class="field">
@@ -1304,7 +1307,7 @@ tr.sync-never td{color:var(--muted)}
       </div>
       <div class="field">
         <label for="asg_role">תפקיד</label>
-        <select id="asg_role" onchange="onAssignmentRoleChange()"></select>
+        <select id="asg_role" onchange="onAssignmentRoleChange();preselectCommission('asg')"></select>
       </div>
       <div class="field hidden" id="asg_roleDetail_wrap">
         <label for="asg_roleDetail" id="asg_roleDetail_label">פירוט תפקיד</label>
@@ -1342,6 +1345,9 @@ tr.sync-never td{color:var(--muted)}
       <div class="field" data-cost-field="retainerAmount">
         <label for="asg_retainerAmount">ריטיינר חודשי (₪)</label>
         <input id="asg_retainerAmount" type="number" min="0" step="100" placeholder="0"/>
+      </div>
+      <div class="field hidden" id="asg_commission_hint">
+        <div class="hint">עמלה לפי מקרה — אין תעריף קבוע ואין כמות חודשית. העמלה משולמת לפי מקרה ואינה נכללת בעלות החודשית.</div>
       </div>
       <!-- Allowance: applies to every employment type (not gated by
            data-cost-field). Whitelisted values only — mirrors
@@ -1617,8 +1623,11 @@ const HOUSES = [
 
 const ROLE_OPTIONS = [
   'מנהל/ת','רכז/ת','מדריך/ה','מטפל/ת','אחות',
-  'פסיכיאטר/ית','טבח/ית','איש/אשת אחזקה','אחר',
+  'פסיכיאטר/ית','טבח/ית','איש/אשת אחזקה','משווק/ת','אחר',
 ];
+// A marketer is paid by commission per case; picking the role pre-selects it.
+const MARKETER_ROLE = 'משווק/ת';
+const COMMISSION_TYPE = 'per_case_commission';
 // Contractual weekly shift-commitment enum for instructors. ASCII keys —
 // must mirror SHIFT_COMMITMENTS in lib/shift-compliance.js, the shared
 // source of truth. Empty means no commitment on file (never an alert).
@@ -1639,6 +1648,7 @@ const EMPLOYMENT_TYPE_LABELS = {
   hourly:         'שכר שעתי',
   per_session:    'תשלום לפי מפגש',
   fixed_retainer: 'ריטיינר חודשי קבוע',
+  per_case_commission: 'עמלה לפי מקרה',
 };
 const EMPLOYMENT_TYPE_LABELS_SHORT = {
   full_time:      'חודשי',
@@ -1646,6 +1656,7 @@ const EMPLOYMENT_TYPE_LABELS_SHORT = {
   hourly:         'שעתי',
   per_session:    'לפי מפגש',
   fixed_retainer: 'ריטיינר',
+  per_case_commission: 'עמלה',
 };
 
 // Hearing (שימוע) results. ASCII stored values — must mirror
@@ -2577,6 +2588,8 @@ function termsHtml(a){
     }
     case 'fixed_retainer':
       return `<div class="money">${fmt(a.retainerAmount)}</div>`;
+    case 'per_case_commission':
+      return `<div class="money">עמלה לפי מקרה</div><div class="sub" style="font-size:11px">ללא תעריף קבוע</div>`;
     default:
       return `<div class="money">—</div>`;
   }
@@ -2634,6 +2647,8 @@ const TYPE_COST_FIELDS = {
   hourly:         ['hourlyRate', 'estHours'],
   per_session:    PER_SESSION_RATE_FIELDS.slice(),
   fixed_retainer: ['retainerAmount'],
+  // No rate and no monthly count: every cost field is hidden and none is sent.
+  per_case_commission: [],
 };
 const ALL_COST_FIELDS = [
   'salary', 'pct',
@@ -2880,6 +2895,8 @@ function onWorkerTypeChange(){
     if (allowed.indexOf(f) >= 0) el.classList.remove('hidden');
     else el.classList.add('hidden');
   });
+  const cHint = document.getElementById('w_commission_hint');
+  if (cHint) cHint.classList.toggle('hidden', t !== COMMISSION_TYPE);
   // The per_session live total is shown only for that type.
   const totalWrap = document.getElementById('w_perSessionTotal_wrap');
   if (t === 'per_session'){ totalWrap.classList.remove('hidden'); updateWorkerPerSessionTotal(); }
@@ -3313,9 +3330,23 @@ function onAssignmentRoleChange(){
   }
 }
 
+// A marketer is paid by commission per case: when Moran PICKS משווק/ת the
+// type pre-selects «עמלה לפי מקרה» (she can still choose another one). Wired
+// to the select's onchange only — never to the prefill path, so opening an
+// existing record never changes its stored type.
+function preselectCommission(prefix){
+  const role = document.getElementById(prefix + '_role').value;
+  const typeSel = document.getElementById(prefix + '_type');
+  if (role !== MARKETER_ROLE || !typeSel || typeSel.value === COMMISSION_TYPE) return;
+  typeSel.value = COMMISSION_TYPE;
+  if (prefix === 'w') onWorkerTypeChange(); else onAssignmentTypeChange();
+}
+
 function onAssignmentTypeChange(){
   const t = document.getElementById('asg_type').value;
   const allowed = TYPE_COST_FIELDS[t] || [];
+  const cHint = document.getElementById('asg_commission_hint');
+  if (cHint) cHint.classList.toggle('hidden', t !== COMMISSION_TYPE);
   document.querySelectorAll('[data-cost-field]').forEach(el => {
     const f = el.dataset.costField;
     if (allowed.indexOf(f) >= 0){

@@ -286,8 +286,13 @@ const HEADERS_ARCHIVE = [
 
 const ROLE_OPTIONS = [
   'מנהל/ת', 'רכז/ת', 'מדריך/ה', 'מטפל/ת', 'אחות',
-  'פסיכיאטר/ית', 'טבח/ית', 'איש/אשת אחזקה', 'אחר',
+  'פסיכיאטר/ית', 'טבח/ית', 'איש/אשת אחזקה', 'משווק/ת', 'אחר',
 ];
+// Marketer role + its employment type. Mirror of lib/validate.js. The role
+// is deliberately in NO feed allowlist (THERAPISTS_FEED_ROLES,
+// COORDINATORS_FEED_ROLE) — tests/marketer-role.test.js pins that.
+const MARKETER_ROLE = 'משווק/ת';
+const COMMISSION_TYPE = 'per_case_commission';
 const ABSENCE_REASON_TYPES = [
   'חופשה', 'חל״ת', 'מחלה', 'חופשת לידה', 'ניתוח', 'צורך תפעולי', 'אישי', 'אחר',
 ];
@@ -303,6 +308,7 @@ const TERMINATION_REASONS = [
 ];
 const EMPLOYMENT_TYPES = [
   'full_time', 'part_time', 'hourly', 'per_session', 'fixed_retainer',
+  'per_case_commission',
 ];
 
 // Contractual weekly shift-commitment enum for instructors: weekday shifts
@@ -328,6 +334,7 @@ const TYPE_COST_FIELDS = {
   hourly:         ['hourlyRate', 'estHours'],
   per_session:    ['sessionRate', 'estSessions'].concat(PER_SESSION_RATE_FIELDS),
   fixed_retainer: ['retainerAmount'],
+  per_case_commission: [],
 };
 const ALL_COST_FIELDS = [
   'salary', 'pct',
@@ -719,6 +726,9 @@ function validateAssignment(a) {
     case 'fixed_retainer':
       retainerAmount = clampMoney(a.retainerAmount, RETAINER_MAX);
       if (retainerAmount <= 0) throw httpError(400, 'retainerAmount required for fixed_retainer');
+      break;
+    case 'per_case_commission':
+      // No fixed rate, no monthly count — nothing to read.
       break;
   }
 
@@ -6212,6 +6222,7 @@ const EMPLOYMENT_TYPE_LABELS_HE = {
   hourly: 'שכר שעתי',
   per_session: 'תשלום לפי מפגש',
   fixed_retainer: 'ריטיינר חודשי קבוע',
+  per_case_commission: 'עמלה לפי מקרה',
 };
 
 // What «סכום» and «כמות» mean for each employment type, and whether each
@@ -6229,6 +6240,8 @@ const MA_TYPE_FIELDS = {
                     count: 'estSessions',     countWhat: 'מפגשים בחודש (כמות)' },
   fixed_retainer: { amount: 'retainerAmount', amountWhat: 'סכום ריטיינר חודשי (סכום)',
                     count: '',                countWhat: '' },
+  // Commission per case: neither column means anything, neither is required.
+  per_case_commission: { amount: '', amountWhat: '', count: '', countWhat: '' },
 };
 
 function maPrefixValue_(value) {
@@ -6271,7 +6284,7 @@ function maMissingFields_(row) {
     missing.push('סוג העסקה לא מוכר: ' + row.employmentType);
   } else {
     const spec = MA_TYPE_FIELDS[row.employmentType];
-    if (!(Number(row.amount) > 0)) missing.push(spec.amountWhat);
+    if (spec.amount && !(Number(row.amount) > 0)) missing.push(spec.amountWhat);
     if (spec.count && !(Number(row.count) > 0)) missing.push(spec.countWhat);
   }
   if (!row.startDate) missing.push('תאריך תחילת השיבוץ');
@@ -6504,7 +6517,7 @@ function applyMissingAssignmentsNow(dryRun) {
       employmentType: r.employmentType,
       notes: r.note,
     };
-    assignment[spec.amount] = Number(r.amount);
+    if (spec.amount) assignment[spec.amount] = Number(r.amount);
     if (spec.count) assignment[spec.count] = Number(r.count);
 
     const plan = { id: r.workerId, name: r.name, house: r.house, role: r.role,
@@ -6571,4 +6584,123 @@ function maSetEffectiveFrom_(assignmentId, ymd) {
   if (col <= 0) return;
   ensureHeaders(sh, HEADERS_ASSIGNMENTS);
   sh.getRange(row, col).setValue(ymd);
+}
+
+/* =====================================================================
+   Marketer migration — migrateMarketersNow(dryRun)   (editor-run)
+
+   Before the «משווק/ת» role existed, a marketer was entered as role «אחר»
+   with פירוט «משווק». This moves every such CURRENT placement to
+   role «משווק/ת» + employment type «עמלה לפי מקרה» (per_case_commission).
+
+   - DRY RUN BY DEFAULT. Only the literal `false` writes anything. Run it
+     once as-is, read the «row |» lines in the log, then run
+     migrateMarketersNow(false).
+   - Writes exactly two cells per placement: role and employment_type.
+     NOTHING is deleted: role_detail and every cost column keep their
+     values (the cost engine prices per_case_commission at 0 whatever they
+     hold), and the report prints them so the previous terms stay on record.
+   - Idempotent: a placement already on «משווק/ת» + commission is reported
+     as already done; re-running writes nothing.
+   - Every changed field is audited; the bundle cache is dropped afterwards.
+   ===================================================================== */
+
+// «פירוט תפקיד» spellings that mean marketer. Compared after trimming and
+// collapsing whitespace; anything else under «אחר» is left alone.
+const MARKETER_DETAIL_ALIASES = ['משווק', 'משווקת', 'משווק/ת'];
+
+function isMarketerDetail_(detail) {
+  const d = String(detail === null || detail === undefined ? '' : detail)
+    .replace(/\s+/g, ' ').trim();
+  return MARKETER_DETAIL_ALIASES.indexOf(d) >= 0;
+}
+
+// Pure: { actions: [...], alreadyDone: [...] } from the two readers' output.
+function planMarketerMigration_(workers, assignments) {
+  const nameById = {};
+  (workers || []).forEach(function (w) { nameById[w.id] = String(w.name || '').trim(); });
+  const actions = [];
+  const alreadyDone = [];
+  (assignments || []).forEach(function (a) {
+    const role = String(a.role || '').trim();
+    const type = String(a.employmentType || '').trim();
+    const row = {
+      id: String(a.id || ''), workerId: String(a.workerId || ''),
+      name: nameById[a.workerId] || '', house: String(a.house || ''),
+      roleBefore: role, roleDetail: String(a.roleDetail || ''),
+      typeBefore: type,
+      priorTerms: {
+        salary: Number(a.salary) || 0, pct: Number(a.pct) || 0,
+        hourlyRate: Number(a.hourlyRate) || 0, estHours: Number(a.estHours) || 0,
+        sessionRate: Number(a.sessionRate) || 0, estSessions: Number(a.estSessions) || 0,
+        retainerAmount: Number(a.retainerAmount) || 0,
+        allowance: Number(a.allowance) || 0,
+      },
+    };
+    if (role === MARKETER_ROLE) {
+      if (type === COMMISSION_TYPE) alreadyDone.push(row);
+      return;
+    }
+    if (role !== 'אחר' || !isMarketerDetail_(a.roleDetail)) return;
+    actions.push(row);
+  });
+  return { actions: actions, alreadyDone: alreadyDone };
+}
+
+// dryRun defaults to TRUE. Only the explicit `false` writes anything.
+function migrateMarketersNow(dryRun) {
+  const apply = (dryRun === false);
+  const result = { dryRun: !apply, planned: [], applied: [], alreadyDone: [] };
+  const lock = LockService.getScriptLock();
+  if (apply) lock.waitLock(30000);
+  try {
+    const plan = planMarketerMigration_(readWorkersSafe(), readAssignmentsSafe());
+    result.planned = plan.actions;
+    result.alreadyDone = plan.alreadyDone;
+    const write = apply && plan.actions.length > 0;
+    if (write) {
+      const sh = sheetByName(ASSIGNMENTS_TAB);
+      const roleCol = HEADERS_ASSIGNMENTS.indexOf('role') + 1;
+      const typeCol = HEADERS_ASSIGNMENTS.indexOf('employment_type') + 1;
+      plan.actions.forEach(function (act) {
+        const r = findRow(sh, 0, act.id);
+        if (r < 0) return;
+        sh.getRange(r, roleCol).setValue(MARKETER_ROLE);
+        sh.getRange(r, typeCol).setValue(COMMISSION_TYPE);
+        auditLog_([
+          { action: 'migrateMarketers', entity: 'assignment', entityId: act.id,
+            field: 'role', before: act.roleBefore, after: MARKETER_ROLE,
+            reason: 'אחר + פירוט «' + act.roleDetail + '» → משווק/ת' },
+          { action: 'migrateMarketers', entity: 'assignment', entityId: act.id,
+            field: 'employment_type', before: act.typeBefore, after: COMMISSION_TYPE,
+            reason: 'marketer is paid by commission per case' },
+        ]);
+        result.applied.push(act);
+      });
+      invalidateBundleCache_();
+    }
+  } finally {
+    if (apply) lock.releaseLock();
+  }
+
+  Logger.log((result.dryRun ? 'DRY RUN — nothing was written. ' : 'APPLIED. ') +
+    result.planned.length + ' placement(s) planned, ' +
+    result.applied.length + ' applied, ' +
+    result.alreadyDone.length + ' already on משווק/ת + עמלה לפי מקרה.');
+  result.planned.forEach(function (a) {
+    const t = a.priorTerms;
+    Logger.log('row | ' + (a.name || a.workerId) + ' | ' + a.house + ' | ' + a.id +
+      ' | אחר/«' + a.roleDetail + '» → ' + MARKETER_ROLE +
+      ' | ' + (a.typeBefore || '(blank)') + ' → ' + COMMISSION_TYPE +
+      ' | kept: salary=' + t.salary + ' pct=' + t.pct + ' hourly=' + t.hourlyRate +
+      'x' + t.estHours + ' session=' + t.sessionRate + 'x' + t.estSessions +
+      ' retainer=' + t.retainerAmount + ' allowance=' + t.allowance);
+  });
+  result.alreadyDone.forEach(function (a) {
+    Logger.log('done | ' + (a.name || a.workerId) + ' | ' + a.house + ' | ' + a.id);
+  });
+  if (result.dryRun && result.planned.length) {
+    Logger.log('Run migrateMarketersNow(false) to apply. Nothing above has happened yet.');
+  }
+  return result;
 }
