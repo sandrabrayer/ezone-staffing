@@ -201,19 +201,21 @@ test('snapshot: the size cap drops the oldest entries rather than writing a huge
 });
 
 test('snapshot fs: atomic write, 0600 file in a 0700 dir, readable back; unwritable dir never throws', () => {
+  // Encryption itself is pinned in tests/snapshot-security.test.js.
+  const key = require('node:crypto').randomBytes(32);
   const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'snap-t-')), 'nested');
-  const w = snap.writeSnapshot(dir, '{"v":1}');
+  const w = snap.writeSnapshot(dir, '{"v":1}', key);
   assert.equal(w.ok, true);
   const st = fs.statSync(path.join(dir, snap.FILE_NAME));
   assert.equal(st.mode & 0o777, 0o600);
   assert.equal(fs.statSync(dir).mode & 0o777, 0o700);
   assert.equal(fs.existsSync(path.join(dir, snap.FILE_NAME + '.tmp')), false, 'no temp file left');
-  assert.equal(snap.readSnapshot(dir).text, '{"v":1}');
-  assert.equal(snap.readSnapshot(path.join(dir, 'none')).reason, 'absent');
+  assert.equal(snap.readSnapshot(dir, key).text, '{"v":1}');
+  assert.equal(snap.readSnapshot(path.join(dir, 'none'), key).reason, 'absent');
   // A path UNDER A FILE can never be a directory.
   const file = path.join(dir, snap.FILE_NAME);
   assert.equal(snap.probeDir(path.join(file, 'x')).ok, false);
-  assert.equal(snap.writeSnapshot(path.join(file, 'x'), '{}').ok, false);
+  assert.equal(snap.writeSnapshot(path.join(file, 'x'), '{}', key).ok, false);
 });
 
 // ---------------------------------------------------------------------------
