@@ -126,6 +126,14 @@ its own Script Property secret — no secret unlocks another feed.
 | `getTherapistsForTherapists` | `workerId`, `assignmentIds`, `name`, `active`, `houses`, `startDate` | remove or rename any of them; expose money |
 | `getGuidesForHadrachot` | `workerId`, `assignmentId`, `name`, `house`, `role`, `active`, `startDate` | remove or rename any of them; expose `role_detail` or money |
 
+**Roles that never leave staffing.** Every feed is an ALLOWLIST of roles
+(`THERAPISTS_FEED_ROLES` = מטפל/ת + פסיכיאטר/ית, `COORDINATORS_FEED_ROLE` =
+מדריך/ה, `HADRACHA_ROLES`). «משווק/ת» (marketer, added Sep 24 2026) is in none
+of them: a marketer never appears in `getTherapistsForTherapists`,
+`getTherapistsForCoordinators` or `getGuidesForCoordinators` — pinned by
+`tests/marketer-role.test.js`. A person who is ALSO a therapist or a guide
+appears for that placement only. See `docs/marketer-role.md`.
+
 All three responses also carry **`feedGeneratedAt`** at the **top level** —
 it is a property of the feed, not of a worker, so it is not repeated on every
 entry. A consumer that wants a per-row timestamp calls that field `syncedAt`:

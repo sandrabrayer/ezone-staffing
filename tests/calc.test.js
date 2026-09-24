@@ -98,9 +98,10 @@ function arch(over) {
 
 // ---------- employment type constants ----------
 
-test('EMPLOYMENT_TYPES exposes five types in stable order', () => {
+test('EMPLOYMENT_TYPES exposes six types in stable order', () => {
   assert.deepEqual(EMPLOYMENT_TYPES, [
     'full_time', 'part_time', 'hourly', 'per_session', 'fixed_retainer',
+    'per_case_commission',
   ]);
 });
 
