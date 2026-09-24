@@ -20,7 +20,7 @@ const { buildInlinedHtml } = require('./inline-page');
 
 const HTML = buildInlinedHtml();
 const TOKEN_KEY = 'ezone_staff_token_v1';
-const DATA_KEY = 'ezone_staff_data_v1';
+const DATA_KEY = 'ezone_staff_data_v2';
 
 function payload(name) {
   return {
@@ -80,7 +80,7 @@ const pill = (doc) => doc.getElementById('syncPill');
 test('paints from the local copy BEFORE /api/data answers, with «מתעדכן…»; the answer hides it', async () => {
   const gate = deferred();
   const { dom, doc, w } = loadPage({
-    token: 't.k', local: { savedAt: Date.now() - 60e3, data: payload('ישן') },
+    token: 't.k', local: { v: 2, savedAt: Date.now() - 60e3, data: payload('ישן') },
     fetchImpl: async (url) => {
       if (url === '/api/data') { await gate.promise; return response(payload('חדש')); }
       return response({ configured: false });
@@ -116,7 +116,7 @@ test('a STALE answer keeps «מתעדכן…» and schedules another request', a
 
 test('a failing /api/data with a copy on screen keeps the copy — never the error page', async () => {
   const { dom, doc, w } = loadPage({
-    token: 't.k', local: { savedAt: Date.now() - 3600e3, data: payload('עותק') },
+    token: 't.k', local: { v: 2, savedAt: Date.now() - 3600e3, data: payload('עותק') },
     fetchImpl: async (url) => (url === '/api/data' ? response({ error: 'x' }, { status: 502 }) : response({ configured: false })),
   });
   await tick(20);
@@ -132,7 +132,7 @@ test('a failing /api/data with a copy on screen keeps the copy — never the err
 
 test('no token → the local copy is never read or shown', async () => {
   const { dom, doc, w } = loadPage({
-    token: null, local: { savedAt: Date.now(), data: payload('סודי') },
+    token: null, local: { v: 2, savedAt: Date.now(), data: payload('סודי') },
     fetchImpl: async () => response({}),
   });
   await tick(10);
@@ -144,7 +144,7 @@ test('no token → the local copy is never read or shown', async () => {
 
 test('logout and a 401 both delete the local copy', async () => {
   let r = loadPage({
-    token: 't.k', local: { savedAt: Date.now(), data: payload('א') },
+    token: 't.k', local: { v: 2, savedAt: Date.now(), data: payload('א') },
     fetchImpl: async (url) => (url === '/api/data' ? response(payload('א')) : response({ ok: true })),
   });
   await tick(20);
@@ -154,7 +154,7 @@ test('logout and a 401 both delete the local copy', async () => {
   r.dom.window.close();
 
   r = loadPage({
-    token: 't.k', local: { savedAt: Date.now(), data: payload('א') },
+    token: 't.k', local: { v: 2, savedAt: Date.now(), data: payload('א') },
     fetchImpl: async () => response({ error: 'unauthorized' }, { status: 401 }),
   });
   await tick(20);
@@ -167,7 +167,7 @@ test('a copy older than 72 h, or from the future, is ignored and deleted', async
   for (const savedAt of [Date.now() - 73 * 3600e3, Date.now() + 3600e3]) {
     const gate = deferred();
     const { dom, doc, w } = loadPage({
-      token: 't.k', local: { savedAt, data: payload('ישן מדי') },
+      token: 't.k', local: { v: 2, savedAt, data: payload('ישן מדי') },
       fetchImpl: async (url) => { if (url === '/api/data') await gate.promise; return response(payload('x')); },
     });
     await tick(10);

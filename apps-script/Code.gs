@@ -6613,7 +6613,9 @@ function maSetEffectiveFrom_(assignmentId, ymd) {
 
    - DRY RUN BY DEFAULT. Only the literal `false` writes anything. Run it
      once as-is, read the «row |» lines in the log, then run
-     migrateMarketersNow(false).
+     applyMarketersMigrationNow() — the zero-argument twin that calls
+     migrateMarketersNow(false), because the editor's Run button cannot
+     pass an argument.
    - Writes exactly two cells per placement: role and employment_type.
      NOTHING is deleted: role_detail and every cost column keep their
      values (the cost engine prices per_case_commission at 0 whatever they
@@ -6663,6 +6665,23 @@ function planMarketerMigration_(workers, assignments) {
     actions.push(row);
   });
   return { actions: actions, alreadyDone: alreadyDone };
+}
+
+// The Apps Script editor's Run button calls the selected function with NO
+// arguments, so migrateMarketersNow(false) cannot be started from the
+// dropdown — every Run of it is a dry run. Same fix as the other
+// dry-run-first functions: a zero-argument twin that passes the literal
+// `false` and nothing else, and says THIS RUN WRITES before anything
+// happens. It is exactly as idempotent as migrateMarketersNow (a second
+// run plans nothing and writes nothing) and returns and logs the same
+// report. Not an HTTP action — doPostAction_ does not name it.
+
+// WRITES. The dry run is migrateMarketersNow().
+function applyMarketersMigrationNow() {
+  Logger.log('THIS RUN WRITES — applyMarketersMigrationNow moves «אחר» + «משווק» ' +
+    'placements to משווק/ת + עמלה לפי מקרה. The DRY RUN is migrateMarketersNow(), which ' +
+    'writes nothing; run that first and read its plan if you have not.');
+  return migrateMarketersNow(false);
 }
 
 // dryRun defaults to TRUE. Only the explicit `false` writes anything.
@@ -6718,7 +6737,7 @@ function migrateMarketersNow(dryRun) {
     Logger.log('done | ' + (a.name || a.workerId) + ' | ' + a.house + ' | ' + a.id);
   });
   if (result.dryRun && result.planned.length) {
-    Logger.log('Run migrateMarketersNow(false) to apply. Nothing above has happened yet.');
+    Logger.log('Run applyMarketersMigrationNow() to apply. Nothing above has happened yet.');
   }
   return result;
 }

@@ -47,9 +47,16 @@ Before this role existed, marketers were entered as role «אחר» with פיר�
    argument means dry run). Open **Execution log**. Each `row |` line is one
    placement to be changed:
    `row | ציון מקנזי | <house> | <assignment id> | אחר/«משווק» → משווק/ת | <old type> → per_case_commission | kept: salary=… allowance=…`
-3. If the list is right, run `migrateMarketersNow(false)` — the same way the
-   other editor maintenance functions are applied (see
-   `docs/PAYROLL_VERIFIED_FIXES.md`). The log then starts with `APPLIED.`
+3. If the list is right, choose **`applyMarketersMigrationNow`** → **Run**.
+   The editor's Run button passes no arguments, so `migrateMarketersNow(false)`
+   cannot be started from the dropdown; this zero-argument twin calls exactly
+   that and nothing else. Its first log line is `THIS RUN WRITES — …`, then
+   the same report as the dry run, starting with `APPLIED.` Running it a
+   second time is harmless: it plans nothing and writes nothing.
+
+| Dry run — safe to pick by accident | Writes — chosen on purpose |
+|---|---|
+| `migrateMarketersNow()` | **`applyMarketersMigrationNow()`** |
 
 Rules it keeps:
 
@@ -67,4 +74,6 @@ Rules it keeps:
 
 `tests/marketer-role.test.js` — validation (proxy + Apps Script), enum parity
 across the four mirrors, labels, cost, the three feeds, the migration
-(dry run, exact cells, audit, idempotency) and the form wiring.
+(dry run, exact cells, audit, idempotency), the zero-argument twin
+`applyMarketersMigrationNow` (literal `false` once, warning first, same report,
+idempotent, not an HTTP action) and the form wiring.

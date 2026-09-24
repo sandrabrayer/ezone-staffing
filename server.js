@@ -687,8 +687,26 @@ app.post('/api/action', requireAuth, async (req, res) => {
 // on this service, <RAILWAY_VOLUME_MOUNT_PATH>/staffing-cache (Railway sets
 // that variable itself); else <repo>/.cache, which survives a crash restart
 // but not a redeploy. CACHE_SNAPSHOT=0 turns the whole feature off.
+//
+// Encrypted with CACHE_SNAPSHOT_KEY (AES-256-GCM, 32 random bytes as base64
+// or hex). Without a valid key NO snapshot is written or read — the app
+// runs exactly as before the snapshot existed — and the reason is logged
+// ONCE. The key and the file's contents are never logged.
 const RAILWAY_VOLUME = process.env.RAILWAY_VOLUME_MOUNT_PATH || '';
 const SNAPSHOT_ENABLED = process.env.CACHE_SNAPSHOT !== '0';
+const SNAPSHOT_KEY = cacheSnapshot.parseKey(process.env.CACHE_SNAPSHOT_KEY);
+let snapshotKeyWarned = false;
+// true when there is a usable key; otherwise logs why not, once per process.
+function snapshotKeyReady() {
+  if (SNAPSHOT_KEY.key) return true;
+  if (!snapshotKeyWarned) {
+    snapshotKeyWarned = true;
+    console.log(SNAPSHOT_KEY.reason === 'no key'
+      ? '[proxy] snapshot disabled: no key'
+      : '[proxy] snapshot disabled: invalid key (CACHE_SNAPSHOT_KEY must be 32 random bytes, base64 or hex)');
+  }
+  return false;
+}
 const SNAPSHOT_DIR = process.env.CACHE_SNAPSHOT_DIR ||
   (RAILWAY_VOLUME ? path.join(RAILWAY_VOLUME, 'staffing-cache') : path.join(__dirname, '.cache'));
 const SNAPSHOT_MAX_AGE_MS = envMs('CACHE_SNAPSHOT_MAX_AGE_MS', 24 * 60 * 60 * 1000);
@@ -699,9 +717,10 @@ let snapshotTimer = null;
 
 function saveSnapshot(reason) {
   if (!SNAPSHOT_ENABLED || !snapshotArmed) return null;
+  if (!snapshotKeyReady()) return null;
   const { text, count } = cacheSnapshot.serialize(proxyCache.snapshotPairs());
   if (!count) return null;
-  const r = cacheSnapshot.writeSnapshot(SNAPSHOT_DIR, text);
+  const r = cacheSnapshot.writeSnapshot(SNAPSHOT_DIR, text, SNAPSHOT_KEY.key);
   if (r.ok) console.log(`[proxy] cache snapshot saved entries=${count} bytes=${r.bytes} reason=${reason}`);
   else console.error(`[proxy] cache snapshot write failed reason=${r.reason}`);
   return r;
@@ -720,7 +739,7 @@ function restoreSnapshot() {
   let restored = 0;
   let note = 'absent';
   let ageMs = null;
-  const read = cacheSnapshot.readSnapshot(SNAPSHOT_DIR);
+  const read = cacheSnapshot.readSnapshot(SNAPSHOT_DIR, SNAPSHOT_KEY.key);
   if (read.text !== null) {
     const doc = cacheSnapshot.parse(read.text, { maxAgeMs: SNAPSHOT_MAX_AGE_MS });
     if (!doc) note = 'ignored (corrupt, wrong version or too old)';
@@ -731,7 +750,8 @@ function restoreSnapshot() {
       });
       note = 'ok';
     }
-  } else if (read.reason !== 'absent') note = 'unreadable (' + read.reason + ')';
+  } else if (read.reason === 'undecryptable') note = 'ignored (cannot decrypt: wrong key or damaged)';
+  else if (read.reason !== 'absent') note = 'unreadable (' + read.reason + ')';
   console.log(`[proxy] cache snapshot dir=${SNAPSHOT_DIR} writable=${probe.ok}` +
     (probe.ok ? '' : ` reason=${probe.reason}`) + ` restored entries=${restored} (${note})` +
     (ageMs !== null ? ` ageMs=${ageMs}` : ''));
@@ -749,7 +769,14 @@ function bootProxy() {
   booted = true;
   console.log(`[proxy] upstream concurrency=${upstreamQueue.limit} volume mount=${RAILWAY_VOLUME || 'none'}`);
   let summary = { dir: SNAPSHOT_DIR, writable: false, restored: 0, note: 'disabled' };
-  if (SNAPSHOT_ENABLED) {
+  // An earlier version wrote the snapshot UNENCRYPTED. Delete it whatever the
+  // settings are now — it holds salary data in the clear and is never read.
+  if (cacheSnapshot.removeLegacyPlaintext(SNAPSHOT_DIR)) {
+    console.log('[proxy] removed the old unencrypted cache snapshot');
+  }
+  if (SNAPSHOT_ENABLED && !snapshotKeyReady()) {
+    summary.note = 'disabled: ' + SNAPSHOT_KEY.reason;
+  } else if (SNAPSHOT_ENABLED) {
     summary = restoreSnapshot();
     snapshotArmed = true;
     if (SNAPSHOT_INTERVAL_MS) {

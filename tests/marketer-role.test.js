@@ -458,6 +458,92 @@ test('the migrated placement validates on its next edit (no stale rate is re-sen
 });
 
 // ---------------------------------------------------------------------------
+// applyMarketersMigrationNow — the zero-argument twin
+//
+// The editor's Run button passes NO arguments, so migrateMarketersNow(false)
+// could not be started from the dropdown at all. Same contract as the other
+// dry-run-first twins (PR #38): the literal false, exactly once, THIS RUN
+// WRITES first, and the bare function unchanged.
+// ---------------------------------------------------------------------------
+
+test('applyMarketersMigrationNow calls migrateMarketersNow(false) — exactly once, with the literal false', () => {
+  const ctx = loadCtx(seed());
+  const calls = [];
+  ctx.migrateMarketersNow = function () { calls.push([...arguments]); return { stub: true }; };
+  const out = ctx.applyMarketersMigrationNow();
+  assert.strictEqual(calls.length, 1, 'exactly once');
+  assert.strictEqual(calls[0].length, 1, 'with one argument');
+  assert.strictEqual(calls[0][0], false, 'and that argument is the literal false');
+  assert.deepStrictEqual(plain(out), { stub: true }, 'the result is passed straight back');
+});
+
+test('applyMarketersMigrationNow says THIS RUN WRITES first, and names the dry run', () => {
+  const ctx = loadCtx(seed());
+  ctx.migrateMarketersNow = function () { ctx.logs.push('(the function ran)'); return {}; };
+  ctx.applyMarketersMigrationNow();
+  assert.match(ctx.logs[0], /^THIS RUN WRITES/);
+  assert.ok(ctx.logs[0].includes('migrateMarketersNow()'), 'names the dry run: ' + ctx.logs[0]);
+  assert.match(ctx.logs[0], /DRY RUN/);
+  assert.strictEqual(ctx.logs.indexOf('(the function ran)'), 1, 'the warning comes BEFORE the work');
+});
+
+test('applyMarketersMigrationNow takes no arguments, so the Run button can trigger it', () => {
+  const ctx = loadCtx(seed());
+  assert.strictEqual(ctx.applyMarketersMigrationNow.length, 0);
+  assert.ok(gs.includes('function applyMarketersMigrationNow() {'));
+  assert.ok(gs.includes('function migrateMarketersNow(dryRun) {'), 'the bare function keeps its dryRun parameter');
+});
+
+test('applyMarketersMigrationNow applies, with the SAME result and report as migrateMarketersNow(false)', () => {
+  const a = loadCtx(seed());
+  const b = loadCtx(seed());
+  const viaTwin = plain(a.applyMarketersMigrationNow());
+  const direct = plain(b.migrateMarketersNow(false));
+  assert.equal(viaTwin.dryRun, false);
+  assert.deepStrictEqual(viaTwin.applied.map(x => x.id).sort(), ['ap', 'az']);
+  assert.deepStrictEqual(viaTwin, direct, 'same returned report');
+  assert.deepStrictEqual(a.logs.slice(1), b.logs, 'same log lines after the warning');
+  assert.ok(a.logs[1].startsWith('APPLIED.'));
+  assert.deepStrictEqual(a.tabs.assignments.rows, b.tabs.assignments.rows, 'same cells written');
+  assert.deepStrictEqual(a.tabs.audit_log.rows.map(r => r.slice(1)), b.tabs.audit_log.rows.map(r => r.slice(1)),
+    'same audit rows (timestamps aside)');
+});
+
+test('applyMarketersMigrationNow is idempotent: the second run plans nothing and writes nothing', () => {
+  const ctx = loadCtx(seed());
+  ctx.applyMarketersMigrationNow();
+  const n = ctx.writes.length;
+  const auditRows = ctx.tabs.audit_log.rows.length;
+  const res = plain(ctx.applyMarketersMigrationNow());
+  assert.deepStrictEqual(res.planned, []);
+  assert.deepStrictEqual(res.applied, []);
+  assert.equal(res.alreadyDone.length, 3);
+  assert.equal(ctx.writes.length, n, 'no write of any kind');
+  assert.equal(ctx.tabs.audit_log.rows.length, auditRows, 'no audit row either');
+});
+
+test('the dry run tells you to run applyMarketersMigrationNow(), which the Run button can start', () => {
+  const ctx = loadCtx(seed());
+  ctx.migrateMarketersNow();
+  const hint = ctx.logs[ctx.logs.length - 1];
+  assert.match(hint, /Run applyMarketersMigrationNow\(\) to apply/);
+  assert.ok(!ctx.logs.some(l => l.includes('migrateMarketersNow(false)')), 'never a hint that cannot be run');
+});
+
+test('neither migration name is an HTTP action — the dispatcher refuses them, the proxy never sends them', () => {
+  const ctx = loadCtx(seed(), { SHARED_SECRET: 'the-right-secret' });
+  const before = JSON.stringify(ctx.tabs.assignments.rows);
+  ['applyMarketersMigrationNow', 'migrateMarketersNow'].forEach(action => {
+    const out = ctx.doPost({ parameter: { secret: 'the-right-secret' },
+      postData: { contents: JSON.stringify({ action }) } });
+    // Authorized, so this is the dispatcher's answer, not the auth check's.
+    assert.equal(JSON.parse(out._text).error, 'unknown action', action);
+    assert.throws(() => V.validateAction({ action }), /./, action + ' must not pass the proxy');
+  });
+  assert.equal(JSON.stringify(ctx.tabs.assignments.rows), before, 'nothing written');
+});
+
+// ---------------------------------------------------------------------------
 // UI
 // ---------------------------------------------------------------------------
 
