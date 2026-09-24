@@ -64,7 +64,7 @@ proxy has to call Apps Script (`X-Cache: MISS`).
 | **Stale-while-revalidate for 24 h** (was 5 min): an old copy is answered at once (`STALE`) while one refresh runs. Plus **keep-warm**: a background re-read every 10 min. | `server.js` |
 | **Cache snapshot on disk**, restored at boot (served `STALE`, never as fresh, refresh started), saved 5 s after each refresh, every 5 min, and on SIGTERM. **Encrypted** (AES-256-GCM, `CACHE_SNAPSHOT_KEY`; no key → no snapshot at all), atomic, 0600, size-capped, no secret, a bad or undecryptable file = no file. See `docs/cache-security.md`. | `lib/cache-snapshot.js`, `server.js` |
 | **Boot warm-up** (kept) through the background lane, after the restore. | `server.js` |
-| **First render never waits on Apps Script**: the browser keeps the last data it loaded (localStorage, same profile as the session token) and paints it at once with «מתעדכן…» in the topbar; the fresh copy replaces it. A `STALE` answer triggers follow-up requests (3 s, 6 s, 12 s, 20 s); a failure keeps the copy on screen and the pill says «לא עודכן · נתונים מ-HH:MM · נסי שוב». A refresh never re-renders under an open form or while typing. | `public/index.html` |
+| **First render never waits on Apps Script**: the browser keeps a stripped copy of the last data it loaded (localStorage, same profile as the session token; no money fields — `docs/cache-security.md`) and paints it at once as a read-only preview with «מתעדכן…» in the topbar; the fresh copy replaces it. A `STALE` answer triggers follow-up requests (3 s, 6 s, 12 s, 20 s); a failure keeps the copy on screen and the pill says «לא עודכן · נתונים מ-HH:MM · נסי שוב». A refresh never re-renders under an open form or while typing. | `public/index.html` |
 | **Lazy parts**: `/api/data` no longer carries `hearings`; the שימועים screen fetches `/api/data/hearings` (same cache entry, no extra Apps Script call) when it opens. Legacy keys are dropped. | `server.js`, `public/index.html` |
 | **Code.gs lean bundle** `doGet?view=app`: skips the legacy v2 tabs; cached under its own prefix of the same version token (one invalidation drops both). The bundle was already chunked in CacheService (as coordinators #158), and a chunk overflow is now logged instead of silent. | `apps-script/Code.gs` |
 | **Logs**: `[proxy] GET action=data ms=… cache=… upstream=… outcome=… q=n/2` per request (and `POST action=<name>`), `[proxy] upstream retry` / `recovered` / `failed, serving stale`, and at boot `[proxy] upstream concurrency=2 volume mount=…` + `[proxy] cache snapshot dir=… writable=… restored entries=N`. | `server.js` |
@@ -153,9 +153,13 @@ it (the mount path is the one in Railway → service → Volumes, e.g. `/data`
   credential or secret inside, replaced only by a newer snapshot. No key →
   no snapshot. The unencrypted `read-cache.json` the first version wrote is
   deleted at boot. `CACHE_SNAPSHOT=0` disables it.
-- The **browser copy** lives in the same browser profile that already holds
-  the session token, and is deleted on logout, on any 401 (expired or
-  revoked session) and after 72 h. It is never read without a token.
+- The **browser copy** is an ALLOWLIST of names, houses, roles, dates and
+  statuses — no salary / rate / allowance / payment / budget / hours field,
+  no notes, no phone (`docs/cache-security.md`). A page painted from it is a
+  read-only preview (amounts «₪ …», forms, saves and exports refused) until
+  the fresh copy lands. It lives in the same browser profile that already
+  holds the session token, is deleted on logout, on ANY 401, on a failed
+  PIN and after 72 h, and is never read or written without a token.
 - `/api/data/hearings` is behind the same `requireAuth`; the cache key is
   still the fixed `data`.
 
@@ -166,5 +170,6 @@ it (the mount path is the one in Railway → service → Volumes, e.g. `/data`
 | `tests/perf-open.test.js` | queue cap and lanes, classifier, deadline, 404-HTML retry on reads, no retry on writes, stale-on-error, the Hebrew 502, the log line, lazy route, lean request, no secret in logs, snapshot rules and fs safety |
 | `tests/cache-snapshot-boot.test.js` | a real process: boot log lines, SIGTERM snapshot (0600, encrypted, no secret), the next process answering from it at once, the volume default, an unwritable dir, `CACHE_SNAPSHOT=0`, no key / invalid key → no file and one log line, another key's file ignored and replaced, the legacy plaintext file deleted, no key or data in any log line |
 | `tests/snapshot-security.test.js` | key parsing (32 bytes only, never echoed), AES-256-GCM round trip, fresh IV, tamper / truncation / wrong key → null, no write without a key, 0600 over an old 0644 file, no logging in the module |
+| `tests/local-copy-security.test.js` | what the browser copy may hold, when it is cleared, and the preview |
 | `tests/perf-open-page.test.js` | instant paint from the browser copy with «מתעדכן…», STALE follow-up, failure keeps the copy, no token / logout / 401 / old copy / blocked storage, no re-render under an open form, hearings fetched lazily |
 | `tests/perf-bundle.test.js` | Code.gs `view=app`: legacy reads skipped, v3 keys identical, own cache prefix, one invalidation drops both |

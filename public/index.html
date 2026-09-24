@@ -1792,32 +1792,113 @@ function clearToken(){ localStorage.removeItem(TOKEN_KEY); clearLocalData(); }
    the server's copy was cold. The last data this browser loaded is now kept
    in localStorage and painted IMMEDIATELY on open, with «מתעדכן…» in the
    topbar while the fresh copy loads in the background.
+
+   WHAT IS KEPT is an ALLOWLIST (LOCAL_COPY_FIELDS): names, houses, roles,
+   employment types, dates and statuses — enough to paint the structure.
+   NEVER kept: any salary / rate / allowance / payment / budget / hours /
+   sessions / cost field, free-text notes and reason details (which can
+   hold an ID or a bank number typed by hand), phone numbers, monthly
+   actuals and budgets. A kept text field that carries a run of 5+ digits
+   (an ID number, an account number) is blanked. A field not on the list is
+   dropped, so a column added to the bundle later stays out until someone
+   decides it is safe.
+
+   Because money is not in the copy, a page painted from it is a PREVIEW:
+   every amount reads «₪ …», cost and budget lines are withheld, and forms,
+   saves and exports are refused until the fresh server copy has landed
+   (then everything renders for real). Nothing is ever edited or exported
+   from the stripped copy.
+
    Scope: the same browser profile that already holds the session token; it
-   is dropped by clearToken() (logout, expired / revoked session) and ignored
-   after LOCAL_DATA_MAX_AGE_MS. Every access is wrapped: blocked storage just
-   means no instant paint. */
-const LOCAL_DATA_KEY = 'ezone_staff_data_v1';
+   is dropped by clearToken() (logout, any 401, expired / revoked session),
+   by a failed PIN, and ignored after LOCAL_DATA_MAX_AGE_MS. It is never
+   written without a token. Every access is wrapped: blocked storage just
+   means no instant paint. The full, unredacted copy the first version
+   stored (…_v1) is deleted on every load. */
+const LOCAL_DATA_KEY = 'ezone_staff_data_v2';
+const LOCAL_DATA_LEGACY_KEYS = ['ezone_staff_data_v1'];
+const LOCAL_DATA_VERSION = 2;
 const LOCAL_DATA_MAX_AGE_MS = 72 * 60 * 60 * 1000;
+const LOCAL_COPY_FIELDS = {
+  workers: ['id', 'name', 'createdAt', 'shift_commitment', 'startDate', 'startDateSource', 'gmachMonth'],
+  assignments: ['id', 'workerId', 'house', 'role', 'roleDetail', 'employmentType', 'status',
+    'statusDate', 'effectiveFrom', 'createdAt'],
+  absences: ['id', 'workerId', 'house', 'startDate', 'endDate', 'reasonType', 'status', 'createdAt'],
+  coverages: ['id', 'absenceId', 'coveringWorkerId', 'coveringHouse', 'receivingHouse', 'startDate',
+    'endDate', 'replacedAssignmentId', 'role', 'shiftCount', 'approvalStatus', 'approvedBy',
+    'cancelled', 'createdAt'],
+  archiveV3: ['id', 'assignmentId', 'workerId', 'name', 'house', 'role', 'roleDetail',
+    'employmentType', 'terminationDate', 'reasonType', 'archivedAt'],
+  feedLog: ['consumer', 'lastServedAt', 'lastRowCount', 'serveCount', 'status'],
+  // monthlyActuals and budgets: every useful field is money or a cost input.
+  monthlyActuals: [],
+  budgets: [],
+};
+// Kept text that could carry a hand-typed number. Ids and dates are not
+// scrubbed (they are generated, not typed).
+const LOCAL_COPY_TEXT_FIELDS = ['name', 'roleDetail', 'approvedBy', 'shift_commitment', 'reasonType'];
+const LONG_DIGIT_RUN = /(?:\d[\s./-]?){5,}/;
+// /api/data body → the copy this browser may keep. Pure.
+function redactForLocal(d){
+  const out = {};
+  Object.keys(LOCAL_COPY_FIELDS).forEach(coll => {
+    const fields = LOCAL_COPY_FIELDS[coll];
+    const rows = d && Array.isArray(d[coll]) ? d[coll] : [];
+    out[coll] = fields.length ? rows.map(r => {
+      const o = {};
+      fields.forEach(f => {
+        if (!r || !Object.prototype.hasOwnProperty.call(r, f)) return;
+        let v = r[f];
+        if (v !== null && typeof v === 'object') return;
+        if (typeof v === 'string' && LOCAL_COPY_TEXT_FIELDS.indexOf(f) >= 0 && LONG_DIGIT_RUN.test(v)) v = '';
+        o[f] = v;
+      });
+      return o;
+    }) : [];
+  });
+  return out;
+}
+// The full copy #45 stored before redaction existed. Gone on every load,
+// token or no token.
+(function purgeLegacyLocalData(){
+  LOCAL_DATA_LEGACY_KEYS.forEach(k => { try{ localStorage.removeItem(k); } catch(_e){ /* blocked */ } });
+})();
 function readLocalData(){
   try{
     const raw = localStorage.getItem(LOCAL_DATA_KEY);
     if (!raw) return null;
     const o = JSON.parse(raw);
     const now = Date.now();
-    if (!o || typeof o.savedAt !== 'number' || !o.data || typeof o.data !== 'object'
+    if (!o || o.v !== LOCAL_DATA_VERSION || typeof o.savedAt !== 'number' || !o.data || typeof o.data !== 'object'
         || now - o.savedAt > LOCAL_DATA_MAX_AGE_MS || o.savedAt > now + 60000){
       localStorage.removeItem(LOCAL_DATA_KEY);
       return null;
     }
-    return o;
+    // Re-applied on read: whatever is in storage, only the allowlist is used.
+    return { savedAt: o.savedAt, data: redactForLocal(o.data) };
   } catch(_e){ return null; }
 }
 function writeLocalData(d){
-  try{ localStorage.setItem(LOCAL_DATA_KEY, JSON.stringify({ savedAt: Date.now(), data: d })); }
+  // Never without a session: a copy must not outlive, or predate, the
+  // session that fetched it.
+  if (!token()) return;
+  try{ localStorage.setItem(LOCAL_DATA_KEY, JSON.stringify({ v: LOCAL_DATA_VERSION, savedAt: Date.now(), data: redactForLocal(d) })); }
   catch(_e){ /* quota / blocked storage: no instant paint next time */ }
 }
 function clearLocalData(){
-  try{ localStorage.removeItem(LOCAL_DATA_KEY); } catch(_e){ /* ignore */ }
+  [LOCAL_DATA_KEY].concat(LOCAL_DATA_LEGACY_KEYS).forEach(k => {
+    try{ localStorage.removeItem(k); } catch(_e){ /* ignore */ }
+  });
+}
+// true while the page shows the stripped local copy (see above).
+let DATA_PREVIEW = false;
+const PREVIEW_MONEY = '₪ …';
+const PREVIEW_BLOCKED_TEXT = 'הנתונים העדכניים עדיין נטענים — אפשר לערוך ולהפיק דוחות בעוד רגע';
+// Forms, saves and exports call this first. → true when it refused.
+function blockedInPreview(){
+  if (!DATA_PREVIEW) return false;
+  toast(PREVIEW_BLOCKED_TEXT, true);
+  return true;
 }
 // The in-memory arrays in the /api/data shape (after local patching).
 function currentDataSnapshot(){
@@ -1891,7 +1972,9 @@ async function loadData(){
   const meta = {};
   const d = await apiFetch('/api/data', undefined, early, meta);
   const text = JSON.stringify(d);
-  const changed = text !== lastDataText;
+  // Leaving the preview always re-renders: the amounts are only now known.
+  const changed = DATA_PREVIEW || text !== lastDataText;
+  DATA_PREVIEW = false;
   lastDataText = text;
   applyData(d);
   if (changed) writeLocalData(d);
@@ -2067,6 +2150,9 @@ async function submitPin(){
     });
     const body = await resp.json().catch(()=>({}));
     if (!resp.ok){
+      // A failed PIN (wrong code, lockout) leaves no data behind in this
+      // browser, whatever state it was in.
+      clearLocalData();
       errEl.textContent = body.error || 'שגיאה בכניסה';
       btn.disabled = false;
       return;
@@ -2082,7 +2168,7 @@ async function submitPin(){
 
 /* ---------- helpers ---------- */
 
-const fmt = n => '₪'+Number(n||0).toLocaleString('he-IL');
+const fmt = n => DATA_PREVIEW ? PREVIEW_MONEY : '₪'+Number(n||0).toLocaleString('he-IL');
 // The ONE date formatter for the whole UI → DD/MM/YYYY. Every displayed date
 // must go through this; nothing renders a raw Date object / Date string.
 // Handles, in order: a Date object; an ISO 'YYYY-MM-DD' prefix (reformatted by
@@ -2175,6 +2261,10 @@ function onMonthChange(value){
 // Rebuild the cost report for the selected month. Called once per render,
 // BEFORE any view reads a number.
 function rebuildCostReport(){
+  if (DATA_PREVIEW){
+    COST = engineCostForMonth([], [], [], [], [], ensureMonth(), { archive: [], monthlyActuals: [] });
+    return COST;
+  }
   COST = engineCostForMonth(
     WORKERS, ASSIGNMENTS, ABSENCES, COVERAGES, BUDGETS, ensureMonth(),
     { archive: ARCHIVE_V3, monthlyActuals: MONTHLY_ACTUALS }
@@ -2310,6 +2400,7 @@ function totalCostMonth(){
 // The actual / estimate / missing-data split under a total, in Hebrew and
 // without parentheses.
 function costSplitSub(t){
+  if (DATA_PREVIEW) return '';
   const parts = [];
   // A month with no monthly_actuals rows has no confirmed money at all, and
   // says so instead of quietly showing nothing: ₪0 with the reason beside
@@ -2347,6 +2438,7 @@ function exportContext(){
 // Build one report and hand it to the browser as a download. Read-only:
 // nothing is posted, nothing is stored, no request is made.
 function downloadExport(kind){
+  if (blockedInPreview()) return;
   let out;
   try {
     out = buildCsvExport(kind, exportContext());
@@ -2514,6 +2606,7 @@ function complianceCls(v){
 // Compact read-only budget line for a house card / house view. `cost` is
 // the already-computed month total for the house.
 function budgetLineHtml(houseId){
+  if (DATA_PREVIEW) return `<div class="bud-line bud-none">תקציב ${escapeHtml(fmtMonth(ensureMonth()))} ${PREVIEW_MONEY}</div>`;
   const hc = houseCost(houseId);
   const v = hc.variance;
   if (v.status === 'none'){
@@ -2551,6 +2644,13 @@ function instructorsSubRow(houseId){
 // combined summary row across houses that have a budget set. Houses with an
 // instructors budget get an indented "מדריכים" sub-row beneath them.
 function budgetSummarySection(){
+  if (DATA_PREVIEW){
+    return `
+  <div class="section">
+    <div class="section-head"><h2>תקציב מול עלות — ${escapeHtml(fmtMonth(ensureMonth()))}</h2></div>
+    <div class="tablecard"><div class="section-note">${PREVIEW_MONEY} הסכומים יוצגו כשהנתונים העדכניים ייטענו.</div></div>
+  </div>`;
+  }
   const month = ensureMonth();
   let sumBudget = 0, sumCostBudgeted = 0, anyBudget = false;
   const rows = HOUSES.map(h => {
@@ -2619,6 +2719,7 @@ function houseBudgetControlHtml(houseId){
 let editingBudget = null;   // { house }
 
 function openBudget(houseId){
+  if (blockedInPreview()) return;
   editingBudget = { house: houseId };
   const month = ensureMonth();
   document.getElementById('budgetModalSub').textContent =
@@ -2721,6 +2822,7 @@ function leaveBadge(a){
 // Per-assignment terms display: chooses the appropriate string per type
 // (full salary, salary×pct, rate×hours, rate×sessions, retainer).
 function termsHtml(a){
+  if (DATA_PREVIEW && a.employmentType !== 'per_case_commission') return `<div class="money">${PREVIEW_MONEY}</div>`;
   switch (a.employmentType){
     case 'full_time':
       return `<div class="money">${fmt(a.salary)}</div>`;
@@ -2785,6 +2887,9 @@ function setBusy(btnId, busy, busyLabel){
 /* ---------- action layer ---------- */
 
 async function doAction(payload){
+  // Backstop for any save path that is not a form: nothing is ever written
+  // from the stripped local copy.
+  if (DATA_PREVIEW) { toast(PREVIEW_BLOCKED_TEXT, true); throw new Error(PREVIEW_BLOCKED_TEXT); }
   const out = await apiFetch('/api/action', {method:'POST', body: JSON.stringify(payload)});
   // The caller patches the in-memory arrays right after this resolves; keep
   // the local copy in step so the next open does not flash pre-save data.
@@ -2880,6 +2985,7 @@ function workerHasOnlyAssignmentRefs(workerId){
 // assignmentId set → we're editing an existing assignment's terms;
 // unset → saving will CREATE an assignment at `house`.
 function openWorker(workerId, house){
+  if (blockedInPreview()) return;
   const w = workerId ? workerById(workerId) : null;
   const targetHouse = house || (HOUSES[0] && HOUSES[0].id);
 
@@ -3531,6 +3637,7 @@ function updateAssignmentSubHeader(){
 }
 
 function openAssignment(opts){
+  if (blockedInPreview()) return;
   const o = opts || {};
   const a = o.assignmentId ? ASSIGNMENTS.find(x => x.id === o.assignmentId) : null;
   editingAssignment = a
@@ -3664,6 +3771,7 @@ async function deleteAssignment(assignmentId){
 /* ---------- terminate (assignment lifecycle) ---------- */
 
 function openTerminate(assignmentId){
+  if (blockedInPreview()) return;
   const a = ASSIGNMENTS.find(x => x.id === assignmentId);
   if (!a) return;
   editingTerm = {
@@ -3766,6 +3874,7 @@ function fillAbsenceReasonDropdown(selectedReason){
 }
 
 function openAbsence(opts){
+  if (blockedInPreview()) return;
   const o = opts || {};
   editingAbsence = { house: o.house || HOUSES[0].id };
   document.getElementById('absenceModalSub').textContent = 'בבית ' + houseName(editingAbsence.house);
@@ -3910,6 +4019,7 @@ function onCoverageReceivingHouseChange(){
 }
 
 function openCoverage(opts){
+  if (blockedInPreview()) return;
   const o = opts || {};
   // coveringHouse is fixed by the opener (always a per-house view button).
   // No entry path from absence rows or the central dashboard.
@@ -4014,6 +4124,7 @@ function fillHearingWorkerDropdown(selectedId){
 // Open the hearing modal — blank for a new hearing, prefilled when editing
 // an existing row (hearingId set).
 function openHearing(hearingId){
+  if (blockedInPreview()) return;
   const h = hearingId ? HEARINGS.find(x => x.id === hearingId) : null;
   editingHearing = { id: h ? h.id : undefined };
   document.getElementById('hearingModalTitle').textContent = h ? 'עריכת שימוע' : 'שימוע חדש';
@@ -5103,6 +5214,7 @@ async function boot(){
   // is fetched. Never without a session token.
   const local = token() ? readLocalData() : null;
   if (local){
+    DATA_PREVIEW = true;
     applyData(local.data);
     lastDataText = JSON.stringify(local.data);
     dataSavedAt = local.savedAt;
