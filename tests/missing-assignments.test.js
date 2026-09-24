@@ -1,6 +1,6 @@
 'use strict';
 
-// «שיבוצים חסרים» and applyMissingAssignmentsNow(dryRun) — the proposal
+// «שיבוצים חסרים» and missingAssignmentsPreviewNow() / applyMissingAssignmentsNow() — the proposal
 // sheet for the workers who are paid but hold no placement.
 //
 // The point of this sheet is what it does NOT do. Ten people draw a salary
@@ -330,7 +330,7 @@ test('a department alone creates nothing, however approved the row is', () => {
   const ctx = loadCtx(seed());
   ctx.writeMissingAssignmentsTabNow();
   fill(ctx, 'רון מנחם', { 'מחלקה בשכר': '003 · רמות השבים', 'אשר': 'כן' });
-  const res = plain(ctx.applyMissingAssignmentsNow(false));
+  const res = plain(ctx.applyMissingAssignmentsNow());
   assert.deepStrictEqual(res.created, []);
   assert.match(res.skipped.map(s => s.why).join(' '), /בית/);
 });
@@ -339,25 +339,25 @@ test('a department alone creates nothing, however approved the row is', () => {
 // applying
 // ---------------------------------------------------------------------------
 
-test('with no argument it is a DRY RUN and creates nothing', () => {
+test('the PreviewNow run is a DRY RUN and creates nothing', () => {
   const ctx = loadCtx(seed());
   ctx.writeMissingAssignmentsTabNow();
   fill(ctx, 'דפנה כץ', FULL);
   ctx.writes.length = 0;
-  const res = plain(ctx.applyMissingAssignmentsNow());
+  const res = plain(ctx.missingAssignmentsPreviewNow());
   assert.strictEqual(res.dryRun, true);
   assert.strictEqual(res.planned.length, 1, 'it still says what it would create');
   assert.deepStrictEqual(res.created, []);
   assert.deepStrictEqual(ctx.writes, []);
 });
 
-test('anything other than the literal false stays a dry run', () => {
+test('the shared core stays a dry run for anything but the literal false', () => {
   [true, 'false', 1, 0, null, ''].forEach(arg => {
     const ctx = loadCtx(seed());
     ctx.writeMissingAssignmentsTabNow();
     fill(ctx, 'דפנה כץ', FULL);
     ctx.writes.length = 0;
-    const res = plain(ctx.applyMissingAssignmentsNow(arg));
+    const res = plain(ctx.runMissingAssignments_(arg));
     assert.strictEqual(res.dryRun, true, String(arg) + ' must not create anything');
     assert.deepStrictEqual(ctx.writes, [], String(arg) + ' must write nothing');
   });
@@ -373,7 +373,7 @@ test('a PARTIALLY filled approved row is skipped, and named with what it needs',
     'תאריך תחילת השיבוץ': '2026-03-01', 'אשר': 'כן',
   });
   ctx.writes.length = 0;
-  const res = plain(ctx.applyMissingAssignmentsNow(false));
+  const res = plain(ctx.applyMissingAssignmentsNow());
   assert.deepStrictEqual(res.created, [], 'nothing partial is ever created');
   const why = res.skipped.find(s => s.name === 'בר ליידרמן').why;
   assert.match(why, /incomplete/);
@@ -387,7 +387,7 @@ test('a missing start date alone is enough to skip the row', () => {
   const values = Object.assign({}, FULL);
   delete values['תאריך תחילת השיבוץ'];
   fill(ctx, 'עידו בוזגלו', values);
-  const res = plain(ctx.applyMissingAssignmentsNow(false));
+  const res = plain(ctx.applyMissingAssignmentsNow());
   assert.deepStrictEqual(res.created, []);
   assert.match(res.skipped.find(s => s.name === 'עידו בוזגלו').why, /תאריך תחילת השיבוץ/);
 });
@@ -397,21 +397,21 @@ test('a complete but UNAPPROVED row creates nothing', () => {
   ctx.writeMissingAssignmentsTabNow();
   const values = Object.assign({}, FULL, { 'אשר': '' });
   fill(ctx, 'אופק רחמים', values);
-  const res = plain(ctx.applyMissingAssignmentsNow(false));
+  const res = plain(ctx.applyMissingAssignmentsNow());
   assert.deepStrictEqual(res.created, []);
   assert.match(res.skipped.find(s => s.name === 'אופק רחמים').why, /not approved/);
 
   const ctx2 = loadCtx(seed());
   ctx2.writeMissingAssignmentsTabNow();
   fill(ctx2, 'אופק רחמים', Object.assign({}, FULL, { 'אשר': 'לא' }));
-  assert.deepStrictEqual(plain(ctx2.applyMissingAssignmentsNow(false)).created, []);
+  assert.deepStrictEqual(plain(ctx2.applyMissingAssignmentsNow()).created, []);
 });
 
 test('a complete, approved row creates the assignment through the app\'s own path', () => {
   const ctx = loadCtx(seed());
   ctx.writeMissingAssignmentsTabNow();
   fill(ctx, 'דפנה כץ', FULL);
-  const res = plain(ctx.applyMissingAssignmentsNow(false));
+  const res = plain(ctx.applyMissingAssignmentsNow());
   assert.strictEqual(res.created.length, 1);
   const row = ctx.tabs.assignments.rows.slice(1).find(r => String(r[1]) === 'wpaid9');
   assert.ok(row, 'the assignment row exists');
@@ -429,12 +429,12 @@ test('an hourly row needs BOTH the rate and the hours', () => {
   fill(ctx, 'שירן כהן', Object.assign({}, FULL, {
     'סוג העסקה': 'hourly · שכר שעתי', 'סכום': 60, 'כמות': '',
   }));
-  const partial = plain(ctx.applyMissingAssignmentsNow(false));
+  const partial = plain(ctx.applyMissingAssignmentsNow());
   assert.deepStrictEqual(partial.created, []);
   assert.match(partial.skipped.find(s => s.name === 'שירן כהן').why, /שעות בחודש/);
 
   fill(ctx, 'שירן כהן', { 'כמות': 80 });
-  const full = plain(ctx.applyMissingAssignmentsNow(false));
+  const full = plain(ctx.applyMissingAssignmentsNow());
   assert.strictEqual(full.created.length, 1);
   const row = ctx.tabs.assignments.rows.slice(1).find(r => String(r[1]) === 'wpaid5');
   assert.strictEqual(Number(row[8]), 60, 'hourly_rate');
@@ -446,7 +446,7 @@ test('creation lands in the audit log with the verified reason', () => {
   const ctx = loadCtx(seed());
   ctx.writeMissingAssignmentsTabNow();
   fill(ctx, 'דפנה כץ', FULL);
-  ctx.applyMissingAssignmentsNow(false);
+  ctx.applyMissingAssignmentsNow();
   const row = ctx.tabs.audit_log.rows.slice(1).find(r => String(r[1]) === 'applyMissingAssignments');
   assert.ok(row, 'an assignment created from a sheet is still an audited change');
   assert.strictEqual(String(row[2]), 'assignment');
@@ -458,15 +458,15 @@ test('a second apply run does not create a duplicate placement', () => {
   const ctx = loadCtx(seed());
   ctx.writeMissingAssignmentsTabNow();
   fill(ctx, 'דפנה כץ', FULL);
-  ctx.applyMissingAssignmentsNow(false);
-  const res = plain(ctx.applyMissingAssignmentsNow(false));
+  ctx.applyMissingAssignmentsNow();
+  const res = plain(ctx.applyMissingAssignmentsNow());
   assert.deepStrictEqual(res.created, []);
   assert.match(res.skipped.find(s => s.name === 'דפנה כץ').why, /already has an assignment at ramot/);
 });
 
 test('with no sheet at all it says so rather than throwing', () => {
   const ctx = loadCtx(seed());
-  const res = plain(ctx.applyMissingAssignmentsNow(false));
+  const res = plain(ctx.applyMissingAssignmentsNow());
   assert.strictEqual(res.rows, 0);
   assert.deepStrictEqual(res.created, []);
   assert.match(ctx.logs.join('\n'), /Run writeMissingAssignmentsTabNow\(\) first/);
@@ -488,7 +488,7 @@ test('an unknown value in a row is caught by the sheet check, and the batch goes
   rowFor(ctx, 'רון מנחם')[col(ctx, 'בית')] = 'atlantis · אטלנטיס';   // no such house
   fill(ctx, 'דפנה כץ', FULL);                                        // a good row after it
 
-  const res = plain(ctx.applyMissingAssignmentsNow(false));
+  const res = plain(ctx.applyMissingAssignmentsNow());
   assert.strictEqual(res.created.length, 1, 'the good row still goes through');
   assert.strictEqual(res.created[0].name, 'דפנה כץ');
   assert.match(res.skipped.find(x => x.name === 'רון מנחם').why, /בית לא מוכר: atlantis/);
@@ -507,7 +507,7 @@ test('a rejection from the shared write path is reported, never left half-applie
     return real(body);
   };
 
-  const res = plain(ctx.applyMissingAssignmentsNow(false));
+  const res = plain(ctx.applyMissingAssignmentsNow());
   assert.strictEqual(res.created.length, 1, 'the row after the rejected one is still created');
   assert.strictEqual(res.created[0].name, 'דפנה כץ');
   const bad = res.skipped.find(x => x.name === 'רון מנחם');
@@ -597,7 +597,7 @@ test('the August figure is REFERENCE ONLY — it never reaches the cost engine',
   ctx.writeMissingAssignmentsTabNow();
   // רון מנחם was paid ₪30,229 in August. Moran enters a ₪9,000 rate.
   fill(ctx, 'רון מנחם', Object.assign({}, FULL, { 'סכום': 9000 }));
-  ctx.applyMissingAssignmentsNow(false);
+  ctx.applyMissingAssignmentsNow();
 
   // Nothing in the created assignment carries the payroll figure.
   const row = ctx.tabs.assignments.rows.slice(1).find(r => String(r[1]) === 'wpaid1');
@@ -619,7 +619,7 @@ test('the reference column is not read back as data by the apply run either', ()
   const r = fill(ctx, 'דפנה כץ', FULL);
   // Corrupt the reference cell: it must change nothing at all.
   r[col(ctx, 'עלות אוגוסט בפועל (שכר — לעיון בלבד)')] = 999999;
-  const res = plain(ctx.applyMissingAssignmentsNow(false));
+  const res = plain(ctx.applyMissingAssignmentsNow());
   assert.strictEqual(res.created.length, 1);
   assert.strictEqual(res.created[0].amount, 9000, 'the plan still uses the entered rate');
   const row = ctx.tabs.assignments.rows.slice(1).find(x => String(x[1]) === 'wpaid9');
@@ -659,7 +659,7 @@ test('an archived history changes nothing on its own — the row still awaits a 
   assert.strictEqual(res.count, 10, 'nobody is dropped for having a past');
   assert.strictEqual(String(rowFor(ctx, 'רון מנחם')[col(ctx, 'אשר')] || ''), '');
   assert.strictEqual(ctx.tabs.workers.rows.slice(1).length, 11, 'and nothing is archived by it');
-  assert.deepStrictEqual(plain(ctx.applyMissingAssignmentsNow(false)).created, []);
+  assert.deepStrictEqual(plain(ctx.applyMissingAssignmentsNow()).created, []);
 });
 
 test('the two verified lists describe the same ten people, and disagreeing aborts', () => {

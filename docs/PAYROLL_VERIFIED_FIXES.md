@@ -34,34 +34,39 @@ the difference is the fix.
 | # | Run | What it does | Writes? |
 |---|---|---|---|
 | 1 | `logMonthTotalsNow()` | the **baseline** for 08 / 09 / 10 2026 | no, ever |
-| 2 | `applyVerifiedFixesNow()` | prints the plan for A, C, D, E | no |
-| 3 | **`applyVerifiedFixesForRealNow`** | applies it | **yes** |
+| 2 | `verifiedFixesPreviewNow()` | prints the plan for A, C, D, E | no |
+| 3 | **`applyVerifiedFixesNow()`** | applies it | **yes** |
 | 4 | `logMonthTotalsNow()` | what moved, and by how much | no |
 | 5 | `writeMissingAssignmentsTabNow()` | builds «שיבוצים חסרים» | the proposal tab only |
 | 6 | *Moran fills the sheet in* | house, role, type, rate, date, «אשר» | — |
-| 7 | `applyMissingAssignmentsNow()` | prints the plan | no |
-| 8 | **`applyMissingAssignmentsForRealNow`** | creates the approved placements | **yes** |
+| 7 | `missingAssignmentsPreviewNow()` | prints the plan | no |
+| 8 | **`applyMissingAssignmentsNow()`** | creates the approved placements | **yes** |
 | 9 | `logMonthTotalsNow()` | the new totals | no |
 
 Every one of these is picked from the **function dropdown** in the Apps
 Script editor and started with **Run** — no argument is ever typed.
 
-That is why the steps that write have their own names. The editor's Run
-button calls the selected function with **no arguments**, so
-`applyVerifiedFixesNow(false)` cannot be triggered from the dropdown at all:
-every Run of it is a dry run. Each dry-run-first function therefore has a
-zero-argument twin:
+**One naming rule for every maintenance run that can write** (pinned by
+`tests/editor-run-pairs.test.js`):
 
-| Dry run — safe to pick by accident | Writes — chosen on purpose |
+| Dry run — writes nothing, ever | Writes |
 |---|---|
-| `applyVerifiedFixesNow()` | `applyVerifiedFixesForRealNow()` |
-| `applyCleanupDecisionsNow()` | `applyCleanupDecisionsForRealNow()` |
-| `applyMissingAssignmentsNow()` | `applyMissingAssignmentsForRealNow()` |
+| `verifiedFixesPreviewNow()` | **`applyVerifiedFixesNow()`** |
+| `cleanupDecisionsPreviewNow()` | **`applyCleanupDecisionsNow()`** |
+| `missingAssignmentsPreviewNow()` | **`applyMissingAssignmentsNow()`** |
+| `marketersMigrationPreviewNow()` | **`applyMarketersMigrationNow()`** |
+| `perSessionRatesMigrationPreviewNow()` | **`applyPerSessionRatesMigrationNow()`** |
 
-The bare names keep their `dryRun = true` default exactly as before, so
-picking the wrong row in the dropdown stays harmless. Each `…ForRealNow`
-announces itself in its **first log line** — `THIS RUN WRITES …`, naming the
-dry run — before it does anything.
+A name ending in **`PreviewNow`** is always the dry run; a name starting with
+**`apply`** always writes, and says `THIS RUN WRITES …` (naming its preview)
+in its **first log line**, before it does anything. Both take no argument,
+because the editor's Run button passes none. The shared work sits in
+`run…_(dryRun)`, which the trailing underscore keeps out of the dropdown and
+which stays dry for anything but the literal `false`.
+
+> ⚠️ **Changed meaning:** until this rename, `applyVerifiedFixesNow()`,
+> `applyCleanupDecisionsNow()` and `applyMissingAssignmentsNow()` were the
+> DRY RUNS. They now WRITE. Run the `…PreviewNow` first.
 
 Steps 1, 4 and 9 are the point of the exercise: **every shekel that moves is
 attributable to one named run.** Take a screenshot of each log, or copy it
@@ -104,7 +109,7 @@ implementation would prove nothing about what Moran sees on screen.
 
 ---
 
-## `applyVerifiedFixesNow(dryRun)` — A, C, D, E
+## `verifiedFixesPreviewNow()` / `applyVerifiedFixesNow()` — A, C, D, E
 
 The verified facts are **data** at the top of the section in `Code.gs`
 (`VERIFIED_START_DATE_FIXES`, `VERIFIED_LEAVERS`, `VERIFIED_START_DATE_FLOORS`,
@@ -281,7 +286,7 @@ open work and never a stale checklist.
 It fills the suggestion column and **nothing else**. A row with a department
 and no house creates nothing, however approved it is.
 
-### `applyMissingAssignmentsNow(dryRun)`
+### `missingAssignmentsPreviewNow()` / `applyMissingAssignmentsNow()`
 
 Creates an assignment **only** from a row that is `אשר = כן` **and**
 completely filled in, through `addAssignment` — the same path the app uses,

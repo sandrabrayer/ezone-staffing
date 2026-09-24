@@ -1,6 +1,6 @@
 'use strict';
 
-// applyVerifiedFixesNow(dryRun) and logMonthTotalsNow(months) — the
+// verifiedFixesPreviewNow() / applyVerifiedFixesNow() and logMonthTotalsNow(months) — the
 // payroll-verified maintenance functions in apps-script/Code.gs.
 //
 // What is pinned here, in the order it matters:
@@ -296,7 +296,7 @@ test('a name that matches TWO workers aborts the whole run — nothing is writte
   s.workers.push(w('wdup', 'ניר לוי'));   // a second ניר לוי
   const ctx = loadCtx(s);
   ctx.writes.length = 0;
-  assert.throws(() => ctx.applyVerifiedFixesNow(false),
+  assert.throws(() => ctx.applyVerifiedFixesNow(),
     /NOTHING was written.*matches 2 workers \(wlead3, wdup\)/s);
   assert.deepStrictEqual(ctx.writes, [], 'not one cell, not even for the unambiguous fixes');
   // The unambiguous fixes really did not happen.
@@ -309,7 +309,7 @@ test('the dry run aborts on the same ambiguity, so it is found while it is cheap
   const s = seed();
   s.workers.push(w('wdup', 'ניר לוי'));
   const ctx = loadCtx(s);
-  assert.throws(() => ctx.applyVerifiedFixesNow(), /matches 2 workers/);
+  assert.throws(() => ctx.verifiedFixesPreviewNow(), /matches 2 workers/);
 });
 
 test('a verified leaver NAME that matches no worker is a no-op, not an abort', () => {
@@ -318,7 +318,7 @@ test('a verified leaver NAME that matches no worker is a no-op, not an abort', (
   const s = seed();
   s.workers = s.workers.filter(r => r[1] !== 'שלומציון כהן');
   const ctx = loadCtx(s);
-  const res = plain(ctx.applyVerifiedFixesNow());
+  const res = plain(ctx.verifiedFixesPreviewNow());
   assert.ok(res.alreadyDone.some(d => /already archived/.test(d.why)));
 });
 
@@ -327,7 +327,7 @@ test('a verified leaver NAME that matches two workers still aborts', () => {
   s.workers.push(w('wdup', 'ניר לוי'));
   const ctx = loadCtx(s);
   ctx.writes.length = 0;
-  assert.throws(() => ctx.applyVerifiedFixesNow(false), /matches 2 workers/);
+  assert.throws(() => ctx.applyVerifiedFixesNow(), /matches 2 workers/);
   assert.deepStrictEqual(ctx.writes, []);
 });
 
@@ -340,7 +340,7 @@ test('an id that is not in the roster ABORTS the whole run', () => {
   s.workers = s.workers.filter(r => r[0] !== FL[1]);   // שחר מזור's row, by id
   const ctx = loadCtx(s);
   ctx.writes.length = 0;
-  assert.throws(() => ctx.applyVerifiedFixesNow(false),
+  assert.throws(() => ctx.applyVerifiedFixesNow(),
     new RegExp('no worker with id ' + FL[1]));
   assert.deepStrictEqual(ctx.writes, [], 'and nothing else in the batch is applied either');
 });
@@ -350,7 +350,7 @@ test('a name that disagrees with the id is a WARNING — the id wins and the run
   // Same person, renamed in the sheet since the fact was written down.
   s.workers = s.workers.map(r => (r[0] === FL[1] ? w(FL[1], 'שחר מזור-לוי') : r));
   const ctx = loadCtx(s);
-  const res = plain(ctx.applyVerifiedFixesNow(false));
+  const res = plain(ctx.applyVerifiedFixesNow());
 
   const row = workerRow(ctx, FL[1]);
   assert.strictEqual(String(row[5]), '2026-01-01', 'the floor is still written');
@@ -366,7 +366,7 @@ test('the same rule covers the start-date typo: a differing name never aborts it
   const s = seed();
   s.workers = s.workers.map(r => (r[0] === 'wmppe95x5vd8o' ? w(r[0], 'מישהו אחר', '2026-12-01') : r));
   const ctx = loadCtx(s);
-  const res = plain(ctx.applyVerifiedFixesNow(false));
+  const res = plain(ctx.applyVerifiedFixesNow());
   assert.strictEqual(String(workerRow(ctx, 'wmppe95x5vd8o')[5]), '2026-01-01');
   assert.ok(res.warnings.some(x => /start date fix.*"מישהו אחר"/.test(x)));
 });
@@ -376,7 +376,7 @@ test('a leaver who still holds a placement aborts the run rather than orphaning 
   s.assignments.push(ft('a-lead1', 'wlead1', 'rehab'));
   const ctx = loadCtx(s);
   ctx.writes.length = 0;
-  assert.throws(() => ctx.applyVerifiedFixesNow(false),
+  assert.throws(() => ctx.applyVerifiedFixesNow(),
     /still holds 1 assignment\(s\).*Resolve that first/s);
   assert.deepStrictEqual(ctx.writes, []);
 });
@@ -385,20 +385,20 @@ test('a leaver who still holds a placement aborts the run rather than orphaning 
 // dry run by default
 // ---------------------------------------------------------------------------
 
-test('with no argument it is a DRY RUN and writes nothing at all', () => {
+test('the PreviewNow run is a DRY RUN and writes nothing at all', () => {
   const ctx = loadCtx(seed());
   ctx.writes.length = 0;
-  const res = plain(ctx.applyVerifiedFixesNow());
+  const res = plain(ctx.verifiedFixesPreviewNow());
   assert.strictEqual(res.dryRun, true);
   assert.ok(res.planned.length > 0, 'it still says what it would do');
   assert.deepStrictEqual(ctx.writes, []);
 });
 
-test('anything other than the literal false stays a dry run', () => {
+test('the shared core stays a dry run for anything but the literal false', () => {
   [true, 'false', 1, 0, null, ''].forEach(arg => {
     const ctx = loadCtx(seed());
     ctx.writes.length = 0;
-    const res = plain(ctx.applyVerifiedFixesNow(arg));
+    const res = plain(ctx.runVerifiedFixes_(arg));
     assert.strictEqual(res.dryRun, true, String(arg) + ' must not apply');
     assert.deepStrictEqual(ctx.writes, [], String(arg) + ' must write nothing');
   });
@@ -409,28 +409,28 @@ test('anything other than the literal false stays a dry run', () => {
 // the returned object.
 test('the dry run LOGS the plan, line by line, and says how to apply it', () => {
   const ctx = loadCtx(seed());
-  ctx.applyVerifiedFixesNow();
+  ctx.verifiedFixesPreviewNow();
   const log = ctx.logs.join('\n');
   assert.match(log, /DRY RUN — nothing was written\. 14 change\(s\) planned/);
   assert.match(log, /plan \| start_date \| שובל לובטון \| 2026-12-01 → 2026-01-01/);
   assert.match(log, /plan \| start_floor \| sergei makarov \| \(blank\) → 2026-01-01 \[payroll_floor\]/);
   assert.match(log, /plan \| rename \| אתי \(אסתר\) דבוש .* → אתי אסתר דבוש/);
   assert.match(log, /plan \| archive \| שלומציון כהן/);
-  assert.match(log, /Run applyVerifiedFixesNow\(false\) to apply/);
+  assert.match(log, /Run applyVerifiedFixesNow\(\) to apply/);
   assert.match(log, /Run logMonthTotalsNow\(\) before and after/);
 });
 
 test('an apply run with nothing left to do still says so in the log', () => {
   const ctx = loadCtx(seed());
-  ctx.applyVerifiedFixesNow(false);
+  ctx.applyVerifiedFixesNow();
   ctx.logs.length = 0;
-  ctx.applyVerifiedFixesNow(false);
+  ctx.applyVerifiedFixesNow();
   assert.match(ctx.logs.join('\n'), /APPLIED\. 0 change\(s\) planned, 0 applied, 14 already in place/);
 });
 
 test('the dry run plans exactly the verified facts: 1 typo, 8 floors, 1 rename, 4 leavers', () => {
   const ctx = loadCtx(seed());
-  const res = plain(ctx.applyVerifiedFixesNow());
+  const res = plain(ctx.verifiedFixesPreviewNow());
   const kinds = {};
   res.planned.forEach(a => { kinds[a.kind] = (kinds[a.kind] || 0) + 1; });
   assert.deepStrictEqual(kinds, { start_date: 1, start_floor: 8, rename: 1, archive: 4 });
@@ -442,7 +442,7 @@ test('the dry run plans exactly the verified facts: 1 typo, 8 floors, 1 rename, 
 
 test('(A) the future-start typo becomes 2026-01-01, as a CONFIRMED date', () => {
   const ctx = loadCtx(seed());
-  ctx.applyVerifiedFixesNow(false);
+  ctx.applyVerifiedFixesNow();
   const row = workerRow(ctx, 'wmppe95x5vd8o');
   assert.strictEqual(String(row[5]), '2026-01-01');
   assert.strictEqual(String(row[8] || ''), '', 'a verified exact date carries no source tag');
@@ -451,13 +451,13 @@ test('(A) the future-start typo becomes 2026-01-01, as a CONFIRMED date', () => 
 test('(A) the assignments of the typo worker are not touched', () => {
   const ctx = loadCtx(seed());
   const before = JSON.stringify(ctx.tabs.assignments.rows);
-  ctx.applyVerifiedFixesNow(false);
+  ctx.applyVerifiedFixesNow();
   assert.strictEqual(JSON.stringify(ctx.tabs.assignments.rows), before);
 });
 
 test('(D) a floor is written as the 1st of the month AND tagged payroll_floor', () => {
   const ctx = loadCtx(seed());
-  ctx.applyVerifiedFixesNow(false);
+  ctx.applyVerifiedFixesNow();
   [[FL[0], '2026-01-01'], [FL[4], '2026-02-01'], [FL[5], '2026-03-01'],
     [FL[6], '2026-05-01'], [FL[7], '2026-06-01']].forEach(([id, date]) => {
     const row = workerRow(ctx, id);
@@ -470,20 +470,20 @@ test('(D) a floor NEVER overwrites a date a person entered', () => {
   const s = seed();
   s.workers = s.workers.map(r => (r[0] === FL[1] ? w(FL[1], 'שחר מזור', '2026-01-17') : r));
   const ctx = loadCtx(s);
-  const res = plain(ctx.applyVerifiedFixesNow(false));
+  const res = plain(ctx.applyVerifiedFixesNow());
   assert.strictEqual(String(workerRow(ctx, FL[1])[5]), '2026-01-17', 'the exact date stands');
   assert.ok(res.alreadyDone.some(d => /keeping the entered date 2026-01-17/.test(d.why)));
 });
 
 test('(E) the parenthesised name is rewritten', () => {
   const ctx = loadCtx(seed());
-  ctx.applyVerifiedFixesNow(false);
+  ctx.applyVerifiedFixesNow();
   assert.strictEqual(String(workerRow(ctx, REN)[1]), 'אתי אסתר דבוש');
 });
 
 test('(C) a leaver is MOVED to workers_archive with its reason — never deleted', () => {
   const ctx = loadCtx(seed());
-  ctx.applyVerifiedFixesNow(false);
+  ctx.applyVerifiedFixesNow();
   ['wlead1', 'wlead2', 'wlead3', 'wlead4'].forEach(id => {
     assert.ok(!workerIds(ctx).includes(id), id + ' leaves the live roster');
   });
@@ -499,7 +499,7 @@ test('(C) a leaver is MOVED to workers_archive with its reason — never deleted
 
 test('every applied change lands in the audit log with the verified reason', () => {
   const ctx = loadCtx(seed());
-  ctx.applyVerifiedFixesNow(false);
+  ctx.applyVerifiedFixesNow();
   const rows = auditRows(ctx);
   assert.ok(rows.length > 0);
   rows.forEach(r => {
@@ -518,10 +518,10 @@ test('every applied change lands in the audit log with the verified reason', () 
 
 test('running it twice changes nothing the second time', () => {
   const ctx = loadCtx(seed());
-  ctx.applyVerifiedFixesNow(false);
+  ctx.applyVerifiedFixesNow();
   const snapshot = JSON.stringify(ctx.tabs.workers.rows);
   ctx.writes.length = 0;
-  const second = plain(ctx.applyVerifiedFixesNow(false));
+  const second = plain(ctx.applyVerifiedFixesNow());
   assert.deepStrictEqual(second.planned, [], 'nothing left to do');
   assert.strictEqual(second.alreadyDone.length, 14, 'and it says so, fact by fact');
   assert.strictEqual(JSON.stringify(ctx.tabs.workers.rows), snapshot);
@@ -534,7 +534,7 @@ test('running it twice changes nothing the second time', () => {
 
 test('a payroll_floor date is reported as an ESTIMATE, never as confirmed', () => {
   const ctx = loadCtx(seed());
-  ctx.applyVerifiedFixesNow(false);
+  ctx.applyVerifiedFixesNow();
   const report = plain(ctx.computeDataIntegrityReport_(ctx.readAllForIntegrity_(), TODAY));
   const f = report.findings.find(x => x.code === 'ESTIMATED_START_DATE' && x.workerId === FL[0]);
   assert.ok(f, 'the worker stays visible in the report after the fix');
@@ -547,7 +547,7 @@ test('a payroll_floor date is reported as an ESTIMATE, never as confirmed', () =
 
 test('a date entered by hand afterwards CLEARS the floor tag', () => {
   const ctx = loadCtx(seed());
-  ctx.applyVerifiedFixesNow(false);
+  ctx.applyVerifiedFixesNow();
   assert.strictEqual(String(workerRow(ctx, FL[0])[8]), 'payroll_floor');
   ctx.setWorkerStartDates({ updates: [{ id: FL[0], startDate: '2026-01-19' }] });
   const row = workerRow(ctx, FL[0]);
@@ -562,7 +562,7 @@ test('a date entered by hand afterwards CLEARS the floor tag', () => {
 
 test('updateWorker clears the tag the same way', () => {
   const ctx = loadCtx(seed());
-  ctx.applyVerifiedFixesNow(false);
+  ctx.applyVerifiedFixesNow();
   ctx.updateWorker({ id: FL[0], worker: { name: 'sergei makarov', startDate: '2026-01-19' } });
   assert.strictEqual(String(workerRow(ctx, FL[0])[8] || ''), '');
 });
@@ -573,9 +573,9 @@ test('updateWorker clears the tag the same way', () => {
 
 test('these are EDITOR-RUN ONLY — no HTTP action can reach them', () => {
   const ctx = loadCtx(seed());
-  ['applyVerifiedFixes', 'applyVerifiedFixesNow', 'applyVerifiedFixesForRealNow',
+  ['applyVerifiedFixes', 'applyVerifiedFixesNow', 'verifiedFixesPreviewNow',
     'logMonthTotals', 'logMonthTotalsNow', 'writeMissingAssignmentsTabNow',
-    'applyMissingAssignmentsNow', 'applyMissingAssignmentsForRealNow'].forEach(action => {
+    'applyMissingAssignmentsNow', 'missingAssignmentsPreviewNow'].forEach(action => {
     const out = ctx.doPost({ parameter: {}, postData: { contents: JSON.stringify({
       action, secret: 'x' }) } });
     const body = JSON.parse(out._text);
@@ -603,7 +603,7 @@ test('the new name is derived from the STORED value, whatever it happens to be',
   // transform still does the right thing, because it reads the cell.
   s.workers = s.workers.map(r => (r[0] === REN ? w(REN, 'אתי (אסתי) דבוש כהן') : r));
   const ctx = loadCtx(s);
-  const res = plain(ctx.applyVerifiedFixesNow(false));
+  const res = plain(ctx.applyVerifiedFixesNow());
   assert.strictEqual(String(workerRow(ctx, REN)[1]), 'אתי אסתי דבוש כהן',
     'every word survives; only the brackets go');
   assert.ok(res.warnings.some(x => /rename: /.test(x)), 'and the differing name is flagged');
@@ -613,7 +613,7 @@ test('fullwidth brackets and the spacing they leave behind are handled too', () 
   const s = seed();
   s.workers = s.workers.map(r => (r[0] === REN ? w(REN, 'אתי （אסתר） דבוש') : r));
   const ctx = loadCtx(s);
-  ctx.applyVerifiedFixesNow(false);
+  ctx.applyVerifiedFixesNow();
   assert.strictEqual(String(workerRow(ctx, REN)[1]), 'אתי אסתר דבוש');
 });
 
@@ -621,7 +621,7 @@ test('a stored name with no brackets is left alone, and said to be done', () => 
   const s = seed();
   s.workers = s.workers.map(r => (r[0] === REN ? w(REN, 'אתי אסתר דבוש') : r));
   const ctx = loadCtx(s);
-  const res = plain(ctx.applyVerifiedFixesNow(false));
+  const res = plain(ctx.applyVerifiedFixesNow());
   assert.ok(!res.planned.some(a => a.kind === 'rename'));
   assert.ok(res.alreadyDone.some(d => /nothing to strip/.test(d.why)));
   assert.strictEqual(String(workerRow(ctx, REN)[1]), 'אתי אסתר דבוש');

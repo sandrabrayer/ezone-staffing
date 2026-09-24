@@ -1,19 +1,19 @@
 'use strict';
 
-// The *ForRealNow wrappers in apps-script/Code.gs.
+// The editor-run PAIRS in apps-script/Code.gs — one naming rule for every
+// maintenance run that can write:
 //
-// The Apps Script editor's Run button calls the selected function with NO
-// arguments. That makes `applyXNow(false)` untriggerable from the dropdown —
-// every Run is a dry run — and the only way round it would be hand-editing
-// deployed code in the editor, which is worse than the problem.
+//   <thing>PreviewNow()   DRY RUN. Writes nothing, ever.
+//   apply<Thing>Now()     WRITES. «THIS RUN WRITES» is its first log line.
 //
-// So each dry-run-first function has a zero-argument twin. What is pinned
-// here is the whole contract:
-//   - the wrapper calls its function with the literal `false`, exactly once;
-//   - it says THIS RUN WRITES before anything happens, and names the dry run;
-//   - the bare function is UNCHANGED: called with no arguments it is still a
-//     dry run, and it still writes nothing;
-//   - neither name is reachable over HTTP.
+// Both take NO arguments (the editor's Run button passes none), and both
+// hand the shared core run<Thing>_(dryRun) a literal: true for the preview,
+// false for the apply. The core's trailing underscore keeps it out of the
+// Run dropdown, and it stays dry for anything but the literal false. No name
+// of a pair is reachable over HTTP.
+//
+// Pinned for all five pairs, plus a guard that no dry-run parameter is left
+// on a public function and no pair is missing a half.
 
 const { test } = require('node:test');
 const assert = require('node:assert');
@@ -24,11 +24,13 @@ const vm = require('node:vm');
 const ROOT = path.join(__dirname, '..');
 const gs = fs.readFileSync(path.join(ROOT, 'apps-script', 'Code.gs'), 'utf8');
 
-// wrapper → the function it must call.
+// [preview, apply, shared core]
 const PAIRS = [
-  ['applyVerifiedFixesForRealNow', 'applyVerifiedFixesNow'],
-  ['applyCleanupDecisionsForRealNow', 'applyCleanupDecisionsNow'],
-  ['applyMissingAssignmentsForRealNow', 'applyMissingAssignmentsNow'],
+  ['verifiedFixesPreviewNow', 'applyVerifiedFixesNow', 'runVerifiedFixes_'],
+  ['cleanupDecisionsPreviewNow', 'applyCleanupDecisionsNow', 'runCleanupDecisions_'],
+  ['missingAssignmentsPreviewNow', 'applyMissingAssignmentsNow', 'runMissingAssignments_'],
+  ['marketersMigrationPreviewNow', 'applyMarketersMigrationNow', 'runMarketersMigration_'],
+  ['perSessionRatesMigrationPreviewNow', 'applyPerSessionRatesMigrationNow', 'runPerSessionRatesMigration_'],
 ];
 
 function fakeSheet(name, rows, writes) {
@@ -180,62 +182,68 @@ function loadCtx() {
 }
 
 // ---------------------------------------------------------------------------
-// the wrapper
+// each pair
 // ---------------------------------------------------------------------------
 
-PAIRS.forEach(([wrapper, target]) => {
-  test(wrapper + ' calls ' + target + '(false) — exactly once, with the literal false', () => {
+PAIRS.forEach(([preview, apply, core]) => {
+  test(apply + ' calls ' + core + '(false) — exactly once, with the literal false', () => {
     const ctx = loadCtx();
     const calls = [];
-    ctx[target] = function () { calls.push([...arguments]); return { stub: true }; };
-    const out = ctx[wrapper]();
-
+    ctx[core] = function () { calls.push([...arguments]); return { stub: true }; };
+    const out = ctx[apply]();
     assert.strictEqual(calls.length, 1, 'exactly once');
     assert.strictEqual(calls[0].length, 1, 'with one argument');
     assert.strictEqual(calls[0][0], false, 'and that argument is the literal false');
-    assert.notStrictEqual(calls[0][0], 0, 'not a falsy stand-in');
     assert.deepStrictEqual(out, { stub: true }, 'and the result is passed straight back');
   });
 
-  test(wrapper + ' says THIS RUN WRITES first, and names the dry run', () => {
+  test(preview + ' calls ' + core + '(true) — exactly once, and never the write', () => {
     const ctx = loadCtx();
-    ctx[target] = function () { ctx.logs.push('(the function ran)'); return {}; };
-    ctx[wrapper]();
+    const calls = [];
+    ctx[core] = function () { calls.push([...arguments]); return { stub: true }; };
+    ctx[preview]();
+    assert.deepStrictEqual(calls, [[true]]);
+  });
 
-    assert.ok(ctx.logs.length, 'it logs something');
+  test(apply + ' says THIS RUN WRITES first, and names ' + preview, () => {
+    const ctx = loadCtx();
+    ctx[core] = function () { ctx.logs.push('(the function ran)'); return {}; };
+    ctx[apply]();
     const first = ctx.logs[0];
-    assert.match(first, /THIS RUN WRITES/, 'the first line, before anything happens');
-    assert.ok(first.indexOf(target + '()') >= 0, 'and it names the dry run: ' + first);
-    assert.match(first, /DRY RUN/);
-    assert.strictEqual(ctx.logs.indexOf('(the function ran)'), 1,
-      'the warning comes BEFORE the work, not after it');
+    assert.match(first, /^THIS RUN WRITES/, 'the first line, before anything happens');
+    assert.ok(first.includes(preview + '()'), 'and it names the dry run: ' + first);
+    assert.strictEqual(ctx.logs.indexOf('(the function ran)'), 1, 'the warning comes BEFORE the work');
   });
 
-  test(wrapper + ' takes no arguments, so the Run button can trigger it', () => {
+  test(preview + ' and ' + apply + ' take no arguments, so the Run button can start either', () => {
     const ctx = loadCtx();
-    assert.strictEqual(ctx[wrapper].length, 0);
+    assert.strictEqual(ctx[preview].length, 0);
+    assert.strictEqual(ctx[apply].length, 0);
+    assert.ok(gs.includes('function ' + preview + '() {'));
+    assert.ok(gs.includes('function ' + apply + '() {'));
+    assert.ok(gs.includes('function ' + core + '(dryRun) {'), core + ' is the one with the parameter');
   });
 
-  test(target + ' is UNCHANGED: no argument is still a dry run that writes nothing', () => {
+  test(preview + ' (for real, no stub) is a dry run that writes nothing', () => {
     const ctx = loadCtx();
     ctx.writes.length = 0;
-    const res = ctx[target]();
-    assert.strictEqual(res.dryRun, true, 'still dry by default');
-    assert.deepStrictEqual(ctx.writes, [], 'and still writes nothing');
+    const res = ctx[preview]();
+    assert.strictEqual(res.dryRun, true);
+    assert.deepStrictEqual(ctx.writes, [], 'writes nothing');
   });
 
-  test(target + ' stays dry for every falsy value that is not `false`', () => {
-    [undefined, 0, null, '', NaN, 'false'].forEach(arg => {
+  test(core + ' stays dry for every value that is not the literal false', () => {
+    [undefined, true, 0, null, '', NaN, 'false'].forEach(arg => {
       const ctx = loadCtx();
       ctx.writes.length = 0;
-      assert.strictEqual(ctx[target](arg).dryRun, true, String(arg) + ' must not write');
+      assert.strictEqual(ctx[core](arg).dryRun, true, String(arg) + ' must not write');
       assert.deepStrictEqual(ctx.writes, [], String(arg) + ' must write nothing');
     });
   });
 
-  test(wrapper + ' is EDITOR-RUN ONLY — no HTTP action reaches it', () => {
+  test('no name of the ' + apply + ' pair is an HTTP action', () => {
     const ctx = loadCtx();
-    [wrapper, target].forEach(action => {
+    [preview, apply, core].forEach(action => {
       const out = ctx.doPost({ parameter: {}, postData: { contents: JSON.stringify({
         action, secret: 'x' }) } });
       assert.ok(JSON.parse(out._text).error, action + ' must not be an HTTP action');
@@ -243,19 +251,49 @@ PAIRS.forEach(([wrapper, target]) => {
   });
 });
 
-test('the dry-run function is the one with the ordinary name, in every pair', () => {
-  // The safe one is what somebody picks by accident from the dropdown, so it
-  // must be the one whose name does not announce itself.
-  PAIRS.forEach(([wrapper, target]) => {
-    assert.ok(wrapper.endsWith('ForRealNow'));
-    assert.ok(target.endsWith('Now') && !target.endsWith('ForRealNow'));
-    assert.ok(gs.includes('function ' + wrapper + '() {'), wrapper + ' must take no arguments');
-    assert.ok(gs.includes('function ' + target + '(dryRun) {'), target + ' keeps its dryRun parameter');
-  });
+// ---------------------------------------------------------------------------
+// the rule, for the whole file
+// ---------------------------------------------------------------------------
+
+test('every dry run ends in PreviewNow and every write is apply…Now — and each has its other half', () => {
+  const fns = [...gs.matchAll(/^function (\w+)\(([^)]*)\)/gm)].map(m => ({ name: m[1], args: m[2].trim() }));
+  const previews = fns.filter(f => /PreviewNow$/.test(f.name)).map(f => f.name).sort();
+  const applies = fns.filter(f => /^apply\w+Now$/.test(f.name)).map(f => f.name).sort();
+  assert.deepStrictEqual(previews, PAIRS.map(p => p[0]).sort(), 'a new PreviewNow needs a row in PAIRS');
+  assert.deepStrictEqual(applies, PAIRS.map(p => p[1]).sort(), 'a new apply…Now needs a row in PAIRS');
+  // No function the Run dropdown shows (no trailing underscore) takes a
+  // dryRun parameter: it could never be set to false from there.
+  const visibleDry = fns.filter(f => /\bdryRun\b/.test(f.args) && !/_$/.test(f.name)).map(f => f.name);
+  assert.deepStrictEqual(visibleDry, [], 'a dryRun parameter on a Run-dropdown function');
+  // Every hidden dry-run core belongs to exactly one pair.
+  const cores = fns.filter(f => /\bdryRun\b/.test(f.args)).map(f => f.name).sort();
+  assert.deepStrictEqual(cores, PAIRS.map(p => p[2]).sort());
 });
 
-test('every dry-run-first function has a twin — none is left untriggerable', () => {
-  const dryRunFirst = [...gs.matchAll(/^function (apply\w+Now)\(dryRun\)/gm)].map(m => m[1]);
-  assert.deepStrictEqual(dryRunFirst.sort(), PAIRS.map(p => p[1]).sort(),
-    'a new applyXNow(dryRun) needs an applyXForRealNow twin and a row in PAIRS');
+test('the retired names are gone — no half-renamed pair left behind', () => {
+  ['applyVerifiedFixesForRealNow', 'applyCleanupDecisionsForRealNow', 'applyMissingAssignmentsForRealNow',
+    'migrateMarketersNow', 'migratePerSessionRatesToThreeRate', 'dryRunMigratePerSessionRatesToThreeRate',
+    '_migratePerSessionRates'].forEach(name => {
+    assert.ok(!new RegExp('\\b' + name + '\\b').test(gs), name + ' is still in Code.gs');
+  });
+  // Every log hint names a function the Run button can start.
+  const hints = [...gs.matchAll(/Run (\w+)\(([^)]*)\) to /g)];
+  assert.ok(hints.length >= 4, 'the hints were found');
+  hints.forEach(m => assert.strictEqual(m[2], '', m[1] + '(' + m[2] + ') cannot be started from the dropdown'));
+});
+
+test('the per-session migration: preview counts without writing (not even headers), apply writes', () => {
+  const row = ['a1', 'w1', 'ramot', 'מטפל/ת', '', 'per_session', 0, 0, 0, 0, 200, 10, 0, '',
+    '2026-01-02T00:00:00.000Z', 0, 'active', '', '', '', 0, 0, 0, 0, ''];
+  const ctx = loadCtx();
+  ctx.tabs.assignments.rows.push(row.slice());
+  ctx.writes.length = 0;
+  const pv = ctx.perSessionRatesMigrationPreviewNow();
+  assert.deepStrictEqual([pv.dryRun, pv.migrated], [true, 1]);
+  assert.deepStrictEqual(ctx.writes, [], 'the preview writes nothing at all');
+  const ap = ctx.applyPerSessionRatesMigrationNow();
+  assert.deepStrictEqual([ap.dryRun, ap.migrated], [false, 1]);
+  const r = ctx.tabs.assignments.rows[1];
+  assert.deepStrictEqual([r[18], r[19]], [200, 10], 'rate_individual / sessions_individual filled');
+  assert.strictEqual(ctx.applyPerSessionRatesMigrationNow().migrated, 0, 'and it is idempotent');
 });
