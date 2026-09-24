@@ -186,25 +186,15 @@ const HEADERS_ASSIGNMENTS = [
   //    transfer date rather than from the 1st of the month. Blank on every
   //    earlier row, where the cost engine falls back to created_at.
   'effective_from',
-  // 25-27 the GUIDE shift minimum, per placement — a mirror of the
-  //    ezone-coordinators Guides columns of the same names (staffing is the
-  //    source of truth; coordinators reads them through
-  //    getGuidesForCoordinators). Blank = not set (the feed sends null,
-  //    never 0). Only meaningful on a מדריך/ה placement.
-  //    weekday_min    int 0–6, minimum weekday shifts per WEEK
-  //    weekend_min    int 0–10, minimum weekend shifts per MONTH
-  //    allowed_shifts comma-joined shift labels in canonical order
-  //                   (בוקר,אחר צהריים,לילה); all three = every shift
+  // 25-27 RETIRED — RESERVED, never read or exposed. A guide shift minimum
+  //    lived here briefly (#42) before the decision that shift minimums
+  //    stay owned by the coordinators app. Kept so these positions are
+  //    never reused: the columns may already exist in the live sheet with
+  //    header labels (and possibly values), and the append-only rule means
+  //    a future column must go AFTER them. updateAssignment passes any
+  //    stored value through untouched; nothing else writes them.
   'weekday_min', 'weekend_min', 'allowed_shifts',
 ];
-
-// ---------- guide shift minimums (mirror of ezone-coordinators) ----------
-// Same ids and ranges as the coordinators app (apps-script/Code.gs SHIFTS,
-// WEEKDAY_MIN_MAX, WEEKEND_MIN_MAX there). Byte-exact Hebrew labels.
-const SHIFT_LABELS = ['בוקר', 'אחר צהריים', 'לילה'];
-const WEEKDAY_MIN_MAX = 6;
-const WEEKEND_MIN_MAX = 10;
-const SHIFT_MINIMUM_ROLE = 'מדריך/ה';
 // The `status` column carries a DERIVED value: 'future' before the start
 // date, 'active' between the dates, 'ended' after the end date. It is a
 // cached hint, recomputed on every read — the dates are the truth. 'future'
@@ -745,78 +735,8 @@ function validateAssignment(a) {
     allowance: allowance,
     status: status, statusDate: statusDate,
     notes: notes,
-    shiftMinimums: validateShiftMinimums_(a, role),
   };
 }
-
-// A minimum count: blank / null / missing → null ("not set" — never 0).
-// Anything else must be an integer in [0, max]. Mirror of lib/validate.js.
-function validateMinInt_(v, max, field) {
-  if (v === undefined || v === null) return null;
-  if (typeof v !== 'number' && typeof v !== 'string') throw httpError(400, 'bad ' + field);
-  if (String(v).trim() === '') return null;
-  const n = Number(v);
-  if (!isFinite(n) || n !== Math.floor(n) || n < 0 || n > max) throw httpError(400, 'bad ' + field);
-  return n;
-}
-
-// allowedShifts: an array or a comma-joined string of SHIFT_LABELS. Returns
-// the canonical comma-joined string, or null when nothing is selected. An
-// unknown label is a 400, never silently dropped.
-function validateAllowedShifts_(v) {
-  if (v === undefined || v === null) return null;
-  const parts = Array.isArray(v) ? v : (typeof v === 'string' ? v.split(',') : null);
-  if (!parts) throw httpError(400, 'bad allowedShifts');
-  const seen = {};
-  parts.forEach(function (p) {
-    if (typeof p !== 'string') throw httpError(400, 'bad allowedShifts');
-    const t = p.trim();
-    if (!t) return;
-    if (SHIFT_LABELS.indexOf(t) < 0) throw httpError(400, 'bad allowedShifts');
-    seen[t] = true;
-  });
-  const canon = SHIFT_LABELS.filter(function (l) { return seen[l]; }).join(',');
-  return canon || null;
-}
-
-// The three minimum fields of an assignment payload, by KEY PRESENCE: an
-// absent key means "leave the stored value alone" (has* = false), so a
-// client that does not know these fields can never wipe them. On a
-// non-guide placement the fields are cleared, and a value sent for one is
-// a 400 — a minimum on a therapist would be a number nobody schedules by.
-function validateShiftMinimums_(a, role) {
-  const has = function (k) { return Object.prototype.hasOwnProperty.call(a, k); };
-  const out = {
-    weekdayMin: has('weekdayMin') ? validateMinInt_(a.weekdayMin, WEEKDAY_MIN_MAX, 'weekdayMin') : null,
-    weekendMin: has('weekendMin') ? validateMinInt_(a.weekendMin, WEEKEND_MIN_MAX, 'weekendMin') : null,
-    allowedShifts: has('allowedShifts') ? validateAllowedShifts_(a.allowedShifts) : null,
-    hasWeekdayMin: has('weekdayMin'),
-    hasWeekendMin: has('weekendMin'),
-    hasAllowedShifts: has('allowedShifts'),
-  };
-  if (role !== SHIFT_MINIMUM_ROLE) {
-    if (out.weekdayMin !== null || out.weekendMin !== null || out.allowedShifts !== null) {
-      throw httpError(400, 'shift minimums apply to ' + SHIFT_MINIMUM_ROLE + ' only');
-    }
-    out.hasWeekdayMin = out.hasWeekendMin = out.hasAllowedShifts = true; // clear
-  }
-  return out;
-}
-
-// Stored cell → value or null. A cell that is not a valid value reads as
-// null (not set) rather than being passed on.
-function minIntCell_(v, max) {
-  if (v === '' || v === null || v === undefined) return null;
-  const n = Number(v);
-  return isFinite(n) && n === Math.floor(n) && n >= 0 && n <= max ? n : null;
-}
-function allowedShiftsCell_(v) {
-  const seen = {};
-  String(v === null || v === undefined ? '' : v).split(',').forEach(function (p) { seen[p.trim()] = true; });
-  const canon = SHIFT_LABELS.filter(function (l) { return seen[l]; }).join(',');
-  return canon || null;
-}
-const nullToBlank_ = function (v) { return v === null || v === undefined ? '' : v; };
 
 // v3.1: workerId is optional (stub rows). Mirror of lib/validate.js.
 function validateAbsence(a) {
@@ -1252,10 +1172,6 @@ function readAssignmentsSafe() {
       // Appended column — blank on every row written before Phase 2. The
       // cost engine falls back to created_at when it is blank.
       effectiveFrom: formatDateCell(r[24]),
-      // Guide shift minimum (appended) — null when not set, never 0.
-      weekdayMin: minIntCell_(r[25], WEEKDAY_MIN_MAX),
-      weekendMin: minIntCell_(r[26], WEEKEND_MIN_MAX),
-      allowedShifts: allowedShiftsCell_(r[27]),
     };
   });
 }
@@ -1886,17 +1802,6 @@ function syncWorkerGmachMonth_(workerId) {
   return '';
 }
 
-// The validated assignment as returned to the client: the internal
-// shiftMinimums envelope replaced by the three resolved values.
-function assignmentOut_(a, weekdayMin, weekendMin, allowedShifts) {
-  const out = Object.assign({}, a);
-  delete out.shiftMinimums;
-  out.weekdayMin = weekdayMin;
-  out.weekendMin = weekendMin;
-  out.allowedShifts = allowedShifts;
-  return out;
-}
-
 function addAssignment(body) {
   const a = validateAssignment(body.assignment || {});
   const lock = LockService.getScriptLock();
@@ -1914,10 +1819,7 @@ function addAssignment(body) {
 
     const id = newId('a');
     const createdAt = new Date().toISOString();
-    const m = a.shiftMinimums;
-    const out = assignmentOut_(a, m.weekdayMin, m.weekendMin, m.allowedShifts);
-    const sh = sheetByName(ASSIGNMENTS_TAB);
-    sh.appendRow([
+    sheetByName(ASSIGNMENTS_TAB).appendRow([
       id, a.workerId, a.house, a.role, a.roleDetail, a.employmentType,
       a.salary, a.pct, a.hourlyRate, a.estHours,
       a.sessionRate, a.estSessions, a.retainerAmount,
@@ -1926,14 +1828,13 @@ function addAssignment(body) {
       a.rateIndividual, a.sessionsIndividual,
       a.rateGroup, a.sessionsGroup,
       a.rateExternal, a.externalPatients,
-      '', // effective_from — only a transfer sets it
-      nullToBlank_(out.weekdayMin), nullToBlank_(out.weekendMin), nullToBlank_(out.allowedShifts),
+      '',          // effective_from — only a transfer sets it
+      '', '', '',  // 25-27 retired (see HEADERS_ASSIGNMENTS)
     ]);
-    ensureHeaders(sh, HEADERS_ASSIGNMENTS);
     const gmachMonth = syncWorkerGmachMonth_(a.workerId);
     return {
       ok: true,
-      assignment: Object.assign({ id: id, createdAt: createdAt }, out),
+      assignment: Object.assign({ id: id, createdAt: createdAt }, a),
       workerGmachMonth: gmachMonth,
     };
   } finally {
@@ -1955,16 +1856,12 @@ function updateAssignment(body) {
     const current = sh.getRange(row, 1, 1, HEADERS_ASSIGNMENTS.length).getValues()[0];
     if (String(current[1]) !== a.workerId) throw httpError(409, 'workerId mismatch');
     if (String(current[2]) !== a.house) throw httpError(409, 'house mismatch');
-    // A key the client did not send keeps the stored value.
-    const m = a.shiftMinimums;
-    const out = assignmentOut_(a,
-      m.hasWeekdayMin ? m.weekdayMin : minIntCell_(current[25], WEEKDAY_MIN_MAX),
-      m.hasWeekendMin ? m.weekendMin : minIntCell_(current[26], WEEKEND_MIN_MAX),
-      m.hasAllowedShifts ? m.allowedShifts : allowedShiftsCell_(current[27]));
-    // The row is written at FULL header width. Before this, 24 values were
+    // The row is written at FULL header width. Before #42, 24 values were
     // written into a 25-column range (effective_from was appended without
     // updating this write), which Apps Script rejects — and would have
-    // blanked effective_from. effective_from is preserved as stored.
+    // blanked effective_from. effective_from and the retired 25-27 cells
+    // are passed through exactly as stored.
+    const keep = function (i) { return current[i] === undefined ? '' : current[i]; };
     sh.getRange(row, 1, 1, HEADERS_ASSIGNMENTS.length).setValues([[
       id, a.workerId, a.house, a.role, a.roleDetail, a.employmentType,
       a.salary, a.pct, a.hourlyRate, a.estHours,
@@ -1974,14 +1871,12 @@ function updateAssignment(body) {
       a.rateIndividual, a.sessionsIndividual,
       a.rateGroup, a.sessionsGroup,
       a.rateExternal, a.externalPatients,
-      current[24] === undefined ? '' : current[24],
-      nullToBlank_(out.weekdayMin), nullToBlank_(out.weekendMin), nullToBlank_(out.allowedShifts),
+      keep(24), keep(25), keep(26), keep(27),
     ]]);
-    ensureHeaders(sh, HEADERS_ASSIGNMENTS);
     const gmachMonth = syncWorkerGmachMonth_(a.workerId);
     return {
       ok: true,
-      assignment: Object.assign({ id: id, effectiveFrom: formatDateCell(current[24]) }, out),
+      assignment: Object.assign({ id: id, effectiveFrom: formatDateCell(current[24]) }, a),
       workerGmachMonth: gmachMonth,
     };
   } finally {
@@ -2098,9 +1993,7 @@ function moveAssignment(body) {
       snapshot.rateGroup, snapshot.sessionsGroup,
       snapshot.rateExternal, snapshot.externalPatients,
       effectiveFrom,
-      // The guide minimum travels with the placement.
-      nullToBlank_(snapshot.weekdayMin), nullToBlank_(snapshot.weekendMin),
-      nullToBlank_(snapshot.allowedShifts),
+      '', '', '',  // 25-27 retired (see HEADERS_ASSIGNMENTS)
     ]);
     ensureHeaders(sh, HEADERS_ASSIGNMENTS);
 
@@ -2146,9 +2039,6 @@ function moveAssignment(body) {
       rateExternal: snapshot.rateExternal,
       externalPatients: snapshot.externalPatients,
       effectiveFrom: effectiveFrom,
-      weekdayMin: snapshot.weekdayMin,
-      weekendMin: snapshot.weekendMin,
-      allowedShifts: snapshot.allowedShifts,
     };
     return {
       ok: true,
@@ -2204,10 +2094,6 @@ function assignmentSnapshotFromRow_(id, r) {
     sessionsGroup: Number(r[21]) || 0,
     rateExternal: Number(r[22]) || 0,
     externalPatients: Number(r[23]) || 0,
-    // Not archived (archive_v3 has no minimum columns); carried by a move.
-    weekdayMin: minIntCell_(r[25], WEEKDAY_MIN_MAX),
-    weekendMin: minIntCell_(r[26], WEEKEND_MIN_MAX),
-    allowedShifts: allowedShiftsCell_(r[27]),
   };
 }
 
@@ -4146,16 +4032,6 @@ function computeTherapistsFeed_() {
                  can scope the retirement)
      startDate — 'YYYY-MM-DD' employment start date, '' when not
                  yet entered
-     weekdayMin / weekendMin / allowedShifts — the guide shift
-                 minimum (mirror of the coordinators Guides columns).
-                 Set per PLACEMENT; the scalar is the value shared by
-                 every current guide placement, and null when it is
-                 not set there or the houses differ. NEVER 0 for "not
-                 set". Archived-only guides → null.
-     minimumsByHouse — { <house id>: { weekdayMin, weekendMin,
-                 allowedShifts } } for every current guide placement
-                 (the exact per-house values; {} for archived-only).
-   (Plus the Phase 3 additive workerId / assignmentIds.)
 
    HARD RULE: every other field is stripped. No salary, cost, rate,
    pct, allowance, retainer, budget, notes, gmach_month,
@@ -4217,7 +4093,6 @@ function computeGuidesForCoordinators_() {
         archivedHousesSeen: {},
         assignmentIds: [],
         archivedAssignmentIds: [],
-        minimumsByHouse: {},
         startDate: w.startDate || '',
       };
     }
@@ -4229,14 +4104,7 @@ function computeGuidesForCoordinators_() {
     const entry = entryFor(a.workerId);
     if (!entry) return;
     entry.current = true;
-    if (a.house) {
-      entry.housesSeen[a.house] = true;
-      entry.minimumsByHouse[a.house] = {
-        weekdayMin: a.weekdayMin === undefined ? null : a.weekdayMin,
-        weekendMin: a.weekendMin === undefined ? null : a.weekendMin,
-        allowedShifts: a.allowedShifts === undefined ? null : a.allowedShifts,
-      };
-    }
+    if (a.house) entry.housesSeen[a.house] = true;
     if (a.id) entry.assignmentIds.push(a.id);
     if (normalizeStatus(a.status) === 'active') entry.active = true;
   });
@@ -4262,8 +4130,6 @@ function computeGuidesForCoordinators_() {
     // guide, the archived ones for an archived-only guide, so the two arrays
     // always describe the same set of placements.
     const ids = (g.current ? g.assignmentIds : g.archivedAssignmentIds).slice().sort();
-    const byHouse = {};
-    if (g.current) houses.forEach(function (h) { byHouse[h] = g.minimumsByHouse[h]; });
     return {
       // ADDED (Phase 3), additive only. One entry per WORKER, so
       // `assignmentIds` is a list — see the note in the therapists feed.
@@ -4274,27 +4140,10 @@ function computeGuidesForCoordinators_() {
       active: g.current && g.active,
       houses: houses,
       startDate: g.startDate,
-      weekdayMin: sharedMinimum_(byHouse, 'weekdayMin'),
-      weekendMin: sharedMinimum_(byHouse, 'weekendMin'),
-      allowedShifts: sharedMinimum_(byHouse, 'allowedShifts'),
-      minimumsByHouse: byHouse,
     };
   });
   guides.sort(function (x, y) { return x.name.localeCompare(y.name); });
   return guides;
-}
-
-// The value of `field` shared by EVERY current placement in `byHouse`, or
-// null when there is none, it is unset anywhere, or the houses disagree.
-function sharedMinimum_(byHouse, field) {
-  const houses = Object.keys(byHouse);
-  if (!houses.length) return null;
-  const first = byHouse[houses[0]][field];
-  if (first === null || first === undefined) return null;
-  for (let i = 1; i < houses.length; i++) {
-    if (byHouse[houses[i]][field] !== first) return null;
-  }
-  return first;
 }
 
 /* ============================================================

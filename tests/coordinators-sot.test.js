@@ -1,30 +1,31 @@
 'use strict';
 
-// Staffing as the source of truth for the coordinators app.
+// Staffing → coordinators: the THERAPIST roster feed, and what did NOT move.
+//
+// Scope decision: guide shift minimums (weekdayMin / weekendMin /
+// allowedShifts) stay owned by the COORDINATORS app. Staffing carries none:
+// no fields on a placement, no UI, no feed keys. Assignment columns 25-27
+// (weekday_min / weekend_min / allowed_shifts) are RETIRED reserved header
+// positions — never read, never exposed, passed through untouched.
 //
 // Pinned here:
-//   1. GUIDE SHIFT MINIMUM per placement — weekdayMin (int 0–6 / week),
-//      weekendMin (int 0–10 / month), allowedShifts (the coordinators shift
-//      ids: בוקר / אחר צהריים / לילה, canonical order). Validated identically
-//      in lib/validate.js (proxy) and Code.gs; blank = not set = null, never
-//      0; key presence decides whether a stored value changes; a non-guide
-//      placement can carry none.
-//   2. updateAssignment writes the row at FULL header width (it wrote 24
-//      values into a 25-column range after effective_from was appended —
-//      Apps Script rejects that), and preserves effective_from.
-//   3. getGuidesForCoordinators carries the minimum; exact key set.
-//   4. getTherapistsForCoordinators — same COORDINATORS_READ_SECRET,
+//   1. getTherapistsForCoordinators — same COORDINATORS_READ_SECRET,
 //      constant-time, fail-closed; current placements only (no ArchiveV3);
 //      exact key set: name, phone, role, active, houses, startDate. No pay,
 //      bank, salary, id.
+//   2. getGuidesForCoordinators is UNCHANGED — its original key set, and no
+//      minimum field anywhere (feed, proxy validation, reader, page).
+//   3. updateAssignment writes the row at FULL header width (it wrote 24
+//      values into a 25-column range after effective_from was appended —
+//      Apps Script rejects that), preserving effective_from and the retired
+//      cells as stored.
+//   4. reportRecentTherapistsNow — the editor report on the newest therapists.
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { JSDOM, VirtualConsole } = require('jsdom');
-const { buildInlinedHtml } = require('./inline-page');
 const V = require('../lib/validate');
 
 const ROOT = path.join(__dirname, '..');
@@ -129,69 +130,7 @@ const guideAssignment = (over) => Object.assign({
 }, over || {});
 
 // ---------------------------------------------------------------------------
-// 1. validation — proxy and Code.gs agree
-// ---------------------------------------------------------------------------
-
-const VALID = [
-  [{ weekdayMin: 0 }, { weekdayMin: 0 }],
-  [{ weekdayMin: 6, weekendMin: 10 }, { weekdayMin: 6, weekendMin: 10 }],
-  [{ weekdayMin: '3', weekendMin: '4' }, { weekdayMin: 3, weekendMin: 4 }],
-  [{ weekdayMin: '', weekendMin: null }, { weekdayMin: null, weekendMin: null }],
-  [{ allowedShifts: 'לילה,בוקר' }, { allowedShifts: 'בוקר,לילה' }],
-  [{ allowedShifts: ['אחר צהריים', ' בוקר '] }, { allowedShifts: 'בוקר,אחר צהריים' }],
-  [{ allowedShifts: [] }, { allowedShifts: null }],
-  [{ allowedShifts: '' }, { allowedShifts: null }],
-];
-const INVALID = [
-  { weekdayMin: 7 }, { weekdayMin: -1 }, { weekdayMin: 2.5 }, { weekdayMin: 'x' }, { weekdayMin: true },
-  { weekendMin: 11 }, { weekendMin: -1 },
-  { allowedShifts: 'בוקר,ערב' }, { allowedShifts: 'morning' }, { allowedShifts: [1] }, { allowedShifts: 5 },
-];
-
-test('proxy (lib/validate.js): minimum ranges, canonical shifts, null for blank', () => {
-  for (const [input, want] of VALID) {
-    const a = V.validateAssignment(guideAssignment(input));
-    for (const k of Object.keys(want)) assert.deepEqual(a[k], want[k], JSON.stringify(input));
-  }
-  for (const bad of INVALID) {
-    assert.throws(() => V.validateAssignment(guideAssignment(bad)), /bad (weekdayMin|weekendMin|allowedShifts)/,
-      JSON.stringify(bad));
-  }
-});
-
-test('Code.gs: the same inputs give the same results as the proxy', () => {
-  const ctx = loadCtx();
-  for (const [input, want] of VALID) {
-    const m = plain(ctx.validateAssignment(guideAssignment(input)).shiftMinimums);
-    for (const k of Object.keys(want)) assert.deepEqual(m[k], want[k], JSON.stringify(input));
-  }
-  for (const bad of INVALID) {
-    assert.throws(() => ctx.validateAssignment(guideAssignment(bad)), /bad (weekdayMin|weekendMin|allowedShifts)/);
-  }
-  assert.deepEqual(plain(vm.runInContext('SHIFT_LABELS', ctx)), V.SHIFT_LABELS);
-  assert.deepEqual(V.SHIFT_LABELS, ['בוקר', 'אחר צהריים', 'לילה'], 'the coordinators shift ids, byte-exact');
-  assert.equal(vm.runInContext('WEEKDAY_MIN_MAX', ctx), 6);
-  assert.equal(vm.runInContext('WEEKEND_MIN_MAX', ctx), 10);
-});
-
-test('key presence: the proxy forwards only keys that were sent', () => {
-  const a = V.validateAssignment(guideAssignment({ weekdayMin: 3 }));
-  assert.equal(a.weekdayMin, 3);
-  assert.equal('weekendMin' in a, false);
-  assert.equal('allowedShifts' in a, false);
-});
-
-test('non-guide placement: a minimum is a 400; none sent → all three cleared', () => {
-  const ther = { workerId: 'w1', house: 'ramot', role: 'מטפל/ת', employmentType: 'hourly', hourlyRate: 1, estHours: 1 };
-  assert.throws(() => V.validateAssignment(Object.assign({}, ther, { weekdayMin: 2 })), /מדריך\/ה only/);
-  const a = V.validateAssignment(ther);
-  assert.deepEqual([a.weekdayMin, a.weekendMin, a.allowedShifts], [null, null, null]);
-  const ctx = loadCtx();
-  assert.throws(() => ctx.validateAssignment(Object.assign({}, ther, { allowedShifts: 'בוקר' })), /מדריך\/ה only/);
-});
-
-// ---------------------------------------------------------------------------
-// 2. write paths on a strict sheet
+// write paths on a strict sheet
 // ---------------------------------------------------------------------------
 
 function writeCtx(asgRows) {
@@ -200,29 +139,6 @@ function writeCtx(asgRows) {
     assignments: [H_ASSIGNMENTS].concat(asgRows || []),
   } });
 }
-
-test('addAssignment writes the minimum, reads it back, and echoes it', () => {
-  const ctx = writeCtx();
-  const r = post(ctx, { action: 'addAssignment',
-    assignment: guideAssignment({ weekdayMin: 3, weekendMin: 4, allowedShifts: 'לילה,בוקר' }) });
-  assert.equal(r._status, 200, JSON.stringify(r));
-  assert.deepEqual([r.assignment.weekdayMin, r.assignment.weekendMin, r.assignment.allowedShifts], [3, 4, 'בוקר,לילה']);
-  assert.equal('shiftMinimums' in r.assignment, false, 'the internal envelope never reaches the client');
-  const row = ctx.tabs.assignments.rows[1];
-  assert.equal(row.length, H_ASSIGNMENTS.length);
-  assert.deepEqual(plain(row.slice(24)), ['', 3, 4, 'בוקר,לילה']);
-  const back = plain(ctx.readAssignmentsSafe())[0];
-  assert.deepEqual([back.weekdayMin, back.weekendMin, back.allowedShifts], [3, 4, 'בוקר,לילה']);
-});
-
-test('a blank minimum is stored blank and reads as null — never 0', () => {
-  const ctx = writeCtx();
-  post(ctx, { action: 'addAssignment', assignment: guideAssignment({ weekdayMin: '', weekendMin: 0 }) });
-  const back = plain(ctx.readAssignmentsSafe())[0];
-  assert.equal(back.weekdayMin, null);
-  assert.equal(back.weekendMin, 0, 'an explicit 0 stays 0');
-  assert.equal(back.allowedShifts, null);
-});
 
 test('updateAssignment: full-width write (strict sheet), effective_from preserved', () => {
   const ctx = writeCtx([asgRow({ 24: '2026-09-01', 25: 2, 26: 3, 27: 'בוקר' })]);
@@ -235,41 +151,54 @@ test('updateAssignment: full-width write (strict sheet), effective_from preserve
   assert.equal(r.assignment.effectiveFrom, '2026-09-01');
 });
 
-test('updateAssignment changes exactly the minimum keys that were sent', () => {
-  const ctx = writeCtx([asgRow({ 25: 2, 26: 3, 27: 'בוקר' })]);
-  post(ctx, { action: 'updateAssignment', id: 'a1',
-    assignment: guideAssignment({ weekdayMin: 5, allowedShifts: null }) });
-  assert.deepEqual(plain(ctx.tabs.assignments.rows[1].slice(25)), [5, 3, '']);
-});
-
-test('changing a guide placement to a non-guide role clears the minimum', () => {
-  const ctx = writeCtx([asgRow({ 25: 2, 26: 3, 27: 'בוקר' })]);
-  const r = post(ctx, { action: 'updateAssignment', id: 'a1', assignment: {
-    workerId: 'w1', house: 'ramot', role: 'מטפל/ת', employmentType: 'hourly', hourlyRate: 45, estHours: 100 } });
-  assert.equal(r._status, 200, JSON.stringify(r));
-  assert.deepEqual(plain(ctx.tabs.assignments.rows[1].slice(25)), ['', '', '']);
-});
-
-test('updateAssignment on a legacy 25-column row (no minimum cells) works', () => {
+test('updateAssignment on a legacy 25-column row works and adds blank retired cells', () => {
   const ctx = writeCtx([asgRow().slice(0, 25)]);
-  const r = post(ctx, { action: 'updateAssignment', id: 'a1', assignment: guideAssignment({ weekendMin: 4 }) });
+  const r = post(ctx, { action: 'updateAssignment', id: 'a1', assignment: guideAssignment({ hourlyRate: 60 }) });
   assert.equal(r._status, 200, JSON.stringify(r));
-  assert.deepEqual(plain(ctx.tabs.assignments.rows[1].slice(25)), ['', 4, '']);
+  const row = ctx.tabs.assignments.rows[1];
+  assert.equal(row.length, H_ASSIGNMENTS.length);
+  assert.deepEqual(plain(row.slice(25)), ['', '', '']);
 });
 
-test('a transfer carries the guide minimum to the new placement', () => {
-  const ctx = writeCtx([asgRow({ 25: 3, 26: 4, 27: 'בוקר,לילה' })]);
-  ctx.tabs.archive_v3 = strictSheet([['id']]);
-  ctx.tabs.absences = strictSheet([['id']]);
-  ctx.tabs.audit_log = strictSheet([['ts']]);
-  const r = post(ctx, { action: 'moveAssignment', id: 'a1', house: 'asher', effectiveFrom: '2026-10-01' });
+test('addAssignment writes the full header width with blank retired cells', () => {
+  const ctx = writeCtx();
+  const r = post(ctx, { action: 'addAssignment', assignment: guideAssignment() });
   assert.equal(r._status, 200, JSON.stringify(r));
-  assert.deepEqual([r.assignment.weekdayMin, r.assignment.weekendMin, r.assignment.allowedShifts], [3, 4, 'בוקר,לילה']);
-  const moved = plain(ctx.readAssignmentsSafe()).find(a => a.house === 'asher');
-  assert.equal(moved.weekdayMin, 3);
+  const row = ctx.tabs.assignments.rows[1];
+  assert.equal(row.length, H_ASSIGNMENTS.length);
+  assert.deepEqual(plain(row.slice(24)), ['', '', '', '']);
 });
 
 // ---------------------------------------------------------------------------
+// shift minimums stay in coordinators: nothing of them in staffing
+// ---------------------------------------------------------------------------
+
+test('no minimum field survives: proxy validation strips them, the reader never exposes them', () => {
+  const a = V.validateAssignment(guideAssignment({ weekdayMin: 3, weekendMin: 4, allowedShifts: 'בוקר' }));
+  for (const k of ['weekdayMin', 'weekendMin', 'allowedShifts']) assert.equal(k in a, false, k);
+  const ctx = writeCtx([asgRow({ 25: 3, 26: 4, 27: 'בוקר' })]);
+  const back = plain(ctx.readAssignmentsSafe())[0];
+  for (const k of ['weekdayMin', 'weekendMin', 'allowedShifts']) assert.equal(k in back, false, k);
+  const r = post(ctx, { action: 'addAssignment', assignment: Object.assign(guideAssignment({ house: 'asher' }),
+    { weekdayMin: 3 }) });
+  assert.equal(r._status, 200);
+  assert.equal('weekdayMin' in r.assignment, false);
+  assert.deepEqual(plain(ctx.tabs.assignments.rows[2].slice(25)), ['', '', ''], 'a direct /exec caller cannot write them');
+});
+
+test('no minimum field in the page', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'public', 'index.html'), 'utf8');
+  assert.equal(/weekdayMin|weekendMin|allowedShifts|מינימום משמרות/.test(html), false);
+});
+
+test('a stored retired value is passed through by an edit, never cleared or exposed', () => {
+  const ctx = writeCtx([asgRow({ 24: '2026-09-01', 25: 3, 26: 4, 27: 'בוקר' })]);
+  const r = post(ctx, { action: 'updateAssignment', id: 'a1', assignment: guideAssignment({ hourlyRate: 50 }) });
+  assert.equal(r._status, 200, JSON.stringify(r));
+  assert.deepEqual(plain(ctx.tabs.assignments.rows[1].slice(24)), ['2026-09-01', 3, 4, 'בוקר']);
+  assert.equal(JSON.stringify(r).includes('בוקר'), false);
+});
+
 // 3 + 4. the feeds
 // ---------------------------------------------------------------------------
 
@@ -303,40 +232,18 @@ function feedCtx(props) {
 }
 const feed = (ctx, action, secret) => out(ctx.doGet({ parameter: { action, secret } }));
 
-const GUIDE_KEYS = ['active', 'allowedShifts', 'assignmentIds', 'houses', 'minimumsByHouse', 'name', 'phone',
-  'startDate', 'weekdayMin', 'weekendMin', 'workerId'];
+const GUIDE_KEYS = ['active', 'assignmentIds', 'houses', 'name', 'phone', 'startDate', 'workerId'];
 const THERAPIST_KEYS = ['active', 'houses', 'name', 'phone', 'role', 'startDate'];
 
-test('guides feed: exact key set on every entry, no pay/bank/salary', () => {
+test('guides feed: UNCHANGED — the original key set, no minimum keys, no pay/bank/salary', () => {
   const body = feed(feedCtx(), 'getGuidesForCoordinators', COORD);
   assert.deepEqual(Object.keys(body).sort(), ['_status', 'feedGeneratedAt', 'guides']);
   assert.ok(body.guides.length >= 3);
-  for (const g of body.guides) {
-    assert.deepEqual(Object.keys(g).sort(), GUIDE_KEYS);
-    for (const h of Object.keys(g.minimumsByHouse)) {
-      assert.deepEqual(Object.keys(g.minimumsByHouse[h]).sort(), ['allowedShifts', 'weekdayMin', 'weekendMin']);
-    }
-  }
+  for (const g of body.guides) assert.deepEqual(Object.keys(g).sort(), GUIDE_KEYS);
   const text = JSON.stringify(body);
-  for (const leak of ['99999', '88888', 'סודי', '4+1']) assert.equal(text.includes(leak), false, leak);
-});
-
-test('guides feed: minimum values — shared, per-house, null when not set (never 0)', () => {
-  const by = {};
-  feed(feedCtx(), 'getGuidesForCoordinators', COORD).guides.forEach(g => { by[g.name] = g; });
-  const two = by['מדריכה שני בתים'];
-  assert.equal(two.weekdayMin, 3, 'both houses agree');
-  assert.equal(two.weekendMin, null, 'houses disagree (4 vs 2) → null scalar');
-  assert.equal(two.allowedShifts, 'בוקר,לילה');
-  assert.deepEqual(two.minimumsByHouse, {
-    asher: { weekdayMin: 3, weekendMin: 2, allowedShifts: 'בוקר,לילה' },
-    ramot: { weekdayMin: 3, weekendMin: 4, allowedShifts: 'בוקר,לילה' },
-  });
-  const none = by['מדריך בלי מינימום'];
-  assert.deepEqual([none.weekdayMin, none.weekendMin, none.allowedShifts], [null, null, null]);
-  assert.deepEqual(none.minimumsByHouse, { rehab: { weekdayMin: null, weekendMin: null, allowedShifts: null } });
-  assert.equal(by['מדריכה בחל"ד'].weekdayMin, 0, 'an explicit 0 is 0');
-  assert.equal(by['מדריכה בחל"ד'].active, false);
+  for (const leak of ['99999', '88888', 'סודי', '4+1', 'minimum', 'weekday', 'allowedShifts']) {
+    assert.equal(text.includes(leak), false, leak);
+  }
 });
 
 test('therapists feed: exact key set, current placements only, statuses, role', () => {
@@ -396,63 +303,6 @@ test('therapists feed: served pulls are logged under their own consumer', () => 
 });
 
 // ---------------------------------------------------------------------------
-// UI: HR edit fields
-// ---------------------------------------------------------------------------
-
-function page() {
-  const vc = new VirtualConsole();
-  const dom = new JSDOM(buildInlinedHtml(), { url: 'http://localhost/', runScripts: 'dangerously',
-    pretendToBeVisual: true, virtualConsole: vc });
-  return dom.window;
-}
-
-test('UI: minimum fields exist with Hebrew labels in both forms, shown only for מדריך/ה', () => {
-  const w = page();
-  const doc = w.document;
-  for (const p of ['w', 'asg']) {
-    assert.match(doc.querySelector(`label[for="${p}_weekdayMin"]`).textContent, /מינימום משמרות חול בשבוע/);
-    assert.match(doc.querySelector(`label[for="${p}_weekendMin"]`).textContent, /מינימום משמרות סופ״ש בחודש/);
-    assert.equal(doc.getElementById(`${p}_weekdayMin`).max, '6');
-    assert.equal(doc.getElementById(`${p}_weekendMin`).max, '10');
-    ['בוקר', 'אחר צהריים', 'לילה'].forEach((l, i) => {
-      assert.equal(doc.getElementById(`${p}_shift_${i}`).value, l);
-      assert.equal(doc.querySelector(`label[for="${p}_shift_${i}"]`).textContent, l);
-    });
-    w.toggleShiftMinimumFields(p, 'מדריך/ה');
-    assert.equal(doc.getElementById(`${p}_min_wrap`).classList.contains('hidden'), false);
-    doc.getElementById(`${p}_weekdayMin`).value = '4';
-    w.toggleShiftMinimumFields(p, 'מטפל/ת');
-    assert.equal(doc.getElementById(`${p}_min_wrap`).classList.contains('hidden'), true);
-    assert.equal(doc.getElementById(`${p}_weekdayMin`).value, '', 'hidden = cleared');
-  }
-  w.close();
-});
-
-test('UI: readShiftMinimumFields → nulls for blank, canonical shifts, rejects out of range', () => {
-  const w = page();
-  const doc = w.document;
-  w.toast = () => {};
-  w.toggleShiftMinimumFields('asg', 'מדריך/ה');
-  assert.deepEqual(plain(w.readShiftMinimumFields('asg', 'מדריך/ה')),
-    { weekdayMin: null, weekendMin: null, allowedShifts: null });
-  doc.getElementById('asg_weekdayMin').value = '3';
-  doc.getElementById('asg_weekendMin').value = '0';
-  doc.getElementById('asg_shift_2').checked = true;
-  doc.getElementById('asg_shift_0').checked = true;
-  assert.deepEqual(plain(w.readShiftMinimumFields('asg', 'מדריך/ה')),
-    { weekdayMin: 3, weekendMin: 0, allowedShifts: 'בוקר,לילה' });
-  doc.getElementById('asg_weekdayMin').value = '7';
-  assert.equal(w.readShiftMinimumFields('asg', 'מדריך/ה'), null, 'out of range blocks the save');
-  assert.deepEqual(plain(w.readShiftMinimumFields('asg', 'מטפל/ת')),
-    { weekdayMin: null, weekendMin: null, allowedShifts: null });
-  w.setShiftMinimumFields('w', { weekdayMin: 2, weekendMin: null, allowedShifts: 'אחר צהריים' });
-  assert.equal(doc.getElementById('w_weekdayMin').value, '2');
-  assert.equal(doc.getElementById('w_weekendMin').value, '');
-  assert.equal(doc.getElementById('w_shift_1').checked, true);
-  assert.equal(doc.getElementById('w_shift_0').checked, false);
-  w.close();
-});
-
 // ---------------------------------------------------------------------------
 // editor report: the most recently added therapists
 // ---------------------------------------------------------------------------

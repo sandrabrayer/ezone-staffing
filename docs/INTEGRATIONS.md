@@ -30,8 +30,6 @@ its own Script Property secret — no secret unlocks another feed.
 | **Retry** | none on the staffing side. The consumer's sync takes `tryLock(2s)`; on failure it skips the sync entirely. |
 | **Failure visibility** | **consumer-side**: feed down ⇒ **zero writes**, the last-synced local roster is served, `rosterSource:'local'` and an amber «לא סונכרן מהסטאפינג» notice. **Staffing-side: the `feed_log` tab and the «סטטוס סנכרון» panel** (Phase 3) show when this consumer last pulled and how many rows it got. Amber past 24 h, grey if it has never pulled. |
 
-**Guide shift minimum (added):** each guide entry also carries `weekdayMin` (int 0–6, per week), `weekendMin` (int 0–10, per month) and `allowedShifts` (comma-joined `בוקר,אחר צהריים,לילה` in that order; all three = every shift) — the coordinators Guides columns, now owned by staffing **per placement** (`assignments.weekday_min / weekend_min / allowed_shifts`, HR edits them in the worker / assignment form). The scalar is the value shared by every current guide placement; it is `null` when not set **or** when the guide's houses differ — `minimumsByHouse` (`{ <house id>: { weekdayMin, weekendMin, allowedShifts } }`) always carries the exact per-house values. Unset is always `null`, never `0`. Archived-only guides: `null` and `{}`.
-
 ## 2. Therapists app — therapist roster
 
 | | |
@@ -123,7 +121,7 @@ its own Script Property secret — no secret unlocks another feed.
 
 | Feed | Current key set | May never do |
 |---|---|---|
-| `getGuidesForCoordinators` | `workerId`, `assignmentIds`, `name`, `phone`, `active`, `houses`, `startDate`, `weekdayMin`, `weekendMin`, `allowedShifts`, `minimumsByHouse` | remove or rename any of them; change a worker name; expose money; send `0` for an unset minimum (unset = `null`) |
+| `getGuidesForCoordinators` | `workerId`, `assignmentIds`, `name`, `phone`, `active`, `houses`, `startDate` | remove or rename any of them; change a worker name; expose money; carry guide shift minimums (those are owned by the coordinators app) |
 | `getTherapistsForCoordinators` | `name`, `phone`, `role`, `active`, `houses`, `startDate` — exactly | add, remove or rename any key without a contract change; expose money or ids |
 | `getTherapistsForTherapists` | `workerId`, `assignmentIds`, `name`, `active`, `houses`, `startDate` | remove or rename any of them; expose money |
 | `getGuidesForHadrachot` | `workerId`, `assignmentId`, `name`, `house`, `role`, `active`, `startDate` | remove or rename any of them; expose `role_detail` or money |
