@@ -1619,14 +1619,28 @@ tr.sync-never td{color:var(--muted)}
    ============================================================ */
 
 const HOUSES = [
-  {id:'ramot',       name:'רמות השבים',            mgr:'שחר'},
-  {id:'asher',       name:'רעננה אשר',              mgr:'עידו'},
-  {id:'ofroni',      name:'קיסריה עפרוני',          mgr:'חנן'},
-  {id:'rehab',       name:'קיסריה ריהאב',           mgr:'רנטה'},
-  {id:'pardes',      name:'רעננה הפרדס',            mgr:''},
-  {id:'sde_eliezer', name:'שדה אליעזר',              mgr:''},
-  {id:'hq',          name:'מטה',                     mgr:''},
+  {id:'ramot',       name:'רמות השבים'},
+  {id:'asher',       name:'רעננה אשר'},
+  {id:'ofroni',      name:'קיסריה עפרוני'},
+  {id:'rehab',       name:'קיסריה ריהאב'},
+  {id:'pardes',      name:'רעננה הפרדס'},
+  {id:'sde_eliezer', name:'שדה אליעזר'},
+  {id:'hq',          name:'מטה'},
 ];
+
+// House manager names — the ONLY place they are defined in staffing. Every
+// screen reads them through houseMgr(); '' = no manager shown. They are a
+// display label only: nothing is computed from them, no export, feed or
+// Code.gs tab carries them. Guarded by tests/house-managers.test.js.
+const HOUSE_MANAGERS = {
+  ramot:       'אורן',
+  asher:       'דליה',
+  ofroni:      'חנן',
+  rehab:       'רנטה',
+  pardes:      'חן',
+  sde_eliezer: '',
+  hq:          '',
+};
 
 const ROLE_OPTIONS = [
   'מנהל/ת','רכז/ת','מדריך/ה','מטפל/ת','אחות',
@@ -2194,7 +2208,7 @@ function fmtDate(s){
   return '';                                            // never render a raw Date string
 }
 const houseName = id => (HOUSES.find(h=>h.id===id)||{}).name||id;
-const houseMgr  = id => (HOUSES.find(h=>h.id===id)||{}).mgr||'';
+const houseMgr  = id => (Object.prototype.hasOwnProperty.call(HOUSE_MANAGERS, id) && HOUSE_MANAGERS[id]) || '';
 
 function escapeHtml(s){
   return String(s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -4365,8 +4379,8 @@ function centralView(){
     const extra = houseCoverageExtraMonth(h.id);
     const pending = housePendingMonth(h.id);
     const hc = houseCost(h.id);
-    const mgrPill = h.mgr
-      ? `<span class="hb-mgr">מנהל: ${escapeHtml(h.mgr)}</span>`
+    const mgrPill = houseMgr(h.id)
+      ? `<span class="hb-mgr">מנהל: ${escapeHtml(houseMgr(h.id))}</span>`
       : '';
     return `
     <div class="house-box" onclick="go('${h.id}')">
