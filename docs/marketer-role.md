@@ -37,26 +37,26 @@ Each cross-app feed reads an allowlist of roles. «משווק/ת» is in none of
 `tests/marketer-role.test.js` pins this through the pure builders AND through
 `doGet` with each feed's own secret.
 
-## Migration — `migrateMarketersNow(dryRun)`
+## Migration — `marketersMigrationPreviewNow()` / `applyMarketersMigrationNow()`
 
 Before this role existed, marketers were entered as role «אחר» with פירוט
 «משווק». To move them:
 
 1. Wait for the Deploy Apps Script workflow run to go green.
-2. Apps Script editor → choose `migrateMarketersNow` → **Run** (dry run — no
-   argument means dry run). Open **Execution log**. Each `row |` line is one
+2. Apps Script editor → choose `marketersMigrationPreviewNow` → **Run** (dry
+   run — writes nothing). Open **Execution log**. Each `row |` line is one
    placement to be changed:
    `row | ציון מקנזי | <house> | <assignment id> | אחר/«משווק» → משווק/ת | <old type> → per_case_commission | kept: salary=… allowance=…`
 3. If the list is right, choose **`applyMarketersMigrationNow`** → **Run**.
-   The editor's Run button passes no arguments, so `migrateMarketersNow(false)`
-   cannot be started from the dropdown; this zero-argument twin calls exactly
-   that and nothing else. Its first log line is `THIS RUN WRITES — …`, then
-   the same report as the dry run, starting with `APPLIED.` Running it a
-   second time is harmless: it plans nothing and writes nothing.
+   Its first log line is `THIS RUN WRITES — …`, then the same report as the
+   preview, starting with `APPLIED.` Running it a second time is harmless: it
+   plans nothing and writes nothing.
 
-| Dry run — safe to pick by accident | Writes — chosen on purpose |
+| Dry run — writes nothing | Writes |
 |---|---|
-| `migrateMarketersNow()` | **`applyMarketersMigrationNow()`** |
+| `marketersMigrationPreviewNow()` | **`applyMarketersMigrationNow()`** |
+
+Same naming rule as every other maintenance run (`docs/PAYROLL_VERIFIED_FIXES.md`).
 
 Rules it keeps:
 
@@ -74,6 +74,7 @@ Rules it keeps:
 
 `tests/marketer-role.test.js` — validation (proxy + Apps Script), enum parity
 across the four mirrors, labels, cost, the three feeds, the migration
-(dry run, exact cells, audit, idempotency), the zero-argument twin
-`applyMarketersMigrationNow` (literal `false` once, warning first, same report,
-idempotent, not an HTTP action) and the form wiring.
+(dry run, exact cells, audit, idempotency), the pair
+`marketersMigrationPreviewNow` / `applyMarketersMigrationNow` (warning first,
+same report, idempotent, not an HTTP action) and the form wiring. The naming
+rule itself is pinned in `tests/editor-run-pairs.test.js`.

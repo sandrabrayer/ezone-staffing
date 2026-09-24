@@ -11,7 +11,8 @@
 //     «missing data» line.
 //   - FEEDS: «משווק/ת» NEVER appears in getTherapistsForTherapists,
 //     getTherapistsForCoordinators or getGuidesForCoordinators.
-//   - MIGRATION: migrateMarketersNow is dry-run by default, rewrites only the
+//   - MIGRATION: marketersMigrationPreviewNow writes nothing; applyMarketersMigrationNow
+//     rewrites only the
 //     role and employment_type cells, deletes nothing, audits every field and
 //     is idempotent.
 //   - UI: every enum mirror agrees, the commission form shows no cost field,
@@ -376,10 +377,10 @@ test('end to end: the three doGet feeds with their own secrets never return a ma
 // Migration
 // ---------------------------------------------------------------------------
 
-test('migrateMarketersNow is a DRY RUN by default: plans, reports, writes nothing', () => {
+test('marketersMigrationPreviewNow is a DRY RUN: plans, reports, writes nothing', () => {
   const ctx = loadCtx(seed());
   const before = JSON.stringify(ctx.tabs.assignments.rows);
-  const res = plain(ctx.migrateMarketersNow());
+  const res = plain(ctx.marketersMigrationPreviewNow());
   assert.equal(res.dryRun, true);
   assert.deepStrictEqual(res.planned.map(p => p.name).sort(), ['פלוני פדינג', 'ציון מקנזי'].sort());
   assert.deepStrictEqual(res.applied, []);
@@ -397,14 +398,14 @@ test('migrateMarketersNow is a DRY RUN by default: plans, reports, writes nothin
 
 test('only «אחר» + a marketer spelling is migrated — never another אחר, never a therapist', () => {
   const ctx = loadCtx(seed());
-  const ids = plain(ctx.migrateMarketersNow()).planned.map(p => p.id).sort();
+  const ids = plain(ctx.marketersMigrationPreviewNow()).planned.map(p => p.id).sort();
   assert.deepStrictEqual(ids, ['ap', 'az']);
 });
 
-test('migrateMarketersNow(false) rewrites ONLY role + employment_type, deletes nothing, audits', () => {
+test('applyMarketersMigrationNow rewrites ONLY role + employment_type, deletes nothing, audits', () => {
   const ctx = loadCtx(seed());
   const beforeRows = ctx.tabs.assignments.rows.map(r => r.slice());
-  const res = plain(ctx.migrateMarketersNow(false));
+  const res = plain(ctx.applyMarketersMigrationNow());
   assert.equal(res.dryRun, false);
   assert.deepStrictEqual(res.applied.map(a => a.id).sort(), ['ap', 'az']);
 
@@ -440,9 +441,9 @@ test('migrateMarketersNow(false) rewrites ONLY role + employment_type, deletes n
 
 test('re-running after an apply is free: nothing planned, nothing written', () => {
   const ctx = loadCtx(seed());
-  ctx.migrateMarketersNow(false);
+  ctx.applyMarketersMigrationNow();
   const n = ctx.writes.length;
-  const res = plain(ctx.migrateMarketersNow(false));
+  const res = plain(ctx.applyMarketersMigrationNow());
   assert.deepStrictEqual(res.planned, []);
   assert.equal(res.alreadyDone.length, 3);
   assert.equal(ctx.writes.length, n);
@@ -450,7 +451,7 @@ test('re-running after an apply is free: nothing planned, nothing written', () =
 
 test('the migrated placement validates on its next edit (no stale rate is re-sent by the UI)', () => {
   const ctx = loadCtx(seed());
-  ctx.migrateMarketersNow(false);
+  ctx.applyMarketersMigrationNow();
   const a = plain(ctx.readAssignmentsSafe()).find(x => x.id === 'az');
   // The form sends only TYPE_COST_FIELDS[type] — none for commission.
   assert.doesNotThrow(() => V.validateAssignment({ workerId: a.workerId, house: a.house,
@@ -460,16 +461,16 @@ test('the migrated placement validates on its next edit (no stale rate is re-sen
 // ---------------------------------------------------------------------------
 // applyMarketersMigrationNow — the zero-argument twin
 //
-// The editor's Run button passes NO arguments, so migrateMarketersNow(false)
-// could not be started from the dropdown at all. Same contract as the other
-// dry-run-first twins (PR #38): the literal false, exactly once, THIS RUN
-// WRITES first, and the bare function unchanged.
+// The editor's Run button passes NO arguments, so both halves of the pair
+// take none (see EDITOR-RUN PAIRS in Code.gs and for-real-wrappers.test.js):
+// the write hands the shared core the literal false, exactly once, after
+// THIS RUN WRITES; the preview hands it true.
 // ---------------------------------------------------------------------------
 
-test('applyMarketersMigrationNow calls migrateMarketersNow(false) — exactly once, with the literal false', () => {
+test('applyMarketersMigrationNow calls runMarketersMigration_(false) — exactly once, with the literal false', () => {
   const ctx = loadCtx(seed());
   const calls = [];
-  ctx.migrateMarketersNow = function () { calls.push([...arguments]); return { stub: true }; };
+  ctx.runMarketersMigration_ = function () { calls.push([...arguments]); return { stub: true }; };
   const out = ctx.applyMarketersMigrationNow();
   assert.strictEqual(calls.length, 1, 'exactly once');
   assert.strictEqual(calls[0].length, 1, 'with one argument');
@@ -479,10 +480,10 @@ test('applyMarketersMigrationNow calls migrateMarketersNow(false) — exactly on
 
 test('applyMarketersMigrationNow says THIS RUN WRITES first, and names the dry run', () => {
   const ctx = loadCtx(seed());
-  ctx.migrateMarketersNow = function () { ctx.logs.push('(the function ran)'); return {}; };
+  ctx.runMarketersMigration_ = function () { ctx.logs.push('(the function ran)'); return {}; };
   ctx.applyMarketersMigrationNow();
   assert.match(ctx.logs[0], /^THIS RUN WRITES/);
-  assert.ok(ctx.logs[0].includes('migrateMarketersNow()'), 'names the dry run: ' + ctx.logs[0]);
+  assert.ok(ctx.logs[0].includes('marketersMigrationPreviewNow()'), 'names the dry run: ' + ctx.logs[0]);
   assert.match(ctx.logs[0], /DRY RUN/);
   assert.strictEqual(ctx.logs.indexOf('(the function ran)'), 1, 'the warning comes BEFORE the work');
 });
@@ -491,14 +492,15 @@ test('applyMarketersMigrationNow takes no arguments, so the Run button can trigg
   const ctx = loadCtx(seed());
   assert.strictEqual(ctx.applyMarketersMigrationNow.length, 0);
   assert.ok(gs.includes('function applyMarketersMigrationNow() {'));
-  assert.ok(gs.includes('function migrateMarketersNow(dryRun) {'), 'the bare function keeps its dryRun parameter');
+  assert.ok(gs.includes('function marketersMigrationPreviewNow() {'), 'the preview takes none either');
+  assert.ok(gs.includes('function runMarketersMigration_(dryRun) {'), 'the shared core is hidden from the Run dropdown');
 });
 
-test('applyMarketersMigrationNow applies, with the SAME result and report as migrateMarketersNow(false)', () => {
+test('applyMarketersMigrationNow applies, with the SAME result and report as runMarketersMigration_(false)', () => {
   const a = loadCtx(seed());
   const b = loadCtx(seed());
   const viaTwin = plain(a.applyMarketersMigrationNow());
-  const direct = plain(b.migrateMarketersNow(false));
+  const direct = plain(b.runMarketersMigration_(false));
   assert.equal(viaTwin.dryRun, false);
   assert.deepStrictEqual(viaTwin.applied.map(x => x.id).sort(), ['ap', 'az']);
   assert.deepStrictEqual(viaTwin, direct, 'same returned report');
@@ -524,16 +526,16 @@ test('applyMarketersMigrationNow is idempotent: the second run plans nothing and
 
 test('the dry run tells you to run applyMarketersMigrationNow(), which the Run button can start', () => {
   const ctx = loadCtx(seed());
-  ctx.migrateMarketersNow();
+  ctx.marketersMigrationPreviewNow();
   const hint = ctx.logs[ctx.logs.length - 1];
   assert.match(hint, /Run applyMarketersMigrationNow\(\) to apply/);
-  assert.ok(!ctx.logs.some(l => l.includes('migrateMarketersNow(false)')), 'never a hint that cannot be run');
+  assert.ok(!ctx.logs.some(l => /\(false\)/.test(l)), 'never a hint that cannot be run');
 });
 
 test('neither migration name is an HTTP action — the dispatcher refuses them, the proxy never sends them', () => {
   const ctx = loadCtx(seed(), { SHARED_SECRET: 'the-right-secret' });
   const before = JSON.stringify(ctx.tabs.assignments.rows);
-  ['applyMarketersMigrationNow', 'migrateMarketersNow'].forEach(action => {
+  ['applyMarketersMigrationNow', 'marketersMigrationPreviewNow', 'runMarketersMigration_'].forEach(action => {
     const out = ctx.doPost({ parameter: { secret: 'the-right-secret' },
       postData: { contents: JSON.stringify({ action }) } });
     // Authorized, so this is the dispatcher's answer, not the auth check's.

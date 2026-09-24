@@ -1,6 +1,6 @@
 'use strict';
 
-// applyCleanupDecisionsNow(dryRun) — the guided cleanup in apps-script/Code.gs.
+// cleanupDecisionsPreviewNow() / applyCleanupDecisionsNow() — the guided cleanup in apps-script/Code.gs.
 //
 // The rules pinned here, in the order they matter:
 //   - DRY RUN BY DEFAULT. Called with no argument, or with anything other
@@ -225,9 +225,9 @@ function assignmentOwner(ctx, id) {
 // dry run
 // ---------------------------------------------------------------------------
 
-test('with no argument it is a DRY RUN and writes nothing at all', () => {
+test('the PreviewNow run is a DRY RUN and writes nothing at all', () => {
   const ctx = withDecision('DUP_WORKER_NAME', 'מזג');
-  const res = plain(ctx.applyCleanupDecisionsNow());
+  const res = plain(ctx.cleanupDecisionsPreviewNow());
   assert.strictEqual(res.dryRun, true);
   assert.deepStrictEqual(ctx.writes, [], 'not one write — not even the audit log');
   assert.deepStrictEqual(workerIds(ctx), ['w1', 'w2', 'w3'], 'no worker row moved');
@@ -238,7 +238,7 @@ test('with no argument it is a DRY RUN and writes nothing at all', () => {
 
 test('a dry run still says exactly what it WOULD do', () => {
   const ctx = withDecision('DUP_WORKER_NAME', 'מזג');
-  const res = plain(ctx.applyCleanupDecisionsNow());
+  const res = plain(ctx.cleanupDecisionsPreviewNow());
   assert.strictEqual(res.planned.length, 1);
   const p = res.planned[0];
   assert.strictEqual(p.decision, 'מזג');
@@ -248,10 +248,10 @@ test('a dry run still says exactly what it WOULD do', () => {
   assert.strictEqual(res.applied.length, 0, 'planned is not applied');
 });
 
-test('anything other than the literal false stays a dry run', () => {
+test('the shared core stays a dry run for anything but the literal false', () => {
   ['true', 1, null, undefined, 0, ''].forEach(v => {
     const ctx = withDecision('DUP_WORKER_NAME', 'מזג');
-    const res = plain(ctx.applyCleanupDecisionsNow(v));
+    const res = plain(ctx.runCleanupDecisions_(v));
     assert.strictEqual(res.dryRun, true, 'dryRun for ' + JSON.stringify(v));
     assert.deepStrictEqual(ctx.writes, [], 'no writes for ' + JSON.stringify(v));
   });
@@ -263,7 +263,7 @@ test('anything other than the literal false stays a dry run', () => {
 
 test('merge moves the assignments onto the keeper and archives the other row', () => {
   const ctx = withDecision('DUP_WORKER_NAME', 'מזג');
-  const res = plain(ctx.applyCleanupDecisionsNow(false));
+  const res = plain(ctx.applyCleanupDecisionsNow());
 
   assert.strictEqual(res.dryRun, false);
   assert.strictEqual(res.applied.length, 1);
@@ -274,7 +274,7 @@ test('merge moves the assignments onto the keeper and archives the other row', (
 
 test('merge takes the absences and coverages with it, so nothing is orphaned', () => {
   const ctx = withDecision('DUP_WORKER_NAME', 'מזג');
-  ctx.applyCleanupDecisionsNow(false);
+  ctx.applyCleanupDecisionsNow();
   const absence = ctx.tabs.absences.rows.slice(1).find(r => String(r[0]) === 'ab1');
   assert.strictEqual(String(absence[1]), 'w1');
   const coverage = ctx.tabs.coverages.rows.slice(1).find(r => String(r[0]) === 'c1');
@@ -283,7 +283,7 @@ test('merge takes the absences and coverages with it, so nothing is orphaned', (
 
 test('the merged worker is ARCHIVED with its reason — never deleted', () => {
   const ctx = withDecision('DUP_WORKER_NAME', 'מזג');
-  ctx.applyCleanupDecisionsNow(false);
+  ctx.applyCleanupDecisionsNow();
   const arch = ctx.tabs.workers_archive;
   assert.ok(arch, 'workers_archive is created on first use');
   assert.deepStrictEqual(arch.rows[0], ['id', 'name', 'notes', 'created_at',
@@ -301,7 +301,7 @@ test('the merged worker is ARCHIVED with its reason — never deleted', () => {
 
 test('every applied change lands in the audit log', () => {
   const ctx = withDecision('DUP_WORKER_NAME', 'מזג');
-  ctx.applyCleanupDecisionsNow(false);
+  ctx.applyCleanupDecisionsNow();
   const rows = auditRows(ctx).map(r => ({
     action: String(r[1]), entity: String(r[2]), entityId: String(r[3]),
     field: String(r[4]), before: String(r[5]), after: String(r[6]), reason: String(r[7]),
@@ -328,7 +328,7 @@ test('a merge that would put two placements at one house is refused, not guessed
   sheet.rows.find(r => r[0] === 'DUP_WORKER_NAME')[dCol] = 'מזג';
   ctx.writes.length = 0;
 
-  const res = plain(ctx.applyCleanupDecisionsNow(false));
+  const res = plain(ctx.applyCleanupDecisionsNow());
   assert.strictEqual(res.applied.length, 0, 'nothing was applied');
   assert.strictEqual(res.conflicts.length, 1);
   assert.match(res.skipped.map(x => x.why).join(' '), /double count/);
@@ -359,7 +359,7 @@ test('within one group, a later member landing on a house the keeper just gained
   sheet.rows.find(r => r[0] === 'DUP_WORKER_NAME')[dCol] = 'מזג';
   ctx.writes.length = 0;
 
-  const res = plain(ctx.applyCleanupDecisionsNow(false));
+  const res = plain(ctx.applyCleanupDecisionsNow());
   assert.strictEqual(assignmentOwner(ctx, 'a2'), 'w1', 'the first member merges');
   assert.strictEqual(assignmentOwner(ctx, 'a4'), 'w4', 'the second is refused');
   assert.strictEqual(res.conflicts.length, 1);
@@ -386,7 +386,7 @@ test('the dry run predicts that same conflict rather than discovering it on appl
   sheet.rows.find(r => r[0] === 'DUP_WORKER_NAME')[dCol] = 'מזג';
   ctx.writes.length = 0;
 
-  const res = plain(ctx.applyCleanupDecisionsNow());
+  const res = plain(ctx.cleanupDecisionsPreviewNow());
   assert.strictEqual(res.dryRun, true);
   assert.strictEqual(res.conflicts.length, 1, 'the plan says so before anything moves');
   assert.deepStrictEqual(ctx.writes, []);
@@ -398,7 +398,7 @@ test('the dry run predicts that same conflict rather than discovering it on appl
 
 test('העבר לארכיון moves a worker with no placements into workers_archive', () => {
   const ctx = withDecision('SMOKE_RECORD', 'העבר לארכיון', 'רשומת בדיקה');
-  const res = plain(ctx.applyCleanupDecisionsNow(false));
+  const res = plain(ctx.applyCleanupDecisionsNow());
   assert.strictEqual(res.applied.length, 1);
   assert.deepStrictEqual(workerIds(ctx), ['w1', 'w2']);
   const row = ctx.tabs.workers_archive.rows[1];
@@ -413,7 +413,7 @@ test('העבר לארכיון moves a worker with no placements into workers_arc
 // dropdown now rejects.
 test('the previous spelling «העבר לארכיב» is still honoured on apply', () => {
   const ctx = withDecision('SMOKE_RECORD', 'העבר לארכיב', 'רשומת בדיקה');
-  const res = plain(ctx.applyCleanupDecisionsNow(false));
+  const res = plain(ctx.applyCleanupDecisionsNow());
   assert.strictEqual(res.applied.length, 1, 'an old decision must not be silently skipped');
   assert.deepStrictEqual(workerIds(ctx), ['w1', 'w2']);
   const row = ctx.tabs.workers_archive.rows[1];
@@ -442,7 +442,7 @@ test('archiving a worker who still holds a live assignment is refused', () => {
   sheet.rows.find(r => r[0] === 'SMOKE_RECORD')[dCol] = 'העבר לארכיון';
   ctx.writes.length = 0;
 
-  const res = plain(ctx.applyCleanupDecisionsNow(false));
+  const res = plain(ctx.applyCleanupDecisionsNow());
   assert.strictEqual(res.applied.length, 0);
   assert.match(res.skipped.map(x => x.why).join(' '), /orphan their cost/);
   assert.ok(workerIds(ctx).includes('w3'));
@@ -451,7 +451,7 @@ test('archiving a worker who still holds a live assignment is refused', () => {
 test('השאר and תקן change nothing', () => {
   ['השאר', 'תקן'].forEach(decision => {
     const ctx = withDecision('DUP_WORKER_NAME', decision);
-    const res = plain(ctx.applyCleanupDecisionsNow(false));
+    const res = plain(ctx.applyCleanupDecisionsNow());
     assert.strictEqual(res.applied.length, 0, decision + ' must apply nothing');
     assert.deepStrictEqual(ctx.writes, [], decision + ' must write nothing');
     assert.deepStrictEqual(workerIds(ctx), ['w1', 'w2', 'w3']);
@@ -460,7 +460,7 @@ test('השאר and תקן change nothing', () => {
 
 test('an empty or unrecognized decision is skipped and named, never guessed at', () => {
   const ctx = withDecision('DUP_WORKER_NAME', 'אולי');
-  const res = plain(ctx.applyCleanupDecisionsNow(false));
+  const res = plain(ctx.applyCleanupDecisionsNow());
   assert.strictEqual(res.applied.length, 0);
   assert.match(res.skipped.map(x => x.why).join(' '), /unrecognized decision "אולי"/);
   // The rows left blank are reported too, so nothing is silently ignored.
@@ -469,7 +469,7 @@ test('an empty or unrecognized decision is skipped and named, never guessed at',
 
 test('with no cleanup tab at all it reports that, rather than throwing', () => {
   const ctx = loadCtx(seed());
-  const res = plain(ctx.applyCleanupDecisionsNow(false));
+  const res = plain(ctx.applyCleanupDecisionsNow());
   assert.strictEqual(res.rows, 0);
   assert.deepStrictEqual(res.applied, []);
 });
@@ -480,8 +480,8 @@ test('with no cleanup tab at all it reports that, rather than throwing', () => {
 
 test('cleanup is EDITOR-RUN ONLY — no HTTP action can reach it', () => {
   const ctx = loadCtx(seed());
-  ['applyCleanupDecisions', 'applyCleanupDecisionsNow', 'runDataIntegrityReportNow',
-    'cleanupArchiveWorker', 'writeCleanupTab'].forEach(action => {
+  ['applyCleanupDecisions', 'applyCleanupDecisionsNow', 'cleanupDecisionsPreviewNow',
+    'runDataIntegrityReportNow', 'cleanupArchiveWorker', 'writeCleanupTab'].forEach(action => {
     const resp = ctx.doPost({
       parameter: { secret: 'x' },
       postData: { contents: JSON.stringify({ action }) },
@@ -509,7 +509,7 @@ test('a merge and an archive in the same run see each other', () => {
   assert.ok(sheet.rows[sheet.rows.length - 1][mCol] === 'w1');
   ctx.writes.length = 0;
 
-  const res = plain(ctx.applyCleanupDecisionsNow(false));
+  const res = plain(ctx.applyCleanupDecisionsNow());
   assert.ok(workerIds(ctx).includes('w1'), 'the keeper is NOT archived');
   assert.match(res.skipped.map(x => x.why).join(' '), /orphan their cost/);
 });

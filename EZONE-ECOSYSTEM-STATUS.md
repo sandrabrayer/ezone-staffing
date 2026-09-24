@@ -410,7 +410,8 @@ Sandra merges manually.
   - No rate and no count. Cost = allowance only, never «missing data».
   - Never appears in any feed: therapists, coordinators-therapists or
     coordinators-guides.
-  - Editor migration `migrateMarketersNow()` moves «אחר» + «משווק» placements.
+  - Editor migration (renamed since): `marketersMigrationPreviewNow()` (dry run) /
+    `applyMarketersMigrationNow()` (writes) move «אחר» + «משווק» placements.
 - **Dependencies and CI** (#40, #41):
   - `npm audit fix` bumped qs, body-parser and express; undici is dev-only.
   - A separate production-deps `audit.yml` was added.
@@ -445,13 +446,16 @@ Sandra merges manually.
   in Railway. Use 32 random bytes: `openssl rand -base64 32`. Until then the boot log
   says `[proxy] snapshot disabled: no key`.
 
+**Merged Sep 24:** #46 — the cache-security PR above, plus `applyMarketersMigrationNow()`,
+three corrected house manager names and the `CLAUDE.md` rule.
+
 **Open, not merged (as of Sep 24):**
 
-- #38 — zero-argument `*ForRealNow` twins for the dry-run-first editor functions.
+- #38 — one naming rule for every editor-run maintenance pair: `<thing>PreviewNow()` is
+  always the dry run, `apply<Thing>Now()` always writes (first log line «THIS RUN
+  WRITES»). ⚠️ `applyVerifiedFixesNow`, `applyCleanupDecisionsNow` and
+  `applyMissingAssignmentsNow` were dry runs before #38 and WRITE after it.
 - #28 — «בקרת שכר» monthly payroll control.
-- The Sep 24 PR above. It also adds `applyMarketersMigrationNow()` (the zero-argument
-  twin of `migrateMarketersNow(false)`), corrects three house manager names, and adds
-  the `CLAUDE.md` rule.
 
 ## Outpatient: the two production lines are UNIFIED (July 4, PR #56)
 
