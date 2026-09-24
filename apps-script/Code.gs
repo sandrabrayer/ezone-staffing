@@ -412,8 +412,13 @@ function doGet(e) {
   READ_ONLY_EXECUTION_ = true;
   // action=getInitialBundle is the explicit name for the default read — the
   // proxy calls doGet with no action and gets the same bundle.
+  // view=app (sent by the Railway proxy) is the LEAN bundle: the same v3
+  // tabs without the legacy v2 passthrough (7 house tabs + events +
+  // archive), which the page never reads. Without the parameter the full
+  // bundle is returned exactly as before.
+  const lean = !!(e && e.parameter && e.parameter.view === 'app');
   return handle(e, function () {
-    return getInitialBundle_();
+    return getInitialBundle_(lean);
   });
 }
 
@@ -1002,11 +1007,18 @@ function bundleCacheVersion_(c) {
   return v;
 }
 
-function readBundleCache_(c, ver) {
-  const n = Number(c.get('bundle:' + ver + ':n'));
+// The lean and the full bundle are cached under different prefixes of the
+// SAME version token, so one invalidation drops both.
+function bundlePrefix_(ver, lean) {
+  return 'bundle:' + ver + (lean ? ':app' : '') + ':';
+}
+
+function readBundleCache_(c, ver, lean) {
+  const pre = bundlePrefix_(ver, lean);
+  const n = Number(c.get(pre + 'n'));
   if (!n || n < 1 || n > BUNDLE_MAX_CHUNKS) return null;
   const keys = [];
-  for (let i = 0; i < n; i++) keys.push('bundle:' + ver + ':' + i);
+  for (let i = 0; i < n; i++) keys.push(pre + i);
   const got = c.getAll(keys) || {};
   const parts = [];
   for (let i = 0; i < keys.length; i++) {
@@ -1033,22 +1045,28 @@ function chunkString_(str, size) {
   return out;
 }
 
-function writeBundleCache_(c, ver, core) {
+function writeBundleCache_(c, ver, core, lean) {
+  const pre = bundlePrefix_(ver, lean);
   const chunks = chunkString_(JSON.stringify(core), BUNDLE_CHUNK_CHARS);
-  if (!chunks.length || chunks.length > BUNDLE_MAX_CHUNKS) return false;
+  if (!chunks.length || chunks.length > BUNDLE_MAX_CHUNKS) {
+    Logger.log('bundle cache: ' + chunks.length + ' chunks exceeds ' + BUNDLE_MAX_CHUNKS + ' — not cached');
+    return false;
+  }
   const map = {};
-  chunks.forEach(function (part, i) { map['bundle:' + ver + ':' + i] = part; });
+  chunks.forEach(function (part, i) { map[pre + i] = part; });
   c.putAll(map, BUNDLE_CACHE_TTL_S);
   // The count goes in LAST: a reader never sees a count whose chunks are
   // not all there yet.
-  c.put('bundle:' + ver + ':n', String(chunks.length), BUNDLE_CACHE_TTL_S);
+  c.put(pre + 'n', String(chunks.length), BUNDLE_CACHE_TTL_S);
   return true;
 }
 
-// The cacheable part of the bundle — every tab except FeedLog.
-function computeInitialBundleCore_() {
+// The cacheable part of the bundle — every tab except FeedLog. `lean` skips
+// the legacy v2 tabs (each a full-sheet read, several looked up under two
+// names) and returns them empty.
+function computeInitialBundleCore_(lean) {
   const houses = {};
-  HOUSE_IDS.forEach(function (h) { houses[h] = readLegacyHouseSafe(h); });
+  if (!lean) HOUSE_IDS.forEach(function (h) { houses[h] = readLegacyHouseSafe(h); });
   return {
     // v3 shape
     workers: readWorkersSafe(),
@@ -1062,8 +1080,8 @@ function computeInitialBundleCore_() {
     // legacy passthrough — empty arrays/objects when tabs are missing
     // (e.g. after finalizeV3 or on a fresh v3-only install).
     houses: houses,
-    events: readLegacyEventsSafe(),
-    archive: readLegacyArchiveSafe(),
+    events: lean ? [] : readLegacyEventsSafe(),
+    archive: lean ? [] : readLegacyArchiveSafe(),
   };
 }
 
@@ -1090,23 +1108,23 @@ function assembleBundle_(core, feedLog, cacheState) {
   };
 }
 
-function getInitialBundle_() {
+function getInitialBundle_(lean) {
   const c = scriptCache_();
   let core = null;
   let ver = null;
   if (c) {
     try {
       ver = bundleCacheVersion_(c);
-      core = readBundleCache_(c, ver);
+      core = readBundleCache_(c, ver, !!lean);
     } catch (err) {
       core = null;
     }
   }
   const hit = !!core;
   if (!core) {
-    core = computeInitialBundleCore_();
+    core = computeInitialBundleCore_(!!lean);
     if (c && ver) {
-      try { writeBundleCache_(c, ver, core); } catch (err) { /* best-effort */ }
+      try { writeBundleCache_(c, ver, core, !!lean); } catch (err) { /* best-effort */ }
     }
   }
   return assembleBundle_(core, readFeedLogSafe(), c ? (hit ? 'hit' : 'miss') : 'off');

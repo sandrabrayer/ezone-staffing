@@ -1048,6 +1048,12 @@ tr.sync-never td{color:var(--muted)}
   .modal-foot{padding:14px 22px 20px}
   .hb-stats{gap:24px}
 }
+.sync-pill{margin-inline-start:8px;border:1px solid var(--line, #2A3550);background:transparent;color:var(--ink-soft);font:inherit;font-size:12px;padding:4px 10px;border-radius:999px;cursor:pointer;white-space:nowrap}
+.sync-pill.hidden{display:none}
+.sync-pill.updating::before{content:'';display:inline-block;width:8px;height:8px;margin-inline-end:6px;border-radius:50%;background:#E0B34A;vertical-align:middle;animation:syncPulse 1.2s ease-in-out infinite}
+.sync-pill.failed{color:#F2C46D;border-color:#8A6A2A}
+@keyframes syncPulse{0%,100%{opacity:.35}50%{opacity:1}}
+@media (prefers-reduced-motion: reduce){.sync-pill.updating::before{animation:none}}
 </style>
 </head>
 <body>
@@ -1080,6 +1086,7 @@ tr.sync-never td{color:var(--muted)}
   <div class="wrap">
     <div class="brand"><img class="brand-emblem" src="/emblem.png" alt="" width="30" height="30"/><span class="brand-name">ניהול כוח אדם</span></div>
     <div class="house-switch" id="houseSwitch"></div>
+    <button type="button" class="sync-pill hidden" id="syncPill" role="status" aria-live="polite" onclick="refreshData(true)"></button>
   </div>
 </div>
 
@@ -1776,12 +1783,59 @@ let rosterFilter = '';
 
 function token(){ return localStorage.getItem(TOKEN_KEY) || ''; }
 function setToken(t){ localStorage.setItem(TOKEN_KEY, t); }
-function clearToken(){ localStorage.removeItem(TOKEN_KEY); }
+// Signing out, or a session the server refused, also drops the local copy of
+// the data: it never outlives the session that fetched it.
+function clearToken(){ localStorage.removeItem(TOKEN_KEY); clearLocalData(); }
+
+/* ---------- last-known data, kept in this browser (perf) ----------
+   The first paint used to wait for /api/data, i.e. for Apps Script whenever
+   the server's copy was cold. The last data this browser loaded is now kept
+   in localStorage and painted IMMEDIATELY on open, with «מתעדכן…» in the
+   topbar while the fresh copy loads in the background.
+   Scope: the same browser profile that already holds the session token; it
+   is dropped by clearToken() (logout, expired / revoked session) and ignored
+   after LOCAL_DATA_MAX_AGE_MS. Every access is wrapped: blocked storage just
+   means no instant paint. */
+const LOCAL_DATA_KEY = 'ezone_staff_data_v1';
+const LOCAL_DATA_MAX_AGE_MS = 72 * 60 * 60 * 1000;
+function readLocalData(){
+  try{
+    const raw = localStorage.getItem(LOCAL_DATA_KEY);
+    if (!raw) return null;
+    const o = JSON.parse(raw);
+    const now = Date.now();
+    if (!o || typeof o.savedAt !== 'number' || !o.data || typeof o.data !== 'object'
+        || now - o.savedAt > LOCAL_DATA_MAX_AGE_MS || o.savedAt > now + 60000){
+      localStorage.removeItem(LOCAL_DATA_KEY);
+      return null;
+    }
+    return o;
+  } catch(_e){ return null; }
+}
+function writeLocalData(d){
+  try{ localStorage.setItem(LOCAL_DATA_KEY, JSON.stringify({ savedAt: Date.now(), data: d })); }
+  catch(_e){ /* quota / blocked storage: no instant paint next time */ }
+}
+function clearLocalData(){
+  try{ localStorage.removeItem(LOCAL_DATA_KEY); } catch(_e){ /* ignore */ }
+}
+// The in-memory arrays in the /api/data shape (after local patching).
+function currentDataSnapshot(){
+  return { workers: WORKERS, assignments: ASSIGNMENTS, absences: ABSENCES,
+    coverages: COVERAGES, archiveV3: ARCHIVE_V3, monthlyActuals: MONTHLY_ACTUALS,
+    budgets: BUDGETS, feedLog: FEED_LOG };
+}
+let localSaveTimer = null;
+function scheduleLocalSave(){
+  clearTimeout(localSaveTimer);
+  localSaveTimer = setTimeout(() => { if (token()) writeLocalData(currentDataSnapshot()); }, 800);
+}
 
 // `early` — optional in-flight fetch() promise for the same request, started
 // before the page finished parsing (see the <head> script). Used once; if it
 // failed at the network level the request is simply made again here.
-async function apiFetch(path, opts, early){
+// `meta` — optional object; receives { xcache } from the response headers.
+async function apiFetch(path, opts, early, meta){
   const init = Object.assign({headers:{}}, opts||{});
   init.headers = Object.assign({'Content-Type':'application/json'}, init.headers, {
     'Authorization': 'Bearer ' + token()
@@ -1789,6 +1843,9 @@ async function apiFetch(path, opts, early){
   let resp = null;
   if (early) { try { resp = await early; } catch (_e) { resp = null; } }
   if (!resp) resp = await fetch(path, init);
+  if (meta) {
+    try { meta.xcache = resp.headers.get('X-Cache') || ''; } catch(_e){ meta.xcache = ''; }
+  }
   if (resp.status === 401) {
     clearToken();
     showPinGate();
@@ -1811,10 +1868,9 @@ async function apiFetch(path, opts, early){
   return body;
 }
 
-async function loadData(){
-  const early = window.__EZ_EARLY_DATA || null;
-  window.__EZ_EARLY_DATA = null;
-  const d = await apiFetch('/api/data', undefined, early);
+// Put a /api/data body (or a local copy of one) into the in-memory arrays.
+// `hearings` is NOT part of it: that screen loads its list lazily.
+function applyData(d){
   WORKERS     = Array.isArray(d.workers)     ? d.workers     : [];
   ASSIGNMENTS = Array.isArray(d.assignments) ? d.assignments : [];
   ABSENCES    = Array.isArray(d.absences)    ? d.absences    : [];
@@ -1822,8 +1878,111 @@ async function loadData(){
   ARCHIVE_V3  = Array.isArray(d.archiveV3)   ? d.archiveV3   : [];
   MONTHLY_ACTUALS = Array.isArray(d.monthlyActuals) ? d.monthlyActuals : [];
   BUDGETS = Array.isArray(d.budgets) ? d.budgets : [];
-  HEARINGS = Array.isArray(d.hearings) ? d.hearings : [];
   FEED_LOG = Array.isArray(d.feedLog) ? d.feedLog : [];
+}
+
+// → { xcache, changed }. `changed` is false when the body is identical to
+// what is already on screen, so a background refresh never re-renders for
+// nothing.
+let lastDataText = '';
+async function loadData(){
+  const early = window.__EZ_EARLY_DATA || null;
+  window.__EZ_EARLY_DATA = null;
+  const meta = {};
+  const d = await apiFetch('/api/data', undefined, early, meta);
+  const text = JSON.stringify(d);
+  const changed = text !== lastDataText;
+  lastDataText = text;
+  applyData(d);
+  if (changed) writeLocalData(d);
+  return { xcache: meta.xcache || '', changed };
+}
+
+// ---------- lazy part: שימועים ----------
+let HEARINGS_STATE = 'idle';   // idle | loading | ready | error
+async function loadHearings(){
+  if (HEARINGS_STATE === 'loading') return;
+  HEARINGS_STATE = 'loading';
+  try{
+    const body = await apiFetch('/api/data/hearings');
+    HEARINGS = Array.isArray(body.hearings) ? body.hearings : [];
+    HEARINGS_STATE = 'ready';
+  } catch(_e){
+    HEARINGS_STATE = 'error';
+  }
+  if (view === 'hearings') render();
+}
+
+// ---------- «מתעדכן…» and the background refresh ----------
+// updating — a local or stale copy is on screen, the fresh one is on its way
+// failed   — the fresh copy could not be loaded; the copy on screen is kept
+// ok       — nothing to say (the pill is hidden)
+function setSyncState(state, savedAt){
+  const el = document.getElementById('syncPill');
+  if (!el) return;
+  el.classList.remove('updating', 'failed');
+  if (state === 'updating'){
+    el.textContent = 'מתעדכן…';
+    el.classList.add('updating');
+    el.classList.remove('hidden');
+    el.disabled = true;
+    el.title = 'מוצגים הנתונים האחרונים שנטענו; הגרסה העדכנית בדרך';
+  } else if (state === 'failed'){
+    const t = savedAt ? new Date(savedAt).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' }) : '';
+    el.textContent = 'לא עודכן' + (t ? ' · נתונים מ-' + t : '') + ' · נסי שוב';
+    el.classList.add('failed');
+    el.classList.remove('hidden');
+    el.disabled = false;
+    el.title = 'לא ניתן היה לטעון נתונים עדכניים. לחיצה תנסה שוב.';
+  } else {
+    el.textContent = '';
+    el.classList.add('hidden');
+    el.disabled = true;
+  }
+}
+
+// Re-render after a background refresh without yanking the page from under
+// the user: not while a form is open, and not while typing in the page —
+// then it waits for the field to lose focus.
+function renderWhenIdle(){
+  const open = typeof openModalEntry === 'function' ? openModalEntry() : null;
+  if (open) { window.__renderAfterModal = true; return; }
+  const app = document.getElementById('app');
+  const a = document.activeElement;
+  if (app && a && app.contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)){
+    a.addEventListener('blur', () => setTimeout(renderWhenIdle, 0), { once: true });
+    return;
+  }
+  render();
+}
+
+// The server answers a stale copy at once (X-Cache STALE / STALE_ERROR)
+// while it refreshes from Apps Script; ask again until it has the fresh one.
+const REFRESH_DELAYS_MS = [3000, 6000, 12000, 20000];
+let refreshTimer = null;
+let refreshAttempt = 0;
+let dataSavedAt = 0;
+function isStaleAnswer(x){ return x === 'STALE' || x === 'STALE_ERROR'; }
+function scheduleRefresh(){
+  clearTimeout(refreshTimer);
+  if (refreshAttempt >= REFRESH_DELAYS_MS.length){ setSyncState('failed', dataSavedAt); return; }
+  refreshTimer = setTimeout(() => refreshData(false), REFRESH_DELAYS_MS[refreshAttempt++]);
+}
+async function refreshData(manual){
+  clearTimeout(refreshTimer);
+  if (manual) refreshAttempt = 0;
+  setSyncState('updating');
+  try{
+    const m = await loadData();
+    if (m.changed) renderWhenIdle();
+    if (isStaleAnswer(m.xcache)) { scheduleRefresh(); return; }
+    dataSavedAt = Date.now();
+    refreshAttempt = 0;
+    setSyncState('ok');
+  } catch(err){
+    if (err && err.message && err.message.indexOf('פג תוקף') === 0) return;
+    scheduleRefresh();
+  }
 }
 
 // First-hadracha status — fetched THROUGH the server proxy only
@@ -2626,7 +2785,11 @@ function setBusy(btnId, busy, busyLabel){
 /* ---------- action layer ---------- */
 
 async function doAction(payload){
-  return apiFetch('/api/action', {method:'POST', body: JSON.stringify(payload)});
+  const out = await apiFetch('/api/action', {method:'POST', body: JSON.stringify(payload)});
+  // The caller patches the in-memory arrays right after this resolves; keep
+  // the local copy in step so the next open does not flash pre-save data.
+  scheduleLocalSave();
+  return out;
 }
 
 // Which cost fields each employment_type is allowed to set. MUST mirror
@@ -3944,6 +4107,19 @@ function hearingRow(h){
 // locally after every save/delete — all through the PIN-gated /api routes
 // like every other tab.
 function hearingsView(){
+  // Lazy part: the list is fetched the first time this screen opens.
+  if (HEARINGS_STATE !== 'ready'){
+    if (HEARINGS_STATE === 'idle') setTimeout(loadHearings, 0);
+    const body = HEARINGS_STATE === 'error'
+      ? `<div class="load-error" role="alert"><p>לא ניתן לטעון את רשימת השימועים</p>
+           <button class="btn btn-primary" onclick="HEARINGS_STATE='idle';render()">נסי שוב</button></div>`
+      : `<div class="empty" role="status">טוען שימועים…</div>`;
+    return `
+  <div class="head">
+    <h1>שימועים</h1>
+  </div>
+  <div class="section"><div class="tablecard">${body}</div></div>`;
+  }
   const sorted = HEARINGS.slice().sort((a,b)=> String(b.hearingDate).localeCompare(String(a.hearingDate)));
   const rows = sorted.length
     ? sorted.map(hearingRow).join('')
@@ -4923,17 +5099,39 @@ async function boot(){
   // appear immediately and the loading state sits under them.
   document.getElementById('topbar').style.display='';
   renderSwitch();
-  try{
-    await loadData();
+  // Instant paint: the last data this browser loaded, while the fresh copy
+  // is fetched. Never without a session token.
+  const local = token() ? readLocalData() : null;
+  if (local){
+    applyData(local.data);
+    lastDataText = JSON.stringify(local.data);
+    dataSavedAt = local.savedAt;
     bootEl.style.display='none';
     hidePinGate();
     render();
+    setSyncState('updating');
+  }
+  try{
+    const m = await loadData();
+    bootEl.style.display='none';
+    hidePinGate();
+    if (!local) render();
+    else if (m.changed) renderWhenIdle();
+    if (isStaleAnswer(m.xcache)) { setSyncState('updating'); refreshAttempt = 0; scheduleRefresh(); }
+    else { dataSavedAt = Date.now(); setSyncState('ok'); }
     // Fire-and-forget: the banner appears on the next render if the feed
     // answers; any failure leaves the dashboard exactly as it is.
     loadHadrachotStatus();
   } catch(err){
     bootEl.style.display='none';
     if (err.message && err.message.indexOf('פג תוקף') === 0){
+      return;
+    }
+    // A local copy is already on screen: keep it, say it is not fresh, and
+    // keep trying in the background — never swap it for an error page.
+    if (local && err.status !== 401){
+      refreshAttempt = 0;
+      scheduleRefresh();
       return;
     }
     // A 401 is an auth problem — back to the PIN gate. Anything else is a
@@ -4976,7 +5174,15 @@ function openModalEntry(){
 // any input inside a modal, cleared when one opens or closes.
 let formDirty = false;
 function markFormDirty(){ formDirty = true; }
-function clearFormDirty(){ formDirty = false; }
+function clearFormDirty(){
+  formDirty = false;
+  // A background refresh that arrived while a form was open renders now
+  // that the form is closed (every close path ends here).
+  if (window.__renderAfterModal && !openModalEntry()){
+    window.__renderAfterModal = false;
+    setTimeout(renderWhenIdle, 0);
+  }
+}
 
 // The one question asked before throwing away typed work. Used by Escape,
 // by the backdrop click, and by the ביטול buttons.

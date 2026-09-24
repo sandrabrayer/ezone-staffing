@@ -212,7 +212,8 @@ test('fail-quiet: banner renders nothing without usable data, and boot never awa
     html.indexOf('function centralView'));
   assert.ok(/if \(!Array\.isArray\(HADRACHOT_COMPLETED\)\) return '';/.test(fn),
     'no data → empty string, before any flag math');
-  const boot = html.slice(html.indexOf('async function boot'), html.indexOf('async function boot') + 700);
+  const bootAt = html.indexOf('async function boot');
+  const boot = html.slice(bootAt, html.indexOf('\n}\n', bootAt));
   assert.ok(/\n\s*loadHadrachotStatus\(\);/.test(boot),
     'boot kicks the feed off fire-and-forget');
   assert.ok(!/await loadHadrachotStatus/.test(boot),
