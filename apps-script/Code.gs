@@ -1143,7 +1143,12 @@ function rowsOf(sheet) {
 
 function readWorkersSafe() {
   const sh = sheetByNameOrNull(WORKERS_TAB);
-  return rowsOf(sh).map(function (r) {
+  return rowsOf(sh).map(workerFromRow_);
+}
+
+// One workers row → the bundle's worker object. Shared by the bundle read
+// and the save read-back, so a save confirms exactly what a reload shows.
+function workerFromRow_(r) {
     return {
       id: String(r[0]),
       name: String(r[1] || ''),
@@ -1165,12 +1170,15 @@ function readWorkersSafe() {
       // Appended column — blank on every row written before it existed.
       startDateSource: String(r[8] || '').trim(),
     };
-  });
 }
 
 function readAssignmentsSafe() {
   const sh = sheetByNameOrNull(ASSIGNMENTS_TAB);
-  return rowsOf(sh).map(function (r) {
+  return rowsOf(sh).map(assignmentFromRow_);
+}
+
+// One assignments row → the bundle's assignment object (see workerFromRow_).
+function assignmentFromRow_(r) {
     return {
       id: String(r[0]),
       workerId: String(r[1] || ''),
@@ -1201,7 +1209,16 @@ function readAssignmentsSafe() {
       // cost engine falls back to created_at when it is blank.
       effectiveFrom: formatDateCell(r[24]),
     };
-  });
+}
+
+// SAVE CONFIRMATION. After a write, the row is read BACK from the sheet and
+// returned through the same mapper the bundle uses, so the page shows what
+// is actually stored — not what it asked for — and can update from it
+// without a full reload. null when the row cannot be found.
+function readBackRow_(sh, id, width, mapper) {
+  const row = findRow(sh, 0, id);
+  if (row < 0) return null;
+  return mapper(sh.getRange(row, 1, 1, width).getValues()[0]);
 }
 
 // Normalize a stored status cell to a known value; blank/unknown → active.
@@ -1678,7 +1695,9 @@ function createWorker(body) {
     auditLog_([{ action: 'createWorker', entity: 'worker', entityId: id,
       field: 'name', before: '', after: w.name,
       reason: dups.length ? 'confirmed duplicate of ' + dups.map(function (d) { return d.id; }).join(', ') : '' }]);
-    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, createdAt: createdAt, shift_commitment: w.shiftCommitment, startDate: w.startDate, gmachMonth: w.gmachMonth, phone: w.phone }, duplicates: dups };
+    const echo = { id: id, name: w.name, notes: w.notes, createdAt: createdAt, shift_commitment: w.shiftCommitment, startDate: w.startDate, gmachMonth: w.gmachMonth, phone: w.phone };
+    const saved = readBackRow_(sh, id, HEADERS_WORKERS.length, workerFromRow_);
+    return { ok: true, confirmed: !!saved, worker: saved || echo, duplicates: dups };
   } finally {
     lock.releaseLock();
   }
@@ -1728,7 +1747,9 @@ function updateWorker(body) {
     } else {
       phone = formatPhoneCell(sh.getRange(row, 8).getValue());
     }
-    return { ok: true, worker: { id: id, name: w.name, notes: w.notes, shift_commitment: w.shiftCommitment, startDate: startDate, gmachMonth: gmachMonth, phone: phone } };
+    const echo = { id: id, name: w.name, notes: w.notes, shift_commitment: w.shiftCommitment, startDate: startDate, gmachMonth: gmachMonth, phone: phone };
+    const saved = readBackRow_(sh, id, HEADERS_WORKERS.length, workerFromRow_);
+    return { ok: true, confirmed: !!saved, worker: saved || echo };
   } finally {
     lock.releaseLock();
   }
@@ -1847,7 +1868,8 @@ function addAssignment(body) {
 
     const id = newId('a');
     const createdAt = new Date().toISOString();
-    sheetByName(ASSIGNMENTS_TAB).appendRow([
+    const ash = sheetByName(ASSIGNMENTS_TAB);
+    ash.appendRow([
       id, a.workerId, a.house, a.role, a.roleDetail, a.employmentType,
       a.salary, a.pct, a.hourlyRate, a.estHours,
       a.sessionRate, a.estSessions, a.retainerAmount,
@@ -1860,9 +1882,11 @@ function addAssignment(body) {
       '', '', '',  // 25-27 retired (see HEADERS_ASSIGNMENTS)
     ]);
     const gmachMonth = syncWorkerGmachMonth_(a.workerId);
+    const saved = readBackRow_(ash, id, HEADERS_ASSIGNMENTS.length, assignmentFromRow_);
     return {
       ok: true,
-      assignment: Object.assign({ id: id, createdAt: createdAt }, a),
+      confirmed: !!saved,
+      assignment: saved || Object.assign({ id: id, createdAt: createdAt }, a),
       workerGmachMonth: gmachMonth,
     };
   } finally {
@@ -1902,9 +1926,11 @@ function updateAssignment(body) {
       keep(24), keep(25), keep(26), keep(27),
     ]]);
     const gmachMonth = syncWorkerGmachMonth_(a.workerId);
+    const saved = readBackRow_(sh, id, HEADERS_ASSIGNMENTS.length, assignmentFromRow_);
     return {
       ok: true,
-      assignment: Object.assign({ id: id, effectiveFrom: formatDateCell(current[24]) }, a),
+      confirmed: !!saved,
+      assignment: saved || Object.assign({ id: id, effectiveFrom: formatDateCell(current[24]) }, a),
       workerGmachMonth: gmachMonth,
     };
   } finally {
