@@ -1031,6 +1031,10 @@ tr.sync-never td{color:var(--muted)}
 }
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 .toast.err{background:rgba(226,75,74,0.18);border-color:rgba(226,75,74,0.45);color:#FFB8B7}
+.toast.ok{background:rgba(52,168,83,0.20);border-color:rgba(52,168,83,0.55);color:#B9F0C8}
+/* Save in progress: a spinner inside the (disabled) button. */
+.btn .btn-spin{display:inline-block;width:12px;height:12px;margin-inline-end:6px;vertical-align:-1px;
+  border:2px solid currentColor;border-top-color:transparent;border-radius:50%;animation:spin .8s linear infinite}
 
 /* Responsive */
 @media(max-width:1024px){
@@ -1908,6 +1912,40 @@ function clearLocalData(){
 let DATA_PREVIEW = false;
 const PREVIEW_MONEY = '₪ …';
 const PREVIEW_BLOCKED_TEXT = 'הנתונים העדכניים עדיין נטענים — אפשר לערוך ולהפיק דוחות בעוד רגע';
+const PREVIEW_LOADING_TEXT = 'טוען נתונים עדכניים…';
+// The modal save buttons (static in the page).
+const SAVE_BUTTON_IDS = ['workerSaveBtn', 'assignmentSaveBtn', 'termSaveBtn', 'budgetSaveBtn',
+  'absenceSaveBtn', 'coverageSaveBtn', 'hearingSaveBtn', 'sdSaveAllBtn'];
+// Every control that opens a form, saves, deletes or exports.
+const PREVIEW_LOCKED_ONCLICK = /^\s*(open\w*|save\w*|delete\w*|downloadExport|terminate\w*|move\w*|end\w*)\(/;
+// While the page shows the stripped copy, every such button is visibly
+// waiting — disabled, «טוען נתונים עדכניים…» — instead of refusing a click.
+// When the fresh data lands (DATA_PREVIEW false) the same call re-enables
+// exactly what it locked. Called after every render and on leaving preview.
+function syncPreviewButtons(){
+  const els = Array.from(document.querySelectorAll('#app button, #app .btn'))
+    .filter(b => PREVIEW_LOCKED_ONCLICK.test(b.getAttribute('onclick') || ''))
+    .concat(SAVE_BUTTON_IDS.map(id => document.getElementById(id)).filter(Boolean));
+  els.forEach(b => {
+    if (DATA_PREVIEW){
+      if (b.dataset.previewLock === '1') return;
+      b.dataset.previewLock = '1';
+      b.dataset.previewLabel = b.textContent;
+      b.dataset.previewTitle = b.getAttribute('title') || '';
+      b.disabled = true;
+      b.setAttribute('aria-disabled', 'true');
+      b.setAttribute('title', PREVIEW_LOADING_TEXT);
+      const isSave = SAVE_BUTTON_IDS.indexOf(b.id) >= 0 || /btn-primary/.test(b.className) || /שמיר|שמור/.test(b.textContent);
+      if (isSave) b.textContent = PREVIEW_LOADING_TEXT;
+    } else if (b.dataset.previewLock === '1'){
+      b.textContent = b.dataset.previewLabel;
+      if (b.dataset.previewTitle) b.setAttribute('title', b.dataset.previewTitle); else b.removeAttribute('title');
+      b.disabled = false;
+      b.removeAttribute('aria-disabled');
+      delete b.dataset.previewLock; delete b.dataset.previewLabel; delete b.dataset.previewTitle;
+    }
+  });
+}
 // Forms, saves and exports call this first. → true when it refused.
 function blockedInPreview(){
   if (!DATA_PREVIEW) return false;
@@ -1984,11 +2022,18 @@ async function loadData(){
   const early = window.__EZ_EARLY_DATA || null;
   window.__EZ_EARLY_DATA = null;
   const meta = {};
+  const gen = WRITE_GEN;
+  const writeWasRunning = WRITES_IN_FLIGHT > 0;
   const d = await apiFetch('/api/data', undefined, early, meta);
+  // A read that overlapped a save may predate it: never paint it over the
+  // confirmed row. The refresh that follows every save brings the truth.
+  if (writeWasRunning || gen !== WRITE_GEN) return { xcache: meta.xcache || '', changed: false, discarded: true };
   const text = JSON.stringify(d);
   // Leaving the preview always re-renders: the amounts are only now known.
   const changed = DATA_PREVIEW || text !== lastDataText;
+  const leftPreview = DATA_PREVIEW;
   DATA_PREVIEW = false;
+  if (leftPreview) syncPreviewButtons();
   lastDataText = text;
   applyData(d);
   if (changed) writeLocalData(d);
@@ -2071,6 +2116,7 @@ async function refreshData(manual){
   setSyncState('updating');
   try{
     const m = await loadData();
+    if (m.discarded) { refreshAfterSave(); return; }
     if (m.changed) renderWhenIdle();
     if (isStaleAnswer(m.xcache)) { scheduleRefresh(); return; }
     dataSavedAt = Date.now();
@@ -2783,7 +2829,7 @@ async function saveBudget(){
   }
   const asDefault = document.getElementById('bg_default').checked;
   const month = asDefault ? 'default' : ensureMonth();
-  setBusy('budgetSaveBtn', true, 'שומר…');
+  if (!beginSave('budgetSaveBtn', 'שומר…')) return;
   try {
     const res = await doAction({
       action: 'setBudget',
@@ -2794,7 +2840,7 @@ async function saveBudget(){
     render();
     toastSaved('התקציב נשמר');
   } catch (err) {
-    toast(err.message || 'שגיאה בשמירה', true);
+    toast(saveErrorText(err), true);
   } finally {
     setBusy('budgetSaveBtn', false);
   }
@@ -2874,37 +2920,123 @@ function termsHtml(a){
 // discard question can never fire after a save that worked.
 function toastSaved(msg){
   clearFormDirty();
-  toast(msg);
+  toast(msg || 'נשמר', 'ok');
 }
 
-function toast(msg, isErr){
+// kind: true / 'err' → red (stays 8 s, so a failure is never missed),
+//       'ok' → green, anything else → neutral.
+function toast(msg, kind){
   const t = document.getElementById('toast');
+  const cls = (kind === true || kind === 'err') ? ' err' : kind === 'ok' ? ' ok' : '';
   t.textContent = msg;
-  t.className = 'toast show' + (isErr?' err':'');
+  t.className = 'toast show' + cls;
+  t.setAttribute('role', cls === ' err' ? 'alert' : 'status');
   clearTimeout(window.__toastTimer);
-  window.__toastTimer = setTimeout(()=>{ t.className='toast' + (isErr?' err':''); }, 3200);
+  window.__toastTimer = setTimeout(()=>{ t.className='toast' + cls; }, cls === ' err' ? 8000 : 3200);
 }
 
+// Busy state of a save button: spinner + «שומר…» + disabled, the moment it
+// is clicked. The original label comes back when the save settles.
 function setBusy(btnId, busy, busyLabel){
   const b = document.getElementById(btnId);
   if (!b) return;
   if (busy){
     if (!b.dataset.label) b.dataset.label = b.textContent;
-    b.textContent = busyLabel || 'שמירה…';
+    b.innerHTML = '<span class="btn-spin" aria-hidden="true"></span>' + escapeHtml(busyLabel || SAVING_TEXT);
     b.disabled = true;
+    b.setAttribute('aria-busy', 'true');
+    b.dataset.busy = '1';
   } else {
     if (b.dataset.label) b.textContent = b.dataset.label;
     b.disabled = false;
+    b.removeAttribute('aria-busy');
+    delete b.dataset.busy;
   }
+}
+// Start a save on this button. false when a save from it is already
+// running — a second click, Enter or a double tap never submits twice.
+function beginSave(btnId, busyLabel){
+  const b = document.getElementById(btnId);
+  if (b && b.dataset.busy === '1') return false;
+  setBusy(btnId, true, busyLabel);
+  return true;
 }
 
 /* ---------- action layer ---------- */
+
+const SAVING_TEXT = 'שומר…';
+const SAVE_TIMEOUT_TEXT = 'השמירה לא אושרה — נסו שוב';
+const SAVE_OFFLINE_TEXT = 'אין חיבור לשרת — השמירה לא בוצעה. נסו שוב';
+// 30 s. Overridable only by tests.
+function saveTimeoutMs(){ return Number(window.__EZ_SAVE_TIMEOUT_MS) || 30000; }
+
+// Writes in flight, and a counter bumped whenever one starts or ends. A read
+// that started before (or during) a write can carry pre-write data; loadData
+// discards it instead of painting it over what the save just confirmed.
+let WRITES_IN_FLIGHT = 0;
+let WRITE_GEN = 0;
+
+// The server's error, as a Hebrew sentence that keeps the reason.
+function saveErrorText(err){
+  if (!err) return 'השמירה נכשלה';
+  if (err.timeout) return SAVE_TIMEOUT_TEXT;
+  const msg = String(err.message || '');
+  if (!err.status && (err.name === 'TypeError' || /fetch|network/i.test(msg))) return SAVE_OFFLINE_TEXT;
+  const notAllowed = /^(\w+) not allowed for employmentType=(\w+)/.exec(msg);
+  if (notAllowed){
+    return 'השמירה נדחתה: השדה «' + labelForCostField(notAllowed[1]) + '» לא מתאים לסוג העסקה «' +
+      (EMPLOYMENT_TYPE_LABELS[notAllowed[2]] || notAllowed[2]) + '»';
+  }
+  if (/[\u0590-\u05FF]/.test(msg)) return msg.indexOf('השמירה') === 0 ? msg : 'השמירה נכשלה: ' + msg;
+  if (err.status === 404) return 'השמירה נכשלה: הרשומה לא נמצאה — ייתכן שנמחקה. הנתונים מתעדכנים';
+  if (err.status === 409) return 'השמירה נדחתה: התנגשות עם נתון קיים (' + msg + ')';
+  if (err.status === 400) return 'השמירה נדחתה: ערך לא תקין (' + msg + ')';
+  return 'השמירה נכשלה' + (err.status ? ' (שגיאה ' + err.status + ')' : '') + (msg ? ': ' + msg : '');
+}
+
+// After any save: bring the full truth in the BACKGROUND. The user is never
+// blocked on it — the page already shows the confirmed row.
+let refreshAfterSaveTimer = null;
+function refreshAfterSave(){
+  clearTimeout(refreshAfterSaveTimer);
+  refreshAfterSaveTimer = setTimeout(() => { refreshData(true); }, 400);
+}
+
+// The placement as sent: every cost field the type does not allow is
+// REMOVED, whatever the form still holds. A role change to «משווק/ת» with
+// «עמלה לפי מקרה» therefore never carries a leftover salary or rate — the
+// validator rejects those for commission.
+function stripForeignCostFields(assignment){
+  const allowed = TYPE_COST_FIELDS[assignment.employmentType] || [];
+  const out = Object.assign({}, assignment);
+  ALL_COST_FIELDS.forEach(f => { if (allowed.indexOf(f) < 0) delete out[f]; });
+  return out;
+}
 
 async function doAction(payload){
   // Backstop for any save path that is not a form: nothing is ever written
   // from the stripped local copy.
   if (DATA_PREVIEW) { toast(PREVIEW_BLOCKED_TEXT, true); throw new Error(PREVIEW_BLOCKED_TEXT); }
-  const out = await apiFetch('/api/action', {method:'POST', body: JSON.stringify(payload)});
+  WRITES_IN_FLIGHT++; WRITE_GEN++;
+  let timer = null;
+  let out;
+  try {
+    out = await Promise.race([
+      apiFetch('/api/action', {method:'POST', body: JSON.stringify(payload)}),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(Object.assign(new Error(SAVE_TIMEOUT_TEXT), { timeout: true })), saveTimeoutMs());
+      }),
+    ]);
+  } catch (err) {
+    // A timed-out write may still land; a failed one may have half-landed.
+    // Either way the background refresh shows what is really stored.
+    if (err && (err.timeout || !err.status || err.status >= 500)) refreshAfterSave();
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    WRITES_IN_FLIGHT--; WRITE_GEN++;
+  }
+  refreshAfterSave();
   // The caller patches the in-memory arrays right after this resolves; keep
   // the local copy in step so the next open does not flash pre-save data.
   scheduleLocalSave();
@@ -3340,16 +3472,23 @@ async function saveWorker(){
   const wasEdit = !!editingWorker.id;
   const assignmentId = editingWorker.assignmentId;
 
-  setBusy('workerSaveBtn', true);
+  if (!beginSave('workerSaveBtn')) return;
   try {
     // 1) Worker identity (create or update).
     let workerId = editingWorker.id;
     const workerPayload = wasEdit
       ? { action: 'updateWorker', id: workerId, worker: { name, notes, shift_commitment: shiftCommitment, startDate, phone } }
       : { action: 'createWorker', worker: { name, notes, shift_commitment: shiftCommitment, startDate, phone } };
+    // An edit that changes only the placement (role, type, terms) used to
+    // cost TWO Apps Script executions, one after the other. The worker row
+    // is written only when something about the person changed.
+    const cur = wasEdit ? WORKERS.find(x => x.id === workerId) : null;
+    const workerUnchanged = !!cur && cur.name === name && String(cur.notes || '') === notes &&
+      String(cur.shift_commitment || '') === shiftCommitment &&
+      String(cur.startDate || '') === startDate && String(cur.phone || '') === phone;
     let wRes;
     try {
-      wRes = await doAction(workerPayload);
+      wRes = workerUnchanged ? { worker: cur } : await doAction(workerPayload);
     } catch (err) {
       // The server refuses a create whose name or phone matches an existing
       // worker, and names the matching rows. It is a WARNING, not a veto:
@@ -3372,15 +3511,15 @@ async function saveWorker(){
       workerId = wRes.worker.id;
     } else if (!wasEdit){
       // Couldn't determine the new id — fall back to a reconcile and stop.
-      await reconcile(); closeWorker(); render();
+      refreshAfterSave(); closeWorker(); render();
       toastSaved('העובד/ת נשמר/ה'); return;
     }
 
     // 2) Assignment terms at this house (create or update).
-    const assignment = Object.assign(
+    const assignment = stripForeignCostFields(Object.assign(
       { workerId, house, role, roleDetail, employmentType, notes: '', allowance, status, statusDate },
       costFields,
-    );
+    ));
     const asgPayload = assignmentId
       ? { action: 'updateAssignment', id: assignmentId, assignment }
       : { action: 'addAssignment', assignment };
@@ -3394,17 +3533,17 @@ async function saveWorker(){
         upsertById(WORKERS, { id: workerId, gmachMonth: aRes.workerGmachMonth });
       }
     } else {
-      await reconcile();
+      refreshAfterSave();
     }
 
     closeWorker();
     render();
-    toast(wasEdit ? 'העדכון נשמר' : 'העובד/ת נוסף/ה');
+    toastSaved(wasEdit ? 'נשמר' : 'העובד/ת נוסף/ה ונשמר/ה');
   } catch (err) {
     // If the worker was created but the assignment failed, reconcile so
     // the UI shows the true state (worker exists, terms may be missing).
-    await reconcile(); render();
-    toast(err.message || 'שגיאה בשמירה', true);
+    refreshAfterSave(); render();
+    toast(saveErrorText(err), true);
   } finally {
     setBusy('workerSaveBtn', false);
   }
@@ -3442,21 +3581,23 @@ async function moveWorkerHouse(){
       ' מתאריך ' + fromTxt + '? השיבוץ ב' + houseName(asg.house) +
       ' יסתיים ויישמר בהיסטוריה, ושיבוץ חדש ייפתח בבית היעד באותם תנאים.')) return;
 
-  setBusy('workerSaveBtn', true);
+  if (!beginSave('workerSaveBtn')) return;
   try {
     const res = await doAction({
       action: 'moveAssignment', id: asg.id, house: target,
       effectiveFrom: effectiveFrom || undefined,
     });
-    // The transfer produced a NEW assignment id and an archive row, so a
-    // local patch cannot represent it — reconcile from the server.
-    await reconcile();
+    // The transfer ends the old placement and returns the NEW one and the
+    // archive row: show both at once; the background refresh confirms.
+    ASSIGNMENTS = ASSIGNMENTS.filter(a => a.id !== asg.id);
+    if (res && res.assignment && res.assignment.id) upsertById(ASSIGNMENTS, res.assignment);
+    if (res && res.archive && res.archive.id) upsertById(ARCHIVE_V3, res.archive);
     closeWorker();
     render();
     toastSaved('העובד/ת הועבר/ה לבית ' + houseName(target));
   } catch (err) {
-    await reconcile(); render();
-    toast(err.message || 'שגיאה בהעברה', true);
+    refreshAfterSave(); render();
+    toast(saveErrorText(err), true);
   } finally {
     setBusy('workerSaveBtn', false);
   }
@@ -3492,9 +3633,9 @@ async function deleteWorker(){
     removeById(WORKERS, editingWorker.id);
     closeWorker();
     render();
-    toast('העובד/ת נמחק/ה');
+    toast('העובד/ת נמחק/ה', 'ok');
   } catch (err) {
-    toast(err.message || 'שגיאה במחיקה', true);
+    toast(saveErrorText(err), true);
   }
 }
 
@@ -3525,7 +3666,7 @@ async function deleteWorkerCascade(){
   const asgs = ASSIGNMENTS.filter(a => a.workerId === wid);
   if (!confirm('למחוק את ' + wname + ' ואת ' + asgs.length + ' השיבוצים שלו/ה? פעולה זו אינה הפיכה.')) return;
 
-  setBusy('workerDeleteCascadeBtn', true, 'מוחק…');
+  if (!beginSave('workerDeleteCascadeBtn', 'מוחק…')) return;
   try {
     // Delete assignments first — server's deleteWorker refuses while any
     // assignment still references the worker.
@@ -3538,11 +3679,11 @@ async function deleteWorkerCascade(){
     removeById(WORKERS, wid);
     closeWorker();
     render();
-    toast('העובד/ת וכל השיבוצים נמחקו');
+    toast('העובד/ת וכל השיבוצים נמחקו', 'ok');
   } catch (err) {
     // Partial failure: reconcile so the UI shows what actually remains.
-    await reconcile(); render();
-    toast(err.message || 'שגיאה במחיקה', true);
+    refreshAfterSave(); render();
+    toast(saveErrorText(err), true);
   } finally {
     setBusy('workerDeleteCascadeBtn', false);
   }
@@ -3679,9 +3820,11 @@ function openAssignment(opts){
   fillAssignmentTypeDropdown(a ? a.employmentType : 'full_time');
 
   // Cost-field inputs. On edit, prefill from the row; on create, clear.
+  // (This modal has no per-session 3-rate inputs; skip fields it lacks
+  // instead of throwing — it used to crash here on every open.)
   ALL_COST_FIELDS.forEach(f => {
     const el = document.getElementById('asg_' + f);
-    el.value = a && a[f] ? a[f] : '';
+    if (el) el.value = a && a[f] ? a[f] : '';
   });
   document.getElementById('asg_roleDetail').value = a ? (a.roleDetail || '') : '';
   document.getElementById('asg_notes').value = a ? (a.notes || '') : '';
@@ -3724,8 +3867,8 @@ async function saveAssignment(){
   const costFields = {};
   for (let i = 0; i < allowed.length; i++){
     const f = allowed[i];
-    const raw = document.getElementById('asg_' + f).value;
-    const v = Number(raw);
+    const input = document.getElementById('asg_' + f);
+    const v = Number(input ? input.value : '');
     if (!Number.isFinite(v) || v <= 0){
       toast('יש להזין ' + labelForCostField(f) + ' חיובי לסוג העסקה ' + EMPLOYMENT_TYPE_LABELS[employmentType], true);
       return;
@@ -3737,12 +3880,12 @@ async function saveAssignment(){
   const allowanceRaw = Number(document.getElementById('asg_allowance').value);
   const allowance = [0, 2000, 6000].indexOf(allowanceRaw) >= 0 ? allowanceRaw : 0;
 
-  const assignment = Object.assign(
+  const assignment = stripForeignCostFields(Object.assign(
     { workerId, house, role, roleDetail, employmentType, notes, allowance },
     costFields,
-  );
+  ));
 
-  setBusy('assignmentSaveBtn', true);
+  if (!beginSave('assignmentSaveBtn')) return;
   try {
     const payload = isEdit
       ? { action: 'updateAssignment', id: editingAssignment.id, assignment }
@@ -3754,13 +3897,13 @@ async function saveAssignment(){
     if (result && result.assignment && result.assignment.id){
       upsertById(ASSIGNMENTS, result.assignment);
     } else {
-      await reconcile();
+      refreshAfterSave();
     }
     closeAssignment();
     render();
-    toast(isEdit ? 'העדכון נשמר' : 'השיבוץ נוסף');
+    toastSaved(isEdit ? 'השיבוץ נשמר' : 'השיבוץ נוסף ונשמר');
   } catch (err) {
-    toast(err.message || 'שגיאה בשמירה', true);
+    toast(saveErrorText(err), true);
   } finally {
     setBusy('assignmentSaveBtn', false);
   }
@@ -3776,9 +3919,9 @@ async function deleteAssignment(assignmentId){
     await doAction({ action: 'deleteAssignment', id: assignmentId });
     removeById(ASSIGNMENTS, assignmentId);
     render();
-    toast('השיבוץ נמחק');
+    toast('השיבוץ נמחק', 'ok');
   } catch (err) {
-    toast(err.message || 'שגיאה במחיקה', true);
+    toast(saveErrorText(err), true);
   }
 }
 
@@ -3830,21 +3973,24 @@ async function saveTerminate(){
     : ' העלות מתאפסת מהתאריך הזה.';
   if (!confirm('להפסיק את השיבוץ של ' + editingTerm.workerName +
       ' בתאריך ' + fmtDate(terminationDate) + '? סיבה: ' + reasonType + '.' + tail)) return;
-  setBusy('termSaveBtn', true, 'שומר…');
+  if (!beginSave('termSaveBtn', 'שומר…')) return;
   try {
-    await doAction({
+    const res = await doAction({
       action: 'terminateAssignment',
       id: editingTerm.assignmentId,
       terminationDate, reasonType, reasonDetail,
     });
-    // Terminate touches multiple tabs (removes the assignment, writes an
-    // archive row, may truncate an absence) — reconcile fully.
-    await reconcile();
+    // Terminate removes the placement and writes an archive row (it may also
+    // truncate an absence). Show the first two at once from the answer; the
+    // background refresh that follows every save brings the rest.
+    const endedId = editingTerm.assignmentId;
+    ASSIGNMENTS = ASSIGNMENTS.filter(a => a.id !== endedId);
+    if (res && res.archive && res.archive.id) upsertById(ARCHIVE_V3, res.archive);
     closeTerminate();
     render();
     toastSaved('השיבוץ הופסק');
   } catch (err) {
-    toast(err.message || 'שגיאה בשמירה', true);
+    toast(saveErrorText(err), true);
   } finally {
     setBusy('termSaveBtn', false);
   }
@@ -3919,7 +4065,7 @@ async function saveAbsence(){
   if (!startDate || !endDate){ toast('יש להזין תאריכים', true); return; }
   if (endDate < startDate){ toast('תאריך סיום מוקדם מתאריך התחלה', true); return; }
 
-  setBusy('absenceSaveBtn', true);
+  if (!beginSave('absenceSaveBtn')) return;
   try {
     const result = await doAction({
       action: 'logAbsence',
@@ -3928,7 +4074,7 @@ async function saveAbsence(){
     if (result && result.absence && result.absence.id){
       upsertById(ABSENCES, result.absence);
     } else {
-      await reconcile();
+      refreshAfterSave();
     }
     closeAbsence();
     render();
@@ -3936,7 +4082,7 @@ async function saveAbsence(){
     // v3.1: no follow-up "add coverage?" prompt. If Moran wants to log a
     // coverage, she clicks "+ אירוע החלפה" on the house view explicitly.
   } catch (err) {
-    toast(err.message || 'שגיאה בשמירה', true);
+    toast(saveErrorText(err), true);
   } finally {
     setBusy('absenceSaveBtn', false);
   }
@@ -3952,12 +4098,12 @@ async function endAbsence(absenceId){
     if (result && result.id){
       upsertById(ABSENCES, { id: result.id, endDate: result.endDate, status: result.status });
     } else {
-      await reconcile();
+      refreshAfterSave();
     }
     render();
-    toast('ההיעדרות נסגרה');
+    toast('ההיעדרות נסגרה', 'ok');
   } catch (err) {
-    toast(err.message || 'שגיאה בסגירה', true);
+    toast(saveErrorText(err), true);
   }
 }
 
@@ -3970,9 +4116,9 @@ async function deleteAbsence(absenceId){
     await doAction({ action: 'deleteAbsence', id: absenceId });
     removeById(ABSENCES, absenceId);
     render();
-    toast('ההיעדרות נמחקה');
+    toast('ההיעדרות נמחקה', 'ok');
   } catch (err) {
-    toast(err.message || 'שגיאה במחיקה', true);
+    toast(saveErrorText(err), true);
   }
 }
 
@@ -4080,7 +4226,7 @@ async function saveCoverage(){
     }
   }
 
-  setBusy('coverageSaveBtn', true);
+  if (!beginSave('coverageSaveBtn')) return;
   try {
     const result = await doAction({
       action: 'addCoverage',
@@ -4093,13 +4239,13 @@ async function saveCoverage(){
     if (result && result.coverage && result.coverage.id){
       upsertById(COVERAGES, result.coverage);
     } else {
-      await reconcile();
+      refreshAfterSave();
     }
     closeCoverage();
     render();
     toastSaved('ההחלפה נרשמה');
   } catch (err) {
-    toast(err.message || 'שגיאה בשמירה', true);
+    toast(saveErrorText(err), true);
   } finally {
     setBusy('coverageSaveBtn', false);
   }
@@ -4113,9 +4259,9 @@ async function deleteCoverage(coverageId){
     await doAction({ action: 'deleteCoverage', id: coverageId });
     removeById(COVERAGES, coverageId);
     render();
-    toast('ההחלפה נמחקה');
+    toast('ההחלפה נמחקה', 'ok');
   } catch (err) {
-    toast(err.message || 'שגיאה במחיקה', true);
+    toast(saveErrorText(err), true);
   }
 }
 
@@ -4171,16 +4317,16 @@ async function saveHearing(){
     ? { action: 'updateHearing', id: editingHearing.id, hearing }
     : { action: 'addHearing', hearing };
 
-  setBusy('hearingSaveBtn', true);
+  if (!beginSave('hearingSaveBtn')) return;
   try {
     const res = await doAction(payload);
     if (res && res.hearing && res.hearing.id) upsertById(HEARINGS, res.hearing);
-    else await reconcile();
+    else refreshAfterSave();
     closeHearing();
     render();
     toastSaved(payload.action === 'updateHearing' ? 'השימוע עודכן' : 'השימוע נשמר');
   } catch (err) {
-    toast(err.message || 'שגיאה בשמירה', true);
+    toast(saveErrorText(err), true);
   } finally {
     setBusy('hearingSaveBtn', false);
   }
@@ -4194,9 +4340,9 @@ async function deleteHearing(hearingId){
     await doAction({ action: 'deleteHearing', id: hearingId });
     removeById(HEARINGS, hearingId);
     render();
-    toast('השימוע נמחק');
+    toast('השימוע נמחק', 'ok');
   } catch (err) {
-    toast(err.message || 'שגיאה במחיקה', true);
+    toast(saveErrorText(err), true);
   }
 }
 
@@ -4330,6 +4476,7 @@ function render(){
   else if (view === 'hearings') app.innerHTML = hearingsView();
   else if (view === 'startdates') app.innerHTML = startDatesView();
   else                       { app.innerHTML = houseView(view); highlightWorkerRow(); }
+  syncPreviewButtons();
 }
 
 // Hebrew UI text for the first-hadracha banner — no parentheses (guarded by
@@ -4692,9 +4839,9 @@ async function saveRosterStartDate(workerId){
     applyStartDateSaves(res, [{ id: workerId, startDate }]);
     const cell = document.getElementById('rsdcell_' + workerId);
     if (cell) cell.outerHTML = workerStartDateCell(workerId);
-    toast('התאריך נשמר');
+    toast('התאריך נשמר', 'ok');
   } catch (err) {
-    toast(err.message || 'שגיאה בשמירה', true);
+    toast(saveErrorText(err), true);
     inp.disabled = false;
   }
 }
@@ -4809,15 +4956,15 @@ async function saveWorkerStartDate(workerId){
   if (!inp) return;
   const startDate = inp.value; // '' clears; native input is already YYYY-MM-DD
   const btnId = 'sdbtn_' + workerId;
-  setBusy(btnId, true);
+  if (!beginSave(btnId)) return;
   try {
     const res = await doAction({ action: 'setWorkerStartDates', updates: [{ id: workerId, startDate }] });
     applyStartDateSaves(res, [{ id: workerId, startDate }]);
     syncStartDateRow(workerId);
     updateStartDateProgress();
-    toast('התאריך נשמר');
+    toast('התאריך נשמר', 'ok');
   } catch (err) {
-    toast(err.message || 'שגיאה בשמירה', true);
+    toast(saveErrorText(err), true);
   } finally {
     setBusy(btnId, false);
   }
@@ -4852,7 +4999,7 @@ async function saveAllStartDates(){
     if (val !== (w.startDate || '')) updates.push({ id: w.id, startDate: val });
   });
   if (!updates.length){ toast('אין שינויים לשמירה'); return; }
-  setBusy('sdSaveAllBtn', true);
+  if (!beginSave('sdSaveAllBtn')) return;
   try {
     const res = await doAction({ action: 'setWorkerStartDates', updates });
     applyStartDateSaves(res, updates);
@@ -4866,7 +5013,7 @@ async function saveAllStartDates(){
     updateStartDateProgress();
     toastSaved('נשמרו ' + updates.length + ' תאריכים');
   } catch (err) {
-    toast(err.message || 'שגיאה בשמירה', true);
+    toast(saveErrorText(err), true);
   } finally {
     setBusy('sdSaveAllBtn', false);
   }
@@ -5264,7 +5411,7 @@ async function boot(){
     // load failure, and gets a PERSISTENT error state with a retry button
     // rather than a toast that fades away over an empty screen.
     if (err.status === 401){
-      toast(err.message || 'שגיאה בטעינה', true);
+      toast(saveErrorText(err), true);
       showPinGate();
       return;
     }
