@@ -351,7 +351,13 @@ function envMs(name, fallback) {
   return raw !== undefined && raw !== '' && Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 const UPSTREAM_CONCURRENCY = envMs('UPSTREAM_CONCURRENCY', 2);
-const upstreamQueue = createUpstreamQueue({ concurrency: UPSTREAM_CONCURRENCY });
+// Writes have their own lane and slot(s): a save never waits behind a read
+// (lib/upstream.js). Default 1 — Code.gs serializes writes under
+// LockService, so a second write slot would only queue inside Apps Script.
+const UPSTREAM_WRITE_CONCURRENCY = envMs('UPSTREAM_WRITE_CONCURRENCY', 1);
+const upstreamQueue = createUpstreamQueue({
+  concurrency: UPSTREAM_CONCURRENCY, writeConcurrency: UPSTREAM_WRITE_CONCURRENCY,
+});
 const READ_DEADLINE_MS = envMs('UPSTREAM_READ_TIMEOUT_MS', 45 * 1000);
 const WRITE_DEADLINE_MS = envMs('UPSTREAM_WRITE_TIMEOUT_MS', 120 * 1000);
 const RETRY_BASE_MS = envMs('UPSTREAM_RETRY_BASE_MS', 400);
@@ -363,7 +369,7 @@ function queueDepth() {
   return `${d.active + d.queued}/${d.limit}`;
 }
 
-// opts: { lane: 'user' | 'background', retry: boolean, query: {k: v}, meta: {} }
+// opts: { lane: 'write' | 'user' | 'background', retry: boolean, query: {k: v}, meta: {} }
 // meta is filled in with { upstream, attempts, kind } for the log line.
 async function callAppsScript(method, body, opts) {
   const o = opts || {};
@@ -421,7 +427,7 @@ async function callAppsScript(method, body, opts) {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     meta.attempts = attempt;
     try {
-      const out = await upstreamQueue.run(once, o.lane === 'background' ? 'background' : 'user');
+      const out = await upstreamQueue.run(once, o.lane === 'background' || o.lane === 'write' ? o.lane : 'user');
       if (attempt > 1) {
         console.log(`[proxy] upstream recovered action=${label} attempt=${attempt} upstream=${meta.upstream}`);
       }
@@ -664,7 +670,7 @@ app.post('/api/action', requireAuth, async (req, res) => {
   const meta = {};
   try {
     // Only a read-only action may be retried; a write never is.
-    const result = await callAppsScript('POST', payload, { lane: 'user', retry: !isWrite, meta });
+    const result = await callAppsScript('POST', payload, { lane: isWrite ? 'write' : 'user', retry: !isWrite, meta });
     proxyLog('POST', payload.action, t0, { upstream: meta.upstream });
     res.json(result);
   } catch (err) {

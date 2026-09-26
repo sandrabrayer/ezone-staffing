@@ -180,7 +180,7 @@ test('the allowlist is checked against the fields every Code.gs reader actually 
   assert.ok(m, 'LOCAL_COPY_FIELDS in public/index.html');
   const allow = dom.window.eval('(' + m[1] + ')');
   const readers = {
-    workers: 'readWorkersSafe', assignments: 'readAssignmentsSafe', absences: 'readAbsencesSafe',
+    workers: 'workerFromRow_', assignments: 'assignmentFromRow_', absences: 'readAbsencesSafe',
     coverages: 'readCoveragesSafe', archiveV3: 'readArchiveV3Safe', monthlyActuals: 'readMonthlyActualsSafe',
     budgets: 'readBudgetsSafe', feedLog: 'readFeedLogSafe',
   };
